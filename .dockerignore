@@ -1,0 +1,56 @@
+# =============================================================================
+# Docker ignore file — excludes unnecessary files from Docker build context
+# =============================================================================
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Documentation (not needed in runtime image)
+*.md
+docs/
+
+# Tests (not needed in runtime image)
+tests/
+*.test.py
+
+# Local config (secrets, overrides) — never bake into image
+config/config.local.yaml
+.env
+.env.local
+.env.production
+
+# Persistent data (never bake into image)
+data/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Docker files (avoid recursive build context)
+Dockerfile
+docker-compose*.yml
+
+# Containers for pip compile
+requirements-dev.txt

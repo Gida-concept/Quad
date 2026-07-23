@@ -1,0 +1,16 @@
+# Quad - Pinned Dependencies
+# Last updated: 2026-07-07
+# Generated from pyproject.toml dependencies
+
+# Core
+typer==0.26.8
+structlog==26.1.0
+pyyaml==6.0.3
+python-dotenv==1.2.2
+aiohttp==3.14.1
+aiosqlite==0.22.1
+pydantic==2.13.4
+python-telegram-bot==22.8
+
+# Build
+setuptools>=68

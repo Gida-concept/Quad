@@ -1,0 +1,17 @@
+# Local config overrides — extends config.default.yaml
+# Values here take priority over defaults.
+# Environment variables (QUAD_*) take priority over this file.
+# Runtime overrides via `quad config set` take highest priority.
+
+# Uncomment and adjust any values you want to override:
+#
+# trading:
+#   default_strategy: "iron_condor"
+#   max_positions: 15
+#
+# exchange:
+#   testnet: true
+#
+# risk:
+#   max_daily_loss_usd: 1000.0
+#   max_drawdown_pct: 15.0

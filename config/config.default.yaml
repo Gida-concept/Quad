@@ -1,0 +1,328 @@
+# Quad — Default Configuration
+# ============================================================================
+# Copy this file to config.local.yaml and override values as needed.
+# config.local.yaml values take priority over these defaults.
+# Environment variables (QUAD_*) take priority over config.local.yaml.
+# Runtime overrides via `quad config set` take highest priority.
+#
+# Environment variable substitution:
+#   Values containing ${VAR_NAME} will have the environment variable expanded
+#   at load time. E.g., ${QUAD_DATA_DIR}/quad.db expands to ~/.quad/data/quad.db.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Trading Settings
+# ---------------------------------------------------------------------------
+trading:
+  # Default strategy to use when bot starts (must match a registered strategy)
+  default_strategy: "cash_secured_put"
+
+  # Maximum number of concurrent positions across all strategies
+  max_positions: 10
+
+  # Seconds between trading analysis cycles (deterministic fallback)
+  max_cycle_interval: 60
+
+  # Seconds between AI-first trading analysis cycles (default 1 hour)
+  # When AI is enabled, this overrides max_cycle_interval
+  ai_cycle_interval: 3600
+
+  # Trading pairs (underlyings) to monitor for AI analysis
+  underlyings:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+    - "SOLUSDT"
+
+  # Preferred option expiry cycle: weekly, monthly, or quarterly
+  preferred_expiry: "weekly"
+
+  # Minimum and maximum days to expiry for option selection
+  min_dte: 7
+  max_dte: 45
+
+# ---------------------------------------------------------------------------
+# Exchange Connection Settings
+# ---------------------------------------------------------------------------
+exchange:
+  # Exchange name (must be a registered adapter: binance, paper, mock)
+  name: "binance"
+
+  # Use testnet environment (true) or production (false)
+  testnet: false
+
+  # API credentials (typically set via .env or environment variables)
+  # api_key: ""     # BINANCE_API_KEY
+  # api_secret: ""  # BINANCE_API_SECRET
+
+  # Rate limiting configuration
+  rate_limit:
+    # Maximum weight per request window (Binance default: 2400; leave ~400 headroom)
+    max_weight: 2000
+    # Maximum orders per second (Binance default: 1200; leave ~300 headroom)
+    max_orders: 900
+
+  # WebSocket configuration
+  websocket:
+    # Seconds between WebSocket keep-alive pings
+    ping_interval: 30
+
+# ---------------------------------------------------------------------------
+# Risk Management Settings
+# ---------------------------------------------------------------------------
+risk:
+  # Maximum contracts per single position
+  max_position_size: 5
+
+  # Maximum percentage of total portfolio value at risk in a single trade
+  max_portfolio_risk_pct: 10.0
+
+  # Maximum allowable daily loss in USD (across all positions)
+  max_daily_loss_usd: 500.0
+
+  # Maximum drawdown from peak portfolio value (percentage trigger)
+  max_drawdown_pct: 20.0
+
+  # Portfolio-level Greek exposure limits
+  max_delta_exposure: 10.0      # Aggregate delta across all positions
+  max_theta_decay: -100.0       # Maximum daily theta decay (negative)
+  max_vega_exposure: 500.0     # Aggregate vega exposure
+
+  # Implied volatility percentile range for trade entry
+  iv_percentile_min: 10         # Minimum IV percentile (0-100)
+  iv_percentile_max: 90         # Maximum IV percentile (0-100)
+
+  # Maximum percentage of portfolio concentrated in a single underlying
+  concentration_limit_pct: 30.0
+
+  # Circuit breakers — automated risk controls
+  circuit_breakers:
+    # Drawdown percentage tiers that trigger escalating responses
+    # Tier 1: Warning / reduce exposure
+    # Tier 2: Stop entering new positions
+    # Tier 3: Full emergency shutdown
+    drawdown_tiers: [5.0, 10.0, 15.0]
+
+    # Hard Greek limits that trigger circuit breakers
+    greek_limits:
+      delta: 15.0
+      gamma: 5.0
+      vega: 1000.0
+
+  # Stop-loss configuration
+  stop_loss:
+    enabled: true
+    # Percentage of portfolio value to trigger stop-loss (across all positions)
+    portfolio_pct: 15.0
+
+  # Take-profit configuration
+  take_profit:
+    enabled: true
+    # Percentage of portfolio value to trigger take-profit (across all positions)
+    portfolio_pct: 30.0
+
+# ---------------------------------------------------------------------------
+# Market Data Settings
+# ---------------------------------------------------------------------------
+market_data:
+  # In-memory ring buffer sizes for real-time data
+  buffer_sizes:
+    # Number of price ticks to keep per symbol
+    ticks: 1000
+    # Number of Greek snapshots to keep per symbol
+    greeks: 500
+
+  # Cache TTL values (in seconds)
+  cache_ttl:
+    # How long option chain data remains valid
+    option_chain: 30
+    # How long the underlying price remains valid before refresh
+    underlying_price: 5
+
+  # Historical data access configuration
+  historical:
+    # Maximum days of historical data to cache
+    max_days: 90
+
+# ---------------------------------------------------------------------------
+# Persistence / Database Settings
+# ---------------------------------------------------------------------------
+persistence:
+  # PostgreSQL connection DSN (supports ${VAR_NAME} substitution)
+  dsn: "${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}"
+
+  # Connection pool timeout in milliseconds
+  busy_timeout: 5000
+
+  # Interval between automatic database snapshots (seconds)
+  snapshot_interval: 60
+
+  # Database backup configuration
+  backup:
+    enabled: true
+    # Seconds between automatic backups
+    interval: 3600
+    # Maximum number of backup files to retain
+    max_count: 24
+
+# ---------------------------------------------------------------------------
+# Logging Settings
+# ---------------------------------------------------------------------------
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+
+  # Log output format: json (structured) or console (human-readable)
+  format: "json"
+
+  # File logging configuration
+  file:
+    enabled: true
+    # Log file path (supports ${VAR_NAME} substitution)
+    path: "${QUAD_LOG_DIR}/quad.log"
+    # Maximum log file size in megabytes before rotation
+    max_size_mb: 100
+    # Number of rotated log files to retain
+    backup_count: 10
+
+# ---------------------------------------------------------------------------
+# Telegram Integration Settings
+# ---------------------------------------------------------------------------
+telegram:
+  # Enable Telegram bot for notifications and commands
+  enabled: true
+
+  # Telegram user IDs authorized to send admin commands
+  admin_ids: []
+
+  # Use long-polling (true) or webhook (false) mode
+  polling: true
+
+# ---------------------------------------------------------------------------
+# AI / Groq Integration Settings
+# ---------------------------------------------------------------------------
+ai:
+  # Enable Groq AI analysis features
+  enabled: true
+
+  # Groq model to use for chat completions
+  # Production: llama-3.3-70b-versatile (280 t/s, 131K context)
+  # Fast:       llama-3.1-8b-instant (560 t/s, 131K context)
+  model: "llama-3.3-70b-versatile"
+
+  # Request timeout in seconds
+  timeout: 30
+
+  # Sampling temperature for LLM responses (0.0 = deterministic)
+  # Trading decisions use 0.0 for predictable output
+  temperature: 0.0
+
+  # Maximum daily Groq API requests (free tier = 1000/day)
+  # Set to 950 to leave headroom for manual queries via /analyze etc.
+  max_requests_per_day: 950
+
+  # Whether to fall back to deterministic strategies when AI fails
+  fallback_on_error: true
+
+  # Whether to request structured JSON output
+  structured_output: true
+
+  # Pairs and timeframes monitored by the AI analysis
+  pairs:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+    - "SOLUSDT"
+
+  timeframes:
+    - "15m"
+    - "1h"
+
+  # Number of candles to fetch per pair/timeframe for AI analysis
+  candle_count: 300
+
+  # Minimum open interest to consider a strike valid (avoids illiquid strikes)
+  min_open_interest: 50
+
+# ---------------------------------------------------------------------------
+# TradingView Webhook Settings
+# ---------------------------------------------------------------------------
+tradingview_webhook:
+  # Enable webhook receiver endpoint (POST /webhook/tradingview)
+  enabled: false
+
+  # Port override (defaults to health server port if not set)
+  port: 9090
+
+  # Shared secret for authenticating webhook payloads.
+  # Set this to a random string and include "secret": "<value>" in your
+  # TradingView alert message JSON.  Requests without the correct secret
+  # are rejected with 403.
+  secret: ""
+
+# ---------------------------------------------------------------------------
+# Monitoring / Health Check Settings
+# ---------------------------------------------------------------------------
+monitoring:
+  # Built-in HTTP health check server
+  health_server:
+    enabled: true
+    # Port for the health check HTTP server
+    port: 9090
+
+  # Prometheus metrics endpoint
+  metrics:
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# Strategy-Specific Parameters
+# ---------------------------------------------------------------------------
+strategy:
+  # --- Covered Call ---
+  # Sell OTM call options against held underlying
+  covered_call:
+    delta_target: 0.30          # Target delta for strike selection
+    min_dte: 7                   # Minimum days to expiry
+    max_dte: 45                  # Maximum days to expiry
+    roll_when_dte_lt: 3         # Roll position when DTE drops below this
+    allocation_pct: 0.5         # Fraction of underlying position to cover
+
+  # --- Cash-Secured Put ---
+  # Sell OTM put options with cash collateral
+  cash_secured_put:
+    delta_target: 0.25          # Target delta for strike selection
+    min_dte: 7                   # Minimum days to expiry
+    max_dte: 45                  # Maximum days to expiry
+    roll_when_dte_lt: 3         # Roll position when DTE drops below this
+    cash_reserve_pct: 0.3       # Fraction of cash reserved per position
+
+  # --- Iron Condor ---
+  # Sell OTM put spread + OTM call spread
+  iron_condor:
+    wing_delta_target: 0.15     # Target delta for each wing
+    wing_width_pct: 10.0        # Width of each wing as % of underlying price
+    min_dte: 14                  # Minimum days to expiry
+    max_dte: 45                  # Maximum days to expiry
+
+  # --- Straddle ---
+  # Buy ATM call + ATM put (long volatility)
+  straddle:
+    delta_target: 0.50          # Target delta (ATM) for strike selection
+    min_dte: 7                   # Minimum days to expiry
+    max_dte: 30                  # Maximum days to expiry
+    min_iv_percentile: 50       # Minimum IV percentile for entry
+
+  # --- Strangle ---
+  # Buy OTM call + OTM put (long volatility, cheaper than straddle)
+  strangle:
+    wing_delta_target: 0.20     # Target delta for each wing
+    min_dte: 14                  # Minimum days to expiry
+    max_dte: 45                  # Maximum days to expiry
+    min_iv_percentile: 50       # Minimum IV percentile for entry
+
+  # --- Vertical Spread ---
+  # Buy/sell same-expiry call or put spread
+  vertical_spread:
+    long_leg_delta: 0.30        # Target delta for the long leg
+    wing_width_pct: 5.0         # Width of the spread as % of underlying price
+    direction: "neutral"        # bullish, bearish, or neutral

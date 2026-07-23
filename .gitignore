@@ -1,0 +1,118 @@
+# === Node.js ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+lerna-debug.log*
+
+# === TypeScript ===
+dist/
+build/
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+pyrightconfig.json
+
+# === Python Packages ===
+*.egg-info/
+*.egg
+dist/
+eggs/
+parts/
+bin/
+var/
+sdist/
+wheelhouse/
+*.whl
+
+# === Coverage ===
+coverage/
+.coverage*
+htmlcov/
+.coverage_html/
+.coveragerc
+coverage.xml
+*.cover
+
+# === Jupyter ===
+.ipynb_checkpoints/
+.jupyter/
+
+# === Environment ===
+.env
+.env.local
+.env.*.local
+
+# === Docker ===
+.docker/
+docker-compose.override.yml
+
+# === OS ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# === IDE ===
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# === Project Specific ===
+logs/
+*.log
+data/
+models/archive/
+ml-service/trained_models/checkpoints/
+ml-service/trained_models/archive/
+
+# === Secrets ===
+*.key
+*.pem
+*.p12
+*.pfx
+*.cert
+secrets/
+
+# === Docs (except README) ===
+docs/
+
+# === Project management / agent files ===
+CLAUDE.md
+.pm-agent/
+.mcp.json
+
+# === Misc ===
+.cache/
+tmp/
+temp/
+*.bak
+*.orig

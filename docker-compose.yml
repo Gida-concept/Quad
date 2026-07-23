@@ -1,0 +1,75 @@
+# =============================================================================
+# Docker Compose — Quad Options Trading Bot
+#
+# Single-service deployment with volume mounts for config, data, and logs.
+# Environment variables are read from the host shell (or .env file).
+# =============================================================================
+
+version: "3.8"
+
+services:
+  quad:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quad:latest
+    container_name: quad-bot
+    restart: unless-stopped
+
+    # Health check / metrics port (internal: configurable via QUAD_HEALTH_PORT)
+    ports:
+      - "${QUAD_HEALTH_PORT:-8080}:${QUAD_HEALTH_PORT:-9090}"
+
+    volumes:
+      # Read-only config mount — local overrides, secrets
+      - ./config:/app/config:ro
+      # Persistent data storage (databases, snapshots)
+      - ./data:/app/data
+      # Log output directory
+      - ./logs:/app/logs
+
+    environment:
+      # --- Operation Mode ---
+      # Override with "live" when real trading is desired
+      - QUAD_MODE=${QUAD_MODE:-paper}
+      - QUAD_DRY_RUN=${QUAD_DRY_RUN:-false}
+      - QUAD_LOG_LEVEL=${QUAD_LOG_LEVEL:-INFO}
+      - QUAD_LOG_FORMAT=${QUAD_LOG_FORMAT:-json}
+      - QUAD_LOG_FILE=/app/logs/quad.log
+      - QUAD_DEFAULT_STRATEGY=${QUAD_DEFAULT_STRATEGY:-cash_secured_put}
+      - QUAD_MAX_CYCLE_INTERVAL=${QUAD_MAX_CYCLE_INTERVAL:-60}
+      - QUAD_DATA_DIR=/app/data
+      - QUAD_DB_PATH=/app/data/quad.db
+      - QUAD_CONFIG_DIR=/app/config
+      - QUAD_HEALTH_PORT=${QUAD_HEALTH_PORT:-9090}
+
+      # --- Binance API (REQUIRED for live mode) ---
+      - BINANCE_API_KEY=${BINANCE_API_KEY:-}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET:-}
+      - BINANCE_TESTNET=${BINANCE_TESTNET:-false}
+
+      # --- Telegram Bot (REQUIRED for Telegram commands) ---
+      # These are required — fail fast with error message if missing
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
+      - TELEGRAM_ADMIN_IDS=${TELEGRAM_ADMIN_IDS:?TELEGRAM_ADMIN_IDS is required}
+      - TELEGRAM_NOTIFICATION_CHAT_ID=${TELEGRAM_NOTIFICATION_CHAT_ID:-}
+
+      # --- Timezone ---
+      - TZ=UTC
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${QUAD_HEALTH_PORT:-9090}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Ensure the container stops gracefully on SIGTERM
+    stop_grace_period: 30s
+    init: true

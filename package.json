@@ -1,0 +1,26 @@
+{
+  "name": "quad",
+  "version": "1.0.0",
+  "description": "_Production-Grade Options Trading Bot for Binance Options_",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "pm": "pm",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@gida-concept/pm-agent-cli": "^0.2.9",
+    "@gida-concept/pm-agent-mcp-server": "^0.2.9"
+  },
+  "dependencies": {
+    "@gida-concept/pm-agent-core": "^0.2.9",
+    "@gida-concept/pm-agent-hooks": "^0.2.9",
+    "@gida-concept/pm-agent-proxy": "^0.2.9"
+  }
+}
