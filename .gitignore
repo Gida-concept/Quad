@@ -107,6 +107,7 @@ docs/
 
 # === Project management / agent files ===
 CLAUDE.md
+.claude/
 .pm-agent/
 .mcp.json
 
