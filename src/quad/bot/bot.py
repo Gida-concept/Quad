@@ -199,6 +199,40 @@ class QuadBot:
         return self._application is not None
 
     # ------------------------------------------------------------------
+    # Admin authorization
+    # ------------------------------------------------------------------
+
+    def _is_admin(self, user_id: int | None) -> bool:
+        """Check whether a user ID is in the admin whitelist.
+
+        Returns ``True`` when no admin IDs are configured (open access),
+        or when *user_id* is present in the admin list.
+        """
+        if not self._admin_ids:
+            return True
+        if user_id is None:
+            return False
+        return user_id in self._admin_ids
+
+    async def _check_admin(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> bool:
+        """Verify the sender is an admin; reply ``⛔ Unauthorized`` if not.
+
+        Returns ``True`` when the user is authorized.
+        """
+        if self._is_admin(update.effective_user.id if update.effective_user else None):
+            return True
+
+        self._log.warning(
+            "unauthorized_access",
+            user=update.effective_user.id if update.effective_user else None,
+        )
+        if update.effective_chat:
+            await update.effective_chat.send_message("⛔ Unauthorized")
+        return False
+
+    # ------------------------------------------------------------------
     # Internal: handler / job registration
     # ------------------------------------------------------------------
 

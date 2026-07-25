@@ -7,7 +7,9 @@ manager support.
 
 from __future__ import annotations
 
+import asyncio
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -34,9 +36,6 @@ class DatabaseManager:
     dsn:
         PostgreSQL connection string, e.g.
         ``"postgresql://quad:quad@localhost:5432/quad"``.
-    busy_timeout:
-        Not applicable directly to PG, but kept for config compatibility.
-        Controls the pool ``max_size`` property indirectly.
     min_pool_size:
         Minimum number of connections in the pool (default 1).
     max_pool_size:
@@ -46,12 +45,10 @@ class DatabaseManager:
     def __init__(
         self,
         dsn: str,
-        busy_timeout: int = 5000,
         min_pool_size: int = 1,
         max_pool_size: int = 5,
     ) -> None:
         self._dsn = dsn
-        self._busy_timeout = busy_timeout
         self._min_pool_size = min_pool_size
         self._max_pool_size = max_pool_size
         self._pool: Optional[asyncpg.Pool] = None
@@ -91,24 +88,64 @@ class DatabaseManager:
     # Connection lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> None:
-        """Create the asyncpg connection pool."""
+    async def connect(self, ssl: str | bool | None = None) -> None:
+        """Create the asyncpg connection pool.
+
+        Parameters
+        ----------
+        ssl:
+            SSL/TLS mode passed through to asyncpg.  Accepts the same types
+            asyncpg does (``True``, ``"require"``, ``"prefer"``, etc.).
+            If *None*, auto-detects ``sslmode=require`` from the DSN query
+            string and enables SSL when found.
+        """
         if self._pool is not None:
             self._log.warning("connect_already_open")
             return
+
+        # Auto-detect SSL from DSN query parameters
+        if ssl is None:
+            parsed = urllib.parse.urlparse(self._dsn)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if qs.get("sslmode", [None])[0] == "require":
+                ssl = True
 
         self._log.info(
             "connecting",
             min_size=self._min_pool_size,
             max_size=self._max_pool_size,
+            ssl=bool(ssl),
         )
-        self._pool = await asyncpg.create_pool(
-            dsn=self._dsn,
-            min_size=self._min_pool_size,
-            max_size=self._max_pool_size,
-            command_timeout=60,
-        )
-        self._log.info("connected")
+
+        for attempt in range(1, 6):
+            try:
+                self._pool = await asyncpg.create_pool(
+                    dsn=self._dsn,
+                    min_size=self._min_pool_size,
+                    max_size=self._max_pool_size,
+                    command_timeout=60,
+                    ssl=ssl,
+                )
+                break
+            except Exception as exc:
+                if attempt == 5:
+                    self._log.error(
+                        "connect_retries_exhausted",
+                        max_attempts=5,
+                        error=str(exc),
+                    )
+                    raise
+                sleep_secs = 2 ** (attempt - 1)  # 1, 2, 4, 8
+                self._log.warning(
+                    "connect_retry",
+                    attempt=attempt,
+                    max_attempts=5,
+                    backoff_seconds=sleep_secs,
+                    error=str(exc),
+                )
+                await asyncio.sleep(sleep_secs)
+
+        self._log.info("connected", ssl=bool(ssl))
 
     async def disconnect(self) -> None:
         """Close the connection pool gracefully."""
@@ -120,6 +157,25 @@ class DatabaseManager:
         await self._pool.close()
         self._pool = None
         self._log.info("disconnected")
+
+    async def is_healthy(self) -> bool:
+        """Check whether the database pool is responsive.
+
+        Acquires a connection, runs ``SELECT 1``, and releases it.
+        Returns ``True`` if the query succeeds, ``False`` otherwise (no
+        exception is raised).
+        """
+        if self._pool is None:
+            self._log.warning("health_check_no_pool")
+            return False
+
+        try:
+            async with self._pool.acquire() as conn:
+                val = await conn.fetchval("SELECT 1")
+                return val == 1
+        except Exception:
+            self._log.warning("health_check_failed", exc_info=True)
+            return False
 
     async def initialize(self) -> None:
         """Create all tables, indexes, and schema version table if they

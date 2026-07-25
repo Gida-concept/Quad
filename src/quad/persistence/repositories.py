@@ -15,8 +15,10 @@ import structlog
 from .database import DatabaseManager
 from .models import (
     AccountModel,
+    CircuitBreakerEventModel,
     ConfigChangeModel,
     DecisionModel,
+    ErrorLogModel,
     OptionContractModel,
     OptimizationRecommendationModel,
     OptimizationRunModel,
@@ -24,6 +26,7 @@ from .models import (
     PerformanceSnapshotModel,
     PositionModel,
     SessionModel,
+    StrategyStateModel,
     TradeModel,
 )
 
@@ -162,7 +165,6 @@ class BaseRepository(Generic[T]):
         t0 = time.monotonic()
         try:
             keys = list(updates.keys())
-            set_clause = self._placeholder_clause(keys)
             # $N placeholders: last one is id
             set_clause = self._placeholder_clause(keys, start=1)
             values = list(updates.values())
@@ -239,9 +241,27 @@ class AccountRepository(BaseRepository[AccountModel]):
         super().__init__(db_manager, model_cls or AccountModel)
 
     async def get_by_exchange(self, exchange: str) -> Optional[AccountModel]:
-        """Return the account for a given exchange name."""
-        results = await self.list(exchange=exchange)
-        return results[0] if results else None
+        """Return the account for a given exchange name.
+
+        Uses a direct query with ``fetchrow`` since exchange is expected to be
+        unique in practice (even if the schema does not enforce a UNIQUE constraint).
+        """
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    f"SELECT {self._column_list()} FROM {self._table} WHERE exchange = $1",
+                    exchange,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_by_exchange")
+            if row is None:
+                return None
+            return AccountModel.from_row(row)
+        except Exception:
+            self._log.exception("get_by_exchange_failed")
+            raise
 
     async def update_balance(
         self,
@@ -691,7 +711,7 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
         """Return runs within a timestamp range."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM optimization_runs "
+                f"SELECT {self._column_list()} FROM {self._table} "
                 "WHERE run_at >= $1 AND run_at <= $2 "
                 "ORDER BY run_at DESC",
                 start, end,
@@ -702,7 +722,7 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
         """Return the most recent runs."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM optimization_runs "
+                f"SELECT {self._column_list()} FROM {self._table} "
                 "ORDER BY run_at DESC LIMIT $1",
                 limit,
             )
@@ -712,7 +732,7 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
         """Return runs with a given status."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM optimization_runs WHERE status = $1 "
+                f"SELECT {self._column_list()} FROM {self._table} WHERE status = $1 "
                 "ORDER BY run_at DESC",
                 status,
             )
@@ -722,7 +742,8 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
         """Return the most recent run (any status)."""
         async with self._db.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM optimization_runs ORDER BY run_at DESC LIMIT 1"
+                f"SELECT {self._column_list()} FROM {self._table} "
+                "ORDER BY run_at DESC LIMIT 1"
             )
             return self._model_cls.from_row(row) if row else None
 
@@ -741,7 +762,7 @@ class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommenda
         """Return all recommendations for a given run."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM optimization_recommendations "
+                f"SELECT {self._column_list()} FROM {self._table} "
                 "WHERE run_id = $1 ORDER BY id",
                 run_id,
             )
@@ -751,7 +772,7 @@ class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommenda
         """Return all recommendations with status = 'pending'."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM optimization_recommendations "
+                f"SELECT {self._column_list()} FROM {self._table} "
                 "WHERE status = 'pending' ORDER BY run_id DESC, id"
             )
             return [self._model_cls.from_row(row) for row in rows]
@@ -760,7 +781,7 @@ class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommenda
         """Return recommendations of a given type."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM optimization_recommendations "
+                f"SELECT {self._column_list()} FROM {self._table} "
                 "WHERE recommendation_type = $1 ORDER BY id",
                 recommendation_type,
             )
@@ -770,7 +791,7 @@ class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommenda
         """Return recommendations with a given status."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM optimization_recommendations "
+                f"SELECT {self._column_list()} FROM {self._table} "
                 "WHERE status = $1 ORDER BY run_id DESC",
                 status,
             )
@@ -803,7 +824,7 @@ class ConfigChangeRepository(BaseRepository[ConfigChangeModel]):
         """Return the most recent config changes."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM config_changes ORDER BY id DESC LIMIT $1",
+                f"SELECT {self._column_list()} FROM {self._table} ORDER BY id DESC LIMIT $1",
                 limit,
             )
             return [self._model_cls.from_row(row) for row in rows]
@@ -812,7 +833,248 @@ class ConfigChangeRepository(BaseRepository[ConfigChangeModel]):
         """Return config changes for a specific key."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM config_changes WHERE key = $1 ORDER BY id DESC LIMIT $2",
+                f"SELECT {self._column_list()} FROM {self._table} WHERE key = $1 ORDER BY id DESC LIMIT $2",
                 key, limit,
             )
             return [self._model_cls.from_row(row) for row in rows]
+
+
+class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
+    """Repository for circuit breaker trigger events."""
+
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        model_cls: type[CircuitBreakerEventModel] | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or CircuitBreakerEventModel)
+
+    async def get_by_type(
+        self, breaker_name: str, limit: int = 50
+    ) -> list[CircuitBreakerEventModel]:
+        """Return the most recent events for a specific circuit breaker by name."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "WHERE breaker_name = $1 ORDER BY timestamp DESC LIMIT $2",
+                    breaker_name, limit,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_by_type")
+            return [CircuitBreakerEventModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_circuit_events_by_type_failed")
+            raise
+
+    async def get_recent(self, limit: int = 100) -> list[CircuitBreakerEventModel]:
+        """Return the most recent circuit breaker events."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "ORDER BY timestamp DESC LIMIT $1",
+                    limit,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_recent")
+            return [CircuitBreakerEventModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_recent_circuit_events_failed")
+            raise
+
+    async def get_by_date_range(
+        self, start: int, end: int
+    ) -> list[CircuitBreakerEventModel]:
+        """Return circuit breaker events within a timestamp range (inclusive)."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "WHERE timestamp >= $1 AND timestamp <= $2 "
+                    "ORDER BY timestamp ASC",
+                    start, end,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
+            return [CircuitBreakerEventModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_circuit_events_by_date_range_failed")
+            raise
+
+
+class ErrorLogRepository(BaseRepository[ErrorLogModel]):
+    """Repository for application error log entries."""
+
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        model_cls: type[ErrorLogModel] | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or ErrorLogModel)
+
+    async def get_by_level(
+        self, level: str, limit: int = 50
+    ) -> list[ErrorLogModel]:
+        """Return the most recent error logs for a given severity level."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "WHERE level = $1 ORDER BY timestamp DESC LIMIT $2",
+                    level, limit,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_by_level")
+            return [ErrorLogModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_error_logs_by_level_failed")
+            raise
+
+    async def get_recent(self, limit: int = 100) -> list[ErrorLogModel]:
+        """Return the most recent error logs."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "ORDER BY timestamp DESC LIMIT $1",
+                    limit,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_recent")
+            return [ErrorLogModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_recent_error_logs_failed")
+            raise
+
+    async def get_by_date_range(
+        self, start: int, end: int
+    ) -> list[ErrorLogModel]:
+        """Return error logs within a timestamp range (inclusive)."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "WHERE timestamp >= $1 AND timestamp <= $2 "
+                    "ORDER BY timestamp ASC",
+                    start, end,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
+            return [ErrorLogModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_error_logs_by_date_range_failed")
+            raise
+
+    async def get_by_source(
+        self, source: str, limit: int = 50
+    ) -> list[ErrorLogModel]:
+        """Return the most recent error logs from a specific component (event name)."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "WHERE event = $1 ORDER BY timestamp DESC LIMIT $2",
+                    source, limit,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_by_source")
+            return [ErrorLogModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_error_logs_by_source_failed")
+            raise
+
+
+class StrategyStateRepository(BaseRepository[StrategyStateModel]):
+    """Repository for strategy persistent state records."""
+
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        model_cls: type[StrategyStateModel] | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or StrategyStateModel)
+
+    async def get_by_strategy(self, name: str) -> Optional[StrategyStateModel]:
+        """Return the state for a single strategy by name."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "WHERE strategy_name = $1",
+                    name,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_by_strategy")
+            if row is None:
+                return None
+            return StrategyStateModel.from_row(row)
+        except Exception:
+            self._log.exception("get_strategy_state_failed")
+            raise
+
+    async def get_enabled(self) -> list[StrategyStateModel]:
+        """Return all enabled strategy states."""
+        return await self.list(enabled=1)
+
+    async def get_all(self) -> list[StrategyStateModel]:
+        """Return all strategy states."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "ORDER BY strategy_name ASC",
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_all")
+            return [StrategyStateModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_all_strategy_states_failed")
+            raise
+
+    async def upsert(self, state: StrategyStateModel) -> int:
+        """Insert or update a strategy state record.
+
+        Uses ``INSERT ... ON CONFLICT (strategy_name) DO UPDATE`` since
+        ``strategy_name`` is the natural key (UNIQUE constraint).
+
+        Returns the row id.
+        """
+        t0 = time.monotonic()
+        try:
+            columns = self._column_list()
+            placeholders = self._param_placeholders()
+            set_pairs = self._column_set_pairs(self._columns)
+            async with self._db.pool.acquire() as conn:
+                last_id = await conn.fetchval(
+                    f"INSERT INTO {self._table} ({columns}) "
+                    f"VALUES ({placeholders}) "
+                    f"ON CONFLICT (strategy_name) DO UPDATE SET {set_pairs} "
+                    f"RETURNING id",
+                    *state.to_row(),
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="upsert")
+            return last_id  # type: ignore[return-value]
+        except Exception:
+            self._log.exception("upsert_strategy_state_failed")
+            raise

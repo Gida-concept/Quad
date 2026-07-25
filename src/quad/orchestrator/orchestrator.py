@@ -368,11 +368,9 @@ class QuadOrchestrator:
             "persistence.dsn",
             os.environ.get("DATABASE_URL", "postgresql://quad:quad@localhost:5432/quad"),
         )
-        busy_timeout = self._config_manager.get("persistence.busy_timeout", 5000)
 
         self._db_manager = DatabaseManager(
             dsn=str(dsn),
-            busy_timeout=int(busy_timeout),
         )
         await self._db_manager.connect()
         await self._db_manager.initialize()

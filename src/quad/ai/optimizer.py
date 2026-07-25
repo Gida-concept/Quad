@@ -117,8 +117,9 @@ class Optimizer:
             summary_json="{}",
             error_message="",
         )
-        run = await self._run_repo.create(run)
-        self._log = self._log.bind(run_id=run.id)
+        run_id = await self._run_repo.create(run)
+        run.id = run_id
+        self._log = self._log.bind(run_id=run_id)
 
         try:
             # ---- Phase 1: Data Collection ----

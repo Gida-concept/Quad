@@ -48,7 +48,7 @@ ENV PATH=/root/.local/bin:$PATH \
 
 # Copy application source and configuration
 COPY src/ ./src/
-COPY pyproject.toml requirements.txt setup.py ./
+COPY pyproject.toml requirements.txt ./
 COPY config/config.default.yaml ./config/config.default.yaml
 
 # Install the package in editable mode to register entry points

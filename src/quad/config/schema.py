@@ -389,12 +389,6 @@ class PersistenceConfig(BaseModel):
         default="${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}",
         description="PostgreSQL connection DSN",
     )
-    busy_timeout: int = Field(
-        default=5000,
-        ge=0,
-        le=60000,
-        description="Connection pool timeout in milliseconds",
-    )
     snapshot_interval: int = Field(
         default=60,
         ge=5,

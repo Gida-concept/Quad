@@ -151,9 +151,6 @@ persistence:
   # PostgreSQL connection DSN (supports ${VAR_NAME} substitution)
   dsn: "${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}"
 
-  # Connection pool timeout in milliseconds
-  busy_timeout: 5000
-
   # Interval between automatic database snapshots (seconds)
   snapshot_interval: 60
 
