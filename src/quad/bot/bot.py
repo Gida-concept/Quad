@@ -63,6 +63,8 @@ class QuadBot:
         Optional market data engine for option chain queries.
     db_manager:
         Optional database manager for persistence queries.
+    optimizer:
+        Optional strategy self-optimizer for auto-retrain cycles.
     """
 
     def __init__(
@@ -74,6 +76,7 @@ class QuadBot:
         market_data_engine: Any = None,
         db_manager: Any = None,
         groq_client: Any = None,
+        optimizer: Any = None,
     ) -> None:
         self._log = logger.bind()
         self._config = config
@@ -86,6 +89,7 @@ class QuadBot:
         self._market_data_engine = market_data_engine
         self._db_manager = db_manager
         self._groq_client = groq_client
+        self._optimizer = optimizer
 
         # Bot token and admin verification
         self._bot_token: str = self._telegram_config.get("bot_token", "")
@@ -104,6 +108,7 @@ class QuadBot:
             "market_data_engine": market_data_engine,
             "db_manager": db_manager,
             "groq_client": groq_client,
+            "optimizer": optimizer,
             "admin_ids": self._admin_ids,
             "notification_chat_id": self._notification_chat_id,
         }
@@ -283,10 +288,33 @@ class QuadBot:
             name="daily_report",
         )
 
+        # Optimization cycle: configurable interval (default every 7 days)
+        if self._optimizer is not None:
+            interval_days = int(
+                self._config.get("retrain", {}).get("interval_days", 7)
+            )
+            interval_s = interval_days * 86400
+            first_s = int(
+                self._config.get("retrain", {}).get("initial_delay_hours", 1)
+            ) * 3600
+
+            job_queue.run_repeating(
+                self._jobs.job_optimization_cycle,
+                interval=interval_s,
+                first=first_s,
+                name="optimization_cycle",
+            )
+            self._log.info(
+                "optimization_job_registered",
+                interval_days=interval_days,
+                first_s=first_s,
+            )
+
         self._log.debug(
             "jobs_registered",
             status_summary_interval_s=3600,
             risk_alert_interval_s=300,
             daily_report_hour=daily_hour,
             daily_report_minute=daily_minute,
+            optimization_registered=self._optimizer is not None,
         )

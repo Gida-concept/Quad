@@ -31,7 +31,7 @@ from typing import Any
 import structlog
 
 from quad.config.manager import ConfigManager
-from quad.config.schema import AiConfig, TradingViewWebhookConfig
+from quad.config.schema import AiConfig, QuadConfig, TradingViewWebhookConfig
 from quad.exchange.factory import create_exchange
 from quad.market_data.engine import MarketDataEngine
 from quad.persistence.database import DatabaseManager
@@ -110,6 +110,7 @@ class QuadOrchestrator:
 
         # Optional subsystems
         self._groq_client: Any = None
+        self._optimizer: Any = None
         self._tv_webhook: Any = None
 
         # Cached config dict (used by multiple subsystems)
@@ -168,10 +169,11 @@ class QuadOrchestrator:
             await self._init_risk_manager()
             await self._init_execution_engine()
             await self._init_strategies()
+            await self._init_groq_ai()
+            await self._init_optimizer()
             await self._init_telegram_bot()
             await self._init_health_server()
             await self._init_metrics()
-            await self._init_groq_ai()
             await self._init_tradingview_webhook()
 
             self._started = True
@@ -450,6 +452,63 @@ class QuadOrchestrator:
             names=list(self._active_strategies.keys()),
         )
 
+    async def _init_optimizer(self) -> None:
+        """Initialise the strategy self-optimizer (if dependencies are met).
+
+        Requires:
+        - ``_groq_client`` (initialised by ``_init_groq_ai``)
+        - ``_db_manager`` (initialised by ``_init_database``)
+        - ``retrain`` section in config
+        """
+        retrain_cfg = self._config_dict.get("retrain", {})
+        if not retrain_cfg.get("enabled", True):
+            self._log.info("optimizer_disabled_config")
+            self._optimizer = None
+            return
+
+        if self._groq_client is None:
+            self._log.info("optimizer_disabled_no_groq")
+            self._optimizer = None
+            return
+
+        if self._db_manager is None:
+            self._log.info("optimizer_disabled_no_db")
+            self._optimizer = None
+            return
+
+        try:
+            from quad.ai.optimizer import Optimizer
+            from quad.persistence.repositories import (
+                ConfigChangeRepository,
+                DecisionRepository,
+                OptimizationRecommendationRepository,
+                OptimizationRunRepository,
+                PerformanceSnapshotRepository,
+                TradeRepository,
+            )
+
+            # Validate config as QuadConfig (Pydantic model needed by Optimizer)
+            config = QuadConfig.model_validate(self._config_dict)
+
+            db = self._db_manager
+
+            self._optimizer = Optimizer(
+                config=config,
+                groq_client=self._groq_client,
+                decision_repo=DecisionRepository(db),
+                trade_repo=TradeRepository(db),
+                performance_repo=PerformanceSnapshotRepository(db),
+                run_repo=OptimizationRunRepository(db),
+                recommendation_repo=OptimizationRecommendationRepository(db),
+                config_change_repo=ConfigChangeRepository(db),
+                config_dict=self._config_dict,
+            )
+            self._log.info("optimizer_initialized")
+
+        except Exception as exc:
+            self._log.exception("optimizer_init_failed", error=str(exc))
+            self._optimizer = None
+
     async def _init_telegram_bot(self) -> None:
         """Initialise the Telegram bot (if enabled and configured)."""
         telegram_cfg = self._config_dict.get("telegram", {})
@@ -474,6 +533,7 @@ class QuadOrchestrator:
             market_data_engine=self._market_data,
             db_manager=self._db_manager,
             groq_client=self._groq_client,
+            optimizer=self._optimizer,
         )
         await self._bot.start()
         self._log.info("telegram_bot_initialized")

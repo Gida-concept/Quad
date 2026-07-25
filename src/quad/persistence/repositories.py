@@ -15,8 +15,11 @@ import structlog
 from .database import DatabaseManager
 from .models import (
     AccountModel,
+    ConfigChangeModel,
     DecisionModel,
     OptionContractModel,
+    OptimizationRecommendationModel,
+    OptimizationRunModel,
     OrderModel,
     PerformanceSnapshotModel,
     PositionModel,
@@ -670,3 +673,146 @@ class PerformanceSnapshotRepository(BaseRepository[PerformanceSnapshotModel]):
         except Exception:
             self._log.exception("get_snapshots_by_date_range_failed")
             raise
+
+
+class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
+    """Repository for optimization_run operations."""
+
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        model_cls: type[OptimizationRunModel] | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or OptimizationRunModel)
+
+    async def get_by_date_range(
+        self, start: int, end: int
+    ) -> list[OptimizationRunModel]:
+        """Return runs within a timestamp range."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM optimization_runs "
+                "WHERE run_at >= $1 AND run_at <= $2 "
+                "ORDER BY run_at DESC",
+                start, end,
+            )
+            return [self._model_cls.from_row(row) for row in rows]
+
+    async def get_recent(self, limit: int = 10) -> list[OptimizationRunModel]:
+        """Return the most recent runs."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM optimization_runs "
+                "ORDER BY run_at DESC LIMIT $1",
+                limit,
+            )
+            return [self._model_cls.from_row(row) for row in rows]
+
+    async def get_by_status(self, status: str) -> list[OptimizationRunModel]:
+        """Return runs with a given status."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM optimization_runs WHERE status = $1 "
+                "ORDER BY run_at DESC",
+                status,
+            )
+            return [self._model_cls.from_row(row) for row in rows]
+
+    async def get_latest(self) -> OptimizationRunModel | None:
+        """Return the most recent run (any status)."""
+        async with self._db.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM optimization_runs ORDER BY run_at DESC LIMIT 1"
+            )
+            return self._model_cls.from_row(row) if row else None
+
+
+class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommendationModel]):
+    """Repository for optimization_recommendation operations."""
+
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        model_cls: type[OptimizationRecommendationModel] | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or OptimizationRecommendationModel)
+
+    async def get_by_run(self, run_id: int) -> list[OptimizationRecommendationModel]:
+        """Return all recommendations for a given run."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM optimization_recommendations "
+                "WHERE run_id = $1 ORDER BY id",
+                run_id,
+            )
+            return [self._model_cls.from_row(row) for row in rows]
+
+    async def get_pending(self) -> list[OptimizationRecommendationModel]:
+        """Return all recommendations with status = 'pending'."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM optimization_recommendations "
+                "WHERE status = 'pending' ORDER BY run_id DESC, id"
+            )
+            return [self._model_cls.from_row(row) for row in rows]
+
+    async def get_by_type(self, recommendation_type: str) -> list[OptimizationRecommendationModel]:
+        """Return recommendations of a given type."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM optimization_recommendations "
+                "WHERE recommendation_type = $1 ORDER BY id",
+                recommendation_type,
+            )
+            return [self._model_cls.from_row(row) for row in rows]
+
+    async def get_by_status(self, status: str) -> list[OptimizationRecommendationModel]:
+        """Return recommendations with a given status."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM optimization_recommendations "
+                "WHERE status = $1 ORDER BY run_id DESC",
+                status,
+            )
+            return [self._model_cls.from_row(row) for row in rows]
+
+    async def mark_applied(self, recommendation_id: int, applied_at: int,
+                           strategy_params_json: str) -> None:
+        """Mark a recommendation as applied."""
+        async with self._db.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE optimization_recommendations "
+                "SET status = 'applied', applied_at = $1, "
+                "    applied_strategy_params_json = $2 "
+                "WHERE id = $3",
+                applied_at, strategy_params_json, recommendation_id,
+            )
+
+
+class ConfigChangeRepository(BaseRepository[ConfigChangeModel]):
+    """Repository for config_change audit log entries."""
+
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        model_cls: type[ConfigChangeModel] | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or ConfigChangeModel)
+
+    async def get_recent(self, limit: int = 50) -> list[ConfigChangeModel]:
+        """Return the most recent config changes."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM config_changes ORDER BY id DESC LIMIT $1",
+                limit,
+            )
+            return [self._model_cls.from_row(row) for row in rows]
+
+    async def get_by_key(self, key: str, limit: int = 20) -> list[ConfigChangeModel]:
+        """Return config changes for a specific key."""
+        async with self._db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM config_changes WHERE key = $1 ORDER BY id DESC LIMIT $2",
+                key, limit,
+            )
+            return [self._model_cls.from_row(row) for row in rows]

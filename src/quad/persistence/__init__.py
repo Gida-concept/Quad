@@ -7,8 +7,11 @@ definitions for PostgreSQL-based persistence (via asyncpg).
 from .database import DatabaseManager
 from .repositories import (
     AccountRepository,
+    ConfigChangeRepository,
     DecisionRepository,
     OptionsContractRepository,
+    OptimizationRecommendationRepository,
+    OptimizationRunRepository,
     OrderRepository,
     PerformanceSnapshotRepository,
     PositionRepository,
@@ -19,8 +22,11 @@ from .repositories import (
 __all__ = [
     "DatabaseManager",
     "AccountRepository",
+    "ConfigChangeRepository",
     "DecisionRepository",
     "OptionsContractRepository",
+    "OptimizationRecommendationRepository",
+    "OptimizationRunRepository",
     "OrderRepository",
     "PerformanceSnapshotRepository",
     "PositionRepository",

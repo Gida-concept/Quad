@@ -21,7 +21,7 @@ else:
 # Schema versioning
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 """Current schema version. Increment when making breaking changes."""
 
 SCHEMA_MIGRATIONS: dict[int, list[str]] = {
@@ -575,6 +575,119 @@ class ErrorLogModel:
         return _from_row(cls, row)
 
 
+@dataclass
+class OptimizationRunModel:
+    """One execution of the self-optimization cycle."""
+
+    __tablename__: ClassVar[str] = "optimization_runs"
+
+    id: int
+    run_at: int
+    trigger: str                # "scheduled" | "manual" | "startup"
+    decisions_analyzed: int
+    trades_analyzed: int
+    recommendations_count: int
+    applied_count: int
+    status: str                 # "running" | "completed" | "failed" | "skipped"
+    started_at: int
+    completed_at: int | None
+    summary_json: str           # JSON: brief LLM summary + aggregated metrics
+    error_message: str
+
+    @classmethod
+    def create_table_ddl(cls) -> str:
+        return """CREATE TABLE IF NOT EXISTS optimization_runs (
+    id SERIAL PRIMARY KEY,
+    run_at BIGINT NOT NULL,
+    trigger TEXT NOT NULL DEFAULT 'scheduled',
+    decisions_analyzed INTEGER NOT NULL DEFAULT 0,
+    trades_analyzed INTEGER NOT NULL DEFAULT 0,
+    recommendations_count INTEGER NOT NULL DEFAULT 0,
+    applied_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running',
+    started_at BIGINT NOT NULL,
+    completed_at BIGINT,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT NOT NULL DEFAULT ''
+)"""
+
+    @classmethod
+    def columns(cls) -> list[str]:
+        return _col_names(cls)
+
+    def to_row(self) -> tuple:
+        return _to_row(self)
+
+    @classmethod
+    def from_row(cls, row: tuple) -> Self:
+        cls_fields = fields(cls)
+        field_values = list(row)
+        for i, f in enumerate(cls_fields):
+            if f.type in ("int | None", "Optional[int]") and field_values[i] is not None:
+                try:
+                    field_values[i] = int(field_values[i])
+                except (TypeError, ValueError):
+                    pass
+        return cls(*field_values)
+
+
+@dataclass
+class OptimizationRecommendationModel:
+    """A single recommendation from an optimization run."""
+
+    __tablename__: ClassVar[str] = "optimization_recommendations"
+
+    id: int
+    run_id: int                      # FK -> optimization_runs.id
+    recommendation_type: str         # "parameter_adjustment" | "prompt_update" | "risk_threshold" | "strategy_toggle"
+    target_area: str                 # e.g. "iron_condor.max_iv", "system_prompt", "circuit_breaker.max_daily_loss"
+    current_value: str               # Before value (JSON string)
+    recommended_value: str           # After value (JSON string)
+    rationale: str                   # LLM explanation
+    impact_estimate: str             # e.g. "+2.3% win rate", "medium"
+    confidence: str                  # "low" | "medium" | "high"
+    status: str                      # "pending" | "applied" | "rejected" | "failed"
+    applied_at: int | None
+    applied_strategy_params_json: str  # Snapshot of strategy params at apply time
+
+    @classmethod
+    def create_table_ddl(cls) -> str:
+        return """CREATE TABLE IF NOT EXISTS optimization_recommendations (
+    id SERIAL PRIMARY KEY,
+    run_id INTEGER NOT NULL,
+    recommendation_type TEXT NOT NULL,
+    target_area TEXT NOT NULL,
+    current_value TEXT NOT NULL DEFAULT '',
+    recommended_value TEXT NOT NULL DEFAULT '',
+    rationale TEXT NOT NULL DEFAULT '',
+    impact_estimate TEXT NOT NULL DEFAULT '',
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'pending',
+    applied_at BIGINT,
+    applied_strategy_params_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (run_id) REFERENCES optimization_runs(id)
+)"""
+
+    @classmethod
+    def columns(cls) -> list[str]:
+        return _col_names(cls)
+
+    def to_row(self) -> tuple:
+        return _to_row(self)
+
+    @classmethod
+    def from_row(cls, row: tuple) -> Self:
+        cls_fields = fields(cls)
+        field_values = list(row)
+        for i, f in enumerate(cls_fields):
+            if f.type in ("int | None", "Optional[int]") and field_values[i] is not None:
+                try:
+                    field_values[i] = int(field_values[i])
+                except (TypeError, ValueError):
+                    pass
+        return cls(*field_values)
+
+
 # ---------------------------------------------------------------------------
 # Index DDL definitions
 # ---------------------------------------------------------------------------
@@ -591,6 +704,11 @@ INDEX_DEFINITIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_option_contracts_underlying ON option_contracts(underlying)",
     "CREATE INDEX IF NOT EXISTS idx_option_contracts_expiry ON option_contracts(expiry)",
     "CREATE INDEX IF NOT EXISTS idx_perf_snapshots_timestamp ON performance_snapshots(timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_opt_runs_status ON optimization_runs(status)",
+    "CREATE INDEX IF NOT EXISTS idx_opt_runs_run_at ON optimization_runs(run_at)",
+    "CREATE INDEX IF NOT EXISTS idx_opt_recommendations_run_id ON optimization_recommendations(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_opt_recommendations_type ON optimization_recommendations(recommendation_type)",
+    "CREATE INDEX IF NOT EXISTS idx_opt_recommendations_status ON optimization_recommendations(status)",
 ]
 """All CREATE INDEX statements for hot-path queries."""
 
@@ -623,5 +741,7 @@ ALL_MODELS: list[type] = [
     CircuitBreakerEventModel,
     ConfigChangeModel,
     ErrorLogModel,
+    OptimizationRunModel,
+    OptimizationRecommendationModel,
 ]
 """All model classes, in dependency-safe order."""

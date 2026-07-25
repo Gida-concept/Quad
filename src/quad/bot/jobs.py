@@ -47,6 +47,7 @@ class QuadBotJobs:
         # Subsystem references
         self._orchestrator = shared_state.get("orchestrator")
         self._risk_manager = shared_state.get("risk_manager")
+        self._optimizer = shared_state.get("optimizer")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -225,3 +226,72 @@ class QuadBotJobs:
             trades=trade_count,
             breakers_active=circuit_breakers_active,
         )
+
+    async def job_optimization_cycle(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Run the strategy self-optimization cycle and notify on completion.
+
+        Scheduled according to ``retrain.interval_days`` in config.  Skips
+        silently if no optimizer is available or if the optimizer circuit
+        breaker is active.
+        """
+        if self._optimizer is None:
+            self._log.debug("optimizer_not_available")
+            return
+
+        if self._optimizer.is_paused:
+            msg = (
+                "⚠️ *Optimization Cycle Skipped*\n\n"
+                "The optimizer has reached its maximum consecutive failure "
+                "threshold. Please investigate and reset manually."
+            )
+            await self._send_if_configured(context, msg)
+            self._log.warning("optimizer_paused_skipping")
+            return
+
+        self._log.info("optimization_cycle_starting")
+
+        try:
+            run = await self._optimizer.run_cycle(trigger="scheduled")
+
+            status_emoji = {
+                "completed": "✅",
+                "skipped": "⏭️",
+                "failed": "❌",
+                "running": "🔄",
+            }.get(run.status, "❓")
+
+            msg_lines = [
+                f"{status_emoji} *Optimization Cycle*",
+                f"*Status:* {run.status}",
+                f"*Trigger:* {run.trigger}",
+            ]
+
+            if run.decisions_analyzed > 0:
+                msg_lines.append(f"*Decisions Analyzed:* {run.decisions_analyzed}")
+            if run.trades_analyzed > 0:
+                msg_lines.append(f"*Trades Analyzed:* {run.trades_analyzed}")
+            if run.recommendations_count > 0:
+                msg_lines.append(
+                    f"*Recommendations:* {run.recommendations_count} "
+                    f"({run.applied_count} applied)"
+                )
+            if run.error_message:
+                msg_lines.append(f"*Error:* {run.error_message[:200]}")
+
+            msg = "\n".join(msg_lines)
+            await self._send_if_configured(context, msg)
+
+            self._log.info(
+                "optimization_cycle_completed",
+                status=run.status,
+                recommendations=run.recommendations_count,
+                applied=run.applied_count,
+            )
+
+        except Exception as exc:
+            self._log.exception("optimization_cycle_error", error=str(exc))
+            msg = (
+                "❌ *Optimization Cycle Failed*\n\n"
+                f"An unexpected error occurred:\n`{str(exc)[:300]}`"
+            )
+            await self._send_if_configured(context, msg)

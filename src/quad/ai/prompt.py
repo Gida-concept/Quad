@@ -329,3 +329,123 @@ def build_trading_prompt(
         "system": system_prompt,
         "user": user_prompt,
     }
+
+
+# ============================================================================
+# Optimisation Cycle Prompts
+# ============================================================================
+
+OPTIMIZATION_SYSTEM_PROMPT: str = """You are a trading strategy optimization analyst. Your job is to review recent trading performance and recommend concrete, actionable improvements.
+
+You will receive:
+1. A summary of recent trading decisions (actions taken, reasoning provided)
+2. A summary of executed trades (PnL, fees, fill quality)
+3. Performance metrics (portfolio value trend, drawdown, win rate)
+4. Current strategy configuration (filters, thresholds, risk limits)
+
+Your output must be valid JSON with this exact structure:
+{
+  "summary": {
+    "period_win_rate": <number>,
+    "period_pnl": <string>,
+    "max_drawdown": <string>,
+    "key_observation": <string>
+  },
+  "recommendations": [
+    {
+      "type": "parameter_adjustment" | "prompt_update" | "risk_threshold" | "strategy_toggle",
+      "target_area": <string>,
+      "current_value": <any>,
+      "recommended_value": <any>,
+      "rationale": <string>,
+      "impact_estimate": <string>,
+      "confidence": "low" | "medium" | "high"
+    }
+  ]
+}
+
+Focus recommendations on:
+- Strategy parameters that correlate with poor outcomes (e.g., IV too low, profit target too tight)
+- Risk threshold adjustments based on drawdown history
+- Prompt improvements based on recurring reasoning errors
+- Strategy toggling if a strategy consistently underperforms in current conditions
+"""
+
+
+def build_optimization_prompt(
+    decisions: list,
+    trades: list,
+    performance: list,
+    current_config: Any,
+) -> dict[str, str]:
+    """Build the system and user prompts for the optimization analysis cycle.
+
+    Parameters
+    ----------
+    decisions:
+        List of DecisionModel instances from the lookback period.
+    trades:
+        List of TradeModel instances from the lookback period.
+    performance:
+        List of PerformanceSnapshotModel instances from the lookback period.
+    current_config:
+        The current QuadConfig instance.
+
+    Returns
+    -------
+    dict
+        With keys ``system`` and ``user``.
+    """
+    system = (
+        current_config.ai.system_prompt_override
+        or OPTIMIZATION_SYSTEM_PROMPT
+    )
+
+    # Build compact summaries
+    total_decisions = len(decisions)
+    executed_decisions = sum(1 for d in decisions if getattr(d, "executed", 0))
+    total_trades = len(trades)
+    total_pnl = sum(
+        float(getattr(t, "pnl", "0") or "0") for t in trades
+    )
+    wins = sum(1 for t in trades if float(getattr(t, "pnl", "0") or "0") > 0)
+    losses = sum(1 for t in trades if float(getattr(t, "pnl", "0") or "0") < 0)
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+
+    # Performance trend
+    if performance:
+        start_val = float(performance[0].portfolio_value)
+        end_val = float(performance[-1].portfolio_value)
+        perf_change_pct = ((end_val - start_val) / start_val * 100) if start_val else 0.0
+    else:
+        perf_change_pct = 0.0
+
+    # Strategy breakdown
+    strategy_decisions = {}
+    for d in decisions:
+        s = getattr(d, "strategy", "unknown")
+        strategy_decisions.setdefault(s, 0)
+        strategy_decisions[s] += 1
+
+    user = (
+        f"## Performance Data ({len(decisions)} decisions, {total_trades} trades)\n\n"
+        f"**Period Summary:**\n"
+        f"- Decisions: {total_decisions} total, {executed_decisions} executed\n"
+        f"- Trades: {total_trades} (W: {wins} / L: {losses})\n"
+        f"- Win Rate: {win_rate:.1f}%\n"
+        f"- Net PnL: ${total_pnl:.2f}\n"
+        f"- Portfolio Change: {perf_change_pct:+.2f}%\n\n"
+        f"**Strategy Breakdown:**\n"
+    )
+    for s, count in sorted(strategy_decisions.items()):
+        user += f"- {s}: {count} decisions\n"
+
+    user += (
+        f"\n**Current Configuration:**\n"
+        f"- Max positions: {current_config.risk.max_positions}\n"
+        f"- Max daily loss: {current_config.risk.stop_loss.max_daily_loss}\n"
+        f"- Max drawdown: {current_config.risk.stop_loss.max_drawdown}\n"
+        f"- AI model: {current_config.ai.model}\n"
+    )
+
+    return {"system": system, "user": user}

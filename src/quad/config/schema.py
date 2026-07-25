@@ -723,6 +723,74 @@ class TradingViewWebhookConfig(BaseModel):
 
 
 # ============================================================================
+# Retrain / Self-Optimization Section
+# ============================================================================
+
+
+class RetrainConfig(BaseModel):
+    """Configuration for the 7-day strategy self-optimization cycle.
+
+    Runs periodically to analyze past trading decisions vs. outcomes and
+    adjust strategy parameters, risk thresholds, or AI prompts based on
+    performance data.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable the optimisation cycle",
+    )
+    interval_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        description="Days between optimisation runs",
+    )
+    min_trades_for_analysis: int = Field(
+        default=10,
+        ge=1,
+        description="Minimum trades in the period to produce recommendations",
+    )
+    max_history_days: int = Field(
+        default=90,
+        ge=1,
+        le=365,
+        description="How far back (days) to pull data for analysis",
+    )
+    confidence_threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confidence score to auto-apply a recommendation",
+    )
+    auto_apply: bool = Field(
+        default=False,
+        description="Apply high-confidence recommendations without manual approval",
+    )
+    max_recommendations_per_cycle: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Cap on recommendations per cycle",
+    )
+    groq_temperature: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Temperature for optimisation analysis calls",
+    )
+    groq_max_tokens: int = Field(
+        default=2048,
+        ge=512,
+        le=8192,
+        description="Max tokens for optimisation analysis calls",
+    )
+    analysis_prompt_override: str | None = Field(
+        default=None,
+        description="Override the default optimisation system prompt",
+    )
+
+
+# ============================================================================
 # Root Config Model
 # ============================================================================
 
@@ -768,6 +836,10 @@ class QuadConfig(BaseModel):
     tradingview_webhook: TradingViewWebhookConfig = Field(
         default_factory=TradingViewWebhookConfig,
         description="TradingView webhook receiver configuration",
+    )
+    retrain: RetrainConfig = Field(
+        default_factory=RetrainConfig,
+        description="7-day strategy self-optimisation cycle configuration",
     )
     monitoring: MonitoringConfig = Field(
         default_factory=MonitoringConfig,
