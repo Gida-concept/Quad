@@ -41,6 +41,9 @@ trading:
   min_dte: 7
   max_dte: 45
 
+  # When true, close all existing positions before opening a new ENTER trade
+  serial_trade_mode: false
+
 # ---------------------------------------------------------------------------
 # Exchange Connection Settings
 # ---------------------------------------------------------------------------
@@ -283,23 +286,36 @@ strategy:
     max_dte: 45                  # Maximum days to expiry
     roll_when_dte_lt: 3         # Roll position when DTE drops below this
     allocation_pct: 0.5         # Fraction of underlying position to cover
+    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
+    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
+    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
 
   # --- Cash-Secured Put ---
   # Sell OTM put options with cash collateral
   cash_secured_put:
-    delta_target: 0.25          # Target delta for strike selection
+    delta_target: 0.16          # Target delta for strike selection
     min_dte: 7                   # Minimum days to expiry
     max_dte: 45                  # Maximum days to expiry
     roll_when_dte_lt: 3         # Roll position when DTE drops below this
     cash_reserve_pct: 0.3       # Fraction of cash reserved per position
+    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
+    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
+    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
+    wheel_enabled: false        # After assignment, auto-transition to Covered Call
+    deep_itm_exit_pct: 0.85     # Exit when underlying drops below this fraction of strike
 
   # --- Iron Condor ---
   # Sell OTM put spread + OTM call spread
   iron_condor:
-    wing_delta_target: 0.15     # Target delta for each wing
+    delta_short: 0.16           # Target delta for short legs
     wing_width_pct: 10.0        # Width of each wing as % of underlying price
     min_dte: 14                  # Minimum days to expiry
     max_dte: 45                  # Maximum days to expiry
+    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
+    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
+    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
+    force_exit_dte: 21          # Force close position when DTE drops below this
+    take_profit_pct: 50         # Take profit when credit decays by this percentage
 
   # --- Straddle ---
   # Buy ATM call + ATM put (long volatility)
@@ -310,16 +326,27 @@ strategy:
     min_iv_percentile: 50       # Minimum IV percentile for entry
 
   # --- Strangle ---
-  # Buy OTM call + OTM put (long volatility, cheaper than straddle)
+  # Sell OTM call + OTM put (short volatility / premium collection)
   strangle:
-    wing_delta_target: 0.20     # Target delta for each wing
+    call_delta_target: 0.16     # Target delta for call wing
+    put_delta_target: 0.16      # Target delta for put wing
     min_dte: 14                  # Minimum days to expiry
     max_dte: 45                  # Maximum days to expiry
     min_iv_percentile: 50       # Minimum IV percentile for entry
+    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
+    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
+    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
+    force_exit_dte: 21          # Force close position when DTE drops below this
+    take_profit_pct: 50         # Take profit when credit decays by this percentage
 
   # --- Vertical Spread ---
   # Buy/sell same-expiry call or put spread
   vertical_spread:
-    long_leg_delta: 0.30        # Target delta for the long leg
+    delta_short: 0.20           # Target delta for the short leg
+    delta_long: 0.20            # Target delta for the long leg
     wing_width_pct: 5.0         # Width of the spread as % of underlying price
     direction: "neutral"        # bullish, bearish, or neutral
+    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
+    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
+    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
+    force_exit_dte: 21          # Force close position when DTE drops below this

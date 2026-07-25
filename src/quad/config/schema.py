@@ -65,6 +65,10 @@ class TradingConfig(BaseModel):
         le=365,
         description="Maximum days to expiry for option selection",
     )
+    serial_trade_mode: bool = Field(
+        default=False,
+        description="When True, close all existing positions before opening a new ENTER trade",
+    )
 
     @field_validator("preferred_expiry")
     @classmethod
@@ -558,23 +562,62 @@ class CoveredCallParams(BaseStrategyParams):
     delta_target: float = Field(default=0.30, ge=0.0, le=1.0)
     roll_when_dte_lt: int = Field(default=3, ge=1)
     allocation_pct: float = Field(default=0.5, ge=0.0, le=1.0)
+    min_iv_rank: float = Field(
+        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
+    )
+    roll_when_delta_exceeds: float = Field(
+        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
+    )
+    roll_credit_min_pct: float = Field(
+        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
+    )
 
 
 class CashSecuredPutParams(BaseStrategyParams):
     """Parameters for the cash-secured put strategy."""
 
-    delta_target: float = Field(default=0.25, ge=0.0, le=1.0)
+    delta_target: float = Field(default=0.16, ge=0.0, le=1.0)
     roll_when_dte_lt: int = Field(default=3, ge=1)
     cash_reserve_pct: float = Field(default=0.3, ge=0.0, le=1.0)
+    min_iv_rank: float = Field(
+        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
+    )
+    roll_when_delta_exceeds: float = Field(
+        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
+    )
+    roll_credit_min_pct: float = Field(
+        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
+    )
+    wheel_enabled: bool = Field(
+        default=False, description="After assignment, auto-transition to Covered Call"
+    )
+    deep_itm_exit_pct: float = Field(
+        default=0.85, ge=0.5, le=1, description="Exit when underlying drops below this fraction of strike"
+    )
 
 
 class IronCondorParams(BaseStrategyParams):
     """Parameters for the iron condor strategy."""
 
-    wing_delta_target: float = Field(default=0.15, ge=0.0, le=1.0)
+    delta_short: float = Field(default=0.16, ge=0.0, le=1.0)
     wing_width_pct: float = Field(default=10.0, ge=0.0, le=100.0)
     min_dte: int = Field(default=14, ge=1, le=365)
     max_dte: int = Field(default=45, ge=1, le=365)
+    min_iv_rank: float = Field(
+        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
+    )
+    roll_when_delta_exceeds: float = Field(
+        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
+    )
+    roll_credit_min_pct: float = Field(
+        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
+    )
+    force_exit_dte: int = Field(
+        default=21, ge=1, le=60, description="Force close position when DTE drops below this"
+    )
+    take_profit_pct: float = Field(
+        default=50, ge=1, le=100, description="Take profit when credit decays by this percentage"
+    )
 
 
 class StraddleParams(BaseStrategyParams):
@@ -585,23 +628,52 @@ class StraddleParams(BaseStrategyParams):
     min_iv_percentile: float = Field(default=50.0, ge=0.0, le=100.0)
 
 
-class StrangleParams(BaseStrategyParams):
-    """Parameters for the strangle strategy."""
+class ShortStrangleParams(BaseStrategyParams):
+    """Parameters for the short strangle strategy."""
 
-    wing_delta_target: float = Field(default=0.20, ge=0.0, le=1.0)
+    call_delta_target: float = Field(default=0.16, ge=0.0, le=1.0)
+    put_delta_target: float = Field(default=0.16, ge=0.0, le=1.0)
     min_dte: int = Field(default=14, ge=1, le=365)
     max_dte: int = Field(default=45, ge=1, le=365)
     min_iv_percentile: float = Field(default=50.0, ge=0.0, le=100.0)
+    min_iv_rank: float = Field(
+        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
+    )
+    roll_when_delta_exceeds: float = Field(
+        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
+    )
+    roll_credit_min_pct: float = Field(
+        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
+    )
+    force_exit_dte: int = Field(
+        default=21, ge=1, le=60, description="Force close position when DTE drops below this"
+    )
+    take_profit_pct: float = Field(
+        default=50, ge=1, le=100, description="Take profit when credit decays by this percentage"
+    )
 
 
 class VerticalSpreadParams(BaseStrategyParams):
     """Parameters for the vertical spread strategy."""
 
-    long_leg_delta: float = Field(default=0.30, ge=0.0, le=1.0)
+    delta_short: float = Field(default=0.20, ge=0.0, le=1.0)
+    delta_long: float = Field(default=0.20, ge=0.0, le=1.0)
     wing_width_pct: float = Field(default=5.0, ge=0.0, le=100.0)
     direction: str = Field(
         default="neutral",
         description="Spread direction: bullish, bearish, or neutral",
+    )
+    min_iv_rank: float = Field(
+        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
+    )
+    roll_when_delta_exceeds: float = Field(
+        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
+    )
+    roll_credit_min_pct: float = Field(
+        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
+    )
+    force_exit_dte: int = Field(
+        default=21, ge=1, le=60, description="Force close position when DTE drops below this"
     )
 
     @field_validator("direction")
@@ -845,7 +917,7 @@ class QuadConfig(BaseModel):
             "cash_secured_put": CashSecuredPutParams().model_dump(),
             "iron_condor": IronCondorParams().model_dump(),
             "straddle": StraddleParams().model_dump(),
-            "strangle": StrangleParams().model_dump(),
+            "strangle": ShortStrangleParams().model_dump(),
             "vertical_spread": VerticalSpreadParams().model_dump(),
         },
         description="Strategy-specific parameters",

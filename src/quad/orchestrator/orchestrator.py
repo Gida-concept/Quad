@@ -1182,6 +1182,141 @@ class QuadOrchestrator:
 
         return decision
 
+    async def _close_all_positions(self) -> bool:
+        """Close all open positions using MARKET EXIT orders.
+
+        Called when ``serial_trade_mode`` is enabled and a new ENTER
+        action is about to be executed.  The method:
+
+        1. Fetches all open positions from the exchange adapter.
+        2. Cancels any open orders on those positions.
+        3. Builds an EXIT ``Action`` for each position with MARKET order type.
+        4. Submits each EXIT through the execution engine.
+        5. Logs the results with structlog.
+
+        Returns
+        -------
+        bool
+            ``True`` if all positions were closed successfully,
+            ``False`` if any position failed to close or no positions
+            were found.
+        """
+        log = self._log.bind()
+
+        # 1. Get all open positions
+        try:
+            positions = await self._exchange_adapter.get_positions()
+        except Exception as exc:
+            log.exception("close_all_positions_fetch_error", error=str(exc))
+            return False
+
+        # Filter to only OPEN positions
+        from quad.types.domain import PositionStatus
+
+        open_positions = [
+            p for p in positions
+            if getattr(p, "status", None) == PositionStatus.OPEN
+        ]
+
+        if not open_positions:
+            log.info("close_all_positions_no_open_positions")
+            return True  # Nothing to close — success by definition
+
+        log.info(
+            "close_all_positions_started",
+            count=len(open_positions),
+        )
+
+        # 2. Cancel all open orders
+        try:
+            open_orders = await self._exchange_adapter.get_open_orders()
+            for order in open_orders:
+                try:
+                    await self._exchange_adapter.cancel_order(order.id)
+                    log.info(
+                        "close_all_positions_order_cancelled",
+                        order_id=order.id,
+                        symbol=getattr(order, "symbol", "unknown"),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "close_all_positions_cancel_order_error",
+                        order_id=getattr(order, "id", "unknown"),
+                        error=str(exc),
+                    )
+        except Exception as exc:
+            log.warning(
+                "close_all_positions_fetch_orders_error",
+                error=str(exc),
+            )
+            # Continue — non-critical
+
+        # 3. Build and execute EXIT actions
+        from quad.types.risk import Action
+
+        close_tasks: list[asyncio.Task] = []
+        for position in open_positions:
+            # Determine close side: LONG -> SELL, SHORT -> BUY
+            pos_side = getattr(position, "side", None)
+            if pos_side is None:
+                log.warning(
+                    "close_all_positions_unknown_side",
+                    contract=getattr(position, "contract_symbol", "unknown"),
+                )
+                continue
+
+            from quad.types.domain import PositionSide as PS
+
+            close_side = "SELL" if pos_side == PS.LONG else "BUY"
+
+            action = Action(
+                type="EXIT",
+                strategy="serial_close",
+                contract=getattr(position, "contract_symbol", ""),
+                side=close_side,
+                quantity=int(getattr(position, "quantity", 0)),
+                order_type="MARKET",
+                price=None,
+                reason="Serial trade mode: closing position before new ENTER",
+                metadata={"serial_close": True},
+            )
+
+            # 4. Execute through execution engine
+            task = asyncio.create_task(
+                self._execution_engine.execute(action, {})
+            )
+            close_tasks.append(task)
+
+        # 5. Wait for all close orders to complete
+        results = await asyncio.gather(*close_tasks, return_exceptions=True)
+
+        success_count = 0
+        fail_count = 0
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                fail_count += 1
+                log.exception(
+                    "close_all_positions_execution_error",
+                    position_index=idx,
+                    error=str(result),
+                )
+            else:
+                success_count += 1
+                log.info(
+                    "close_all_positions_closed",
+                    position_index=idx,
+                    status=getattr(result, "status", "unknown"),
+                )
+
+        log.info(
+            "close_all_positions_complete",
+            total=len(open_positions),
+            closed=success_count,
+            failed=fail_count,
+        )
+
+        return fail_count == 0
+
     async def _execute_ai_action(
         self,
         decision: dict[str, Any],
@@ -1216,6 +1351,29 @@ class QuadOrchestrator:
                 quantity=quantity,
             )
             return
+
+        # Serial trade mode: close all existing positions before ENTER
+        if action_type == "ENTER":
+            serial_mode = bool(
+                self._config_manager.get("trading.serial_trade_mode", False)
+                if self._config_manager
+                else False
+            )
+            if serial_mode:
+                self._log.info(
+                    "serial_trade_mode_closing_positions",
+                    action=action_type,
+                    contract=contract_symbol,
+                )
+                close_ok = await self._close_all_positions()
+                if not close_ok:
+                    self._log.warning(
+                        "serial_trade_mode_close_failed",
+                        action=action_type,
+                        contract=contract_symbol,
+                    )
+                    # Continue anyway — individual close failures were already
+                    # logged by _close_all_positions
 
         # Build Action dataclass
         from quad.types.risk import Action

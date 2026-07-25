@@ -20,7 +20,7 @@ Unlike the previous Quadrant project (Node.js/Python dual-runtime, Binance Futur
 - **Option-native** -- Built from the ground up for European-style cash-settled options
 - **Telegram-first** -- Primary user interface via Telegram bot (python-telegram-bot v20+), with CLI for secondary debugging
 - **Plugin-based** -- Strategies are pluggable via setuptools entry points
-- **No ML** -- Deterministic, rule-based strategies. No black boxes.
+- **Optional AI** -- Groq/LLaMA integration for market analysis and decision support. Deterministic fallback when AI is disabled or unavailable.
 
 Quad is designed for personal use by individual traders who want a self-hosted, reliable, and understandable options trading system.
 
@@ -98,7 +98,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 - **Options-Native** -- Built for European-style cash-settled options with full Greek monitoring (delta, gamma, theta, vega)
 - **Telegram Commands** -- 10 user commands (/start, /status, /positions, /orders, /pnl, /risk, /strategies, /history, /help, /stop) plus 4 admin commands (/config, /kill, /logs, /backtest)
-- **6 Built-in Strategies** -- Covered call, cash-secured put, iron condor, straddle, strangle, vertical spread
+- **6 Built-in Strategies** -- Covered call, cash-secured put, iron condor, straddle, strangle, vertical spread, each with IV rank filtering, forced gamma exits, and rolling logic
 - **Plugin Architecture** -- Write custom strategies as Python classes with setuptools entry point registration
 - **6-Gate Risk Pipeline** -- Every trade validated against margin, position size, delta, theta, volatility, and concentration limits
 - **4 Circuit Breakers** -- P&L drawdown, Greek exposure, volatility spike, and connection loss with graduated responses
