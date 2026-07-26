@@ -20,6 +20,7 @@ logger = structlog.get_logger(__name__)
 def get_strategy(
     name: str,
     params: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
 ) -> StrategyBase | None:
     """Create a strategy instance by name with optional parameters.
 
@@ -29,6 +30,8 @@ def get_strategy(
     Args:
         name: Strategy name (key in the registry).
         params: Optional dictionary of parameter overrides.
+        config: Optional full application configuration dict for
+                strategies that need access to risk/trading sections.
 
     Returns:
         A StrategyBase instance, or None if the strategy name is not
@@ -39,7 +42,7 @@ def get_strategy(
         logger.warning("strategy_not_found", name=name)
         return None
     try:
-        instance = cls(params or {})
+        instance = cls(params or {}, config=config or {})
         logger.debug("strategy_created", name=name, cls=cls.__name__)
         return instance
     except (ValueError, TypeError) as exc:
@@ -88,7 +91,7 @@ def create_default_strategies(
 
     for name in StrategyRegistry.list():
         params = strategy_configs.get(name, {})
-        instance = get_strategy(name, params)
+        instance = get_strategy(name, params, config=config)
         if instance is not None:
             strategies[name] = instance
 

@@ -12,6 +12,8 @@ import sys
 
 import structlog
 
+VERSION = "0.1.0"
+
 
 def _configure_logging() -> None:
     """Configure structlog for production logging.
@@ -51,7 +53,7 @@ async def main() -> None:
     _configure_logging()
     log = structlog.get_logger()
 
-    log.info("quad_starting", version="0.1.0")
+    log.info("quad_starting", version=VERSION)
 
     config_path = os.environ.get(
         "QUAD_CONFIG_PATH",
@@ -63,7 +65,7 @@ async def main() -> None:
     orchestrator = QuadOrchestrator(config_path=config_path)
     await orchestrator.run_forever()
 
-    log.info("quad_stopped", version="0.1.0")
+    log.info("quad_stopped", version=VERSION)
 
 
 if __name__ == "__main__":

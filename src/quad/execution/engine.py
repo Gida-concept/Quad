@@ -25,12 +25,6 @@ from .reconciler import FillReconciler
 from .twap import TwapSlicer
 
 # ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_DEFAULT_RECONCILE_INTERVAL = 60  # seconds
-
-# ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
@@ -71,7 +65,7 @@ class ExecutionEngine:
         self._gateway = OrderGateway(exchange_adapter, config=self._config)
         self._twap = TwapSlicer(config=self._config)
         self._reconciler = FillReconciler(
-            exchange_adapter, db_manager=db_manager
+            exchange_adapter, db_manager=db_manager, config=self._config
         )
         self._risk_manager = risk_manager
 
@@ -161,8 +155,11 @@ class ExecutionEngine:
         """
         order_request = self._build_request(action)
 
-        # 1. Risk check
-        risk_result = await self._risk_manager.evaluate(action, context)
+        # 1. Risk check (skip if already checked upstream)
+        if action.risk_checked:
+            risk_result = RiskResult(passed=True)
+        else:
+            risk_result = await self._risk_manager.evaluate(action, context)
         if not risk_result.passed:
             self._log.warning(
                 "order_rejected_by_risk",
@@ -206,6 +203,56 @@ class ExecutionEngine:
                 fills=[],
             )
 
+        # 3. Submit bracket orders (TP/SL) after opening a position
+        if action.type in ("open_long", "open_short") and (
+            action.stop_loss_price is not None or action.take_profit_price is not None
+        ):
+            bracket_ids: dict[str, int] = {}
+            if action.stop_loss_price is not None:
+                try:
+                    sl_action = Action(
+                        type="set_stop_loss",
+                        strategy=action.strategy,
+                        symbol=action.symbol,
+                        quantity=action.quantity,
+                        stop_loss_price=action.stop_loss_price,
+                        risk_checked=True,
+                    )
+                    sl_request = self._build_request(sl_action)
+                    sl_result = await self._gateway.submit(sl_request)
+                    bracket_ids["stop_loss"] = sl_result.order_id
+                except (OrderRejectedError, OrderTimeoutError) as exc:
+                    self._log.warning(
+                        "bracket_stop_loss_failed",
+                        error=str(exc),
+                        parent_order_id=result.order_id,
+                    )
+            if action.take_profit_price is not None:
+                try:
+                    tp_action = Action(
+                        type="set_take_profit",
+                        strategy=action.strategy,
+                        symbol=action.symbol,
+                        quantity=action.quantity,
+                        take_profit_price=action.take_profit_price,
+                        risk_checked=True,
+                    )
+                    tp_request = self._build_request(tp_action)
+                    tp_result = await self._gateway.submit(tp_request)
+                    bracket_ids["take_profit"] = tp_result.order_id
+                except (OrderRejectedError, OrderTimeoutError) as exc:
+                    self._log.warning(
+                        "bracket_take_profit_failed",
+                        error=str(exc),
+                        parent_order_id=result.order_id,
+                    )
+            if bracket_ids:
+                self._log.info(
+                    "bracket_orders_placed",
+                    bracket_ids=bracket_ids,
+                    parent_order_id=result.order_id,
+                )
+
         # 3. Update stats
         self._stats["total_submitted"] += 1
         if result.status == "FILLED":
@@ -227,7 +274,7 @@ class ExecutionEngine:
         self,
         action: Action,
         context: StrategyContext,
-        window: int = 300,
+        window: int | None = None,
     ) -> list[OrderResult]:
         """Evaluate risk and execute an order as TWAP slices.
 
@@ -248,8 +295,14 @@ class ExecutionEngine:
         """
         order_request = self._build_request(action)
 
-        # 1. Risk check
-        risk_result = await self._risk_manager.evaluate(action, context)
+        if window is None:
+            window = self._config.get("execution", {}).get("twap_window_seconds", 300)
+
+        # 1. Risk check (skip if already checked upstream)
+        if action.risk_checked:
+            risk_result = RiskResult(passed=True)
+        else:
+            risk_result = await self._risk_manager.evaluate(action, context)
         if not risk_result.passed:
             self._log.warning(
                 "twap_rejected_by_risk",
@@ -380,8 +433,8 @@ class ExecutionEngine:
 
     async def _reconciliation_loop(self) -> None:
         """Background loop that periodically reconciles order state."""
-        interval = self._config.get(
-            "reconcile_interval", _DEFAULT_RECONCILE_INTERVAL
+        interval = self._config.get("execution", {}).get(
+            "reconcile_interval_seconds", 60
         )
 
         while not self._stop_event.is_set():
@@ -411,12 +464,26 @@ class ExecutionEngine:
 
     def _build_request(self, action: Action) -> OrderRequest:
         """Build an ``OrderRequest`` from an ``Action``."""
-        return OrderRequest(
+        order_request = OrderRequest(
             symbol=action.contract or "",
             side=action.side or "",
-            type=action.order_type or "LIMIT",
+            type=action.order_type or self._config.get("execution", {}).get("default_order_type", "LIMIT"),
             quantity=action.quantity,
             price=action.price,
-            reduce_only=False,
-            post_only=False,
+            reduce_only=self._config.get("execution", {}).get("reduce_only", False),
+            post_only=self._config.get("execution", {}).get("post_only", False),
         )
+
+        # Handle TP/SL action types
+        if action.type == "set_stop_loss":
+            order_request.type = "STOP_LOSS"
+            order_request.stop_price = action.stop_loss_price
+            order_request.reduce_only = True
+            order_request.working_type = "MARK_PRICE"
+            order_request.price_protect = True
+        elif action.type == "set_take_profit":
+            order_request.type = "TAKE_PROFIT"
+            order_request.stop_price = action.take_profit_price
+            order_request.reduce_only = True
+
+        return order_request

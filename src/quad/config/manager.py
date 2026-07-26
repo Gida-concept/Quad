@@ -61,6 +61,7 @@ ENV_VAR_MAP: dict[str, str] = {
     "QUAD_TRADINGVIEW_WEBHOOK_ENABLED": "tradingview_webhook.enabled",
     "QUAD_TRADINGVIEW_WEBHOOK_PORT": "tradingview_webhook.port",
     "QUAD_TRADINGVIEW_WEBHOOK_SECRET": "tradingview_webhook.secret",
+    "QUAD_CONFIG_PATH": "_config_path",
 }
 
 # Default config directory search order
@@ -245,11 +246,11 @@ class ConfigManager:
         """Return the current trading mode.
 
         Returns:
-            ``"paper"``, ``"live"``, or ``"dry_run"``, retrieved from
+            ``"binance"`` or ``"dry_run"``, retrieved from
             the ``_mode`` internal key (set via ``QUAD_MODE`` env var
-            or runtime override). Defaults to ``"paper"``.
+            or runtime override). Defaults to ``"binance"``.
         """
-        return str(self.get("_mode", "paper"))
+        return str(self.get("_mode", "binance"))
 
     def get_default_strategy(self) -> str:
         """Return the configured default strategy name.
@@ -257,7 +258,7 @@ class ConfigManager:
         Returns:
             The strategy name from ``trading.default_strategy``.
         """
-        return str(self.get("trading.default_strategy", "cash_secured_put"))
+        return str(self.get("trading.default_strategy", "swing_trading"))
 
     # ------------------------------------------------------------------
     # Container protocol

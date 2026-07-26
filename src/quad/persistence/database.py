@@ -1,4 +1,4 @@
-"""Database manager for the Quad options trading bot.
+"""Database manager for the Quad futures trading bot.
 
 Provides a production-grade async PostgreSQL wrapper built on asyncpg,
 with connection pooling, automatic migrations, backup stubs, and context
@@ -45,12 +45,22 @@ class DatabaseManager:
     def __init__(
         self,
         dsn: str,
-        min_pool_size: int = 1,
-        max_pool_size: int = 5,
+        min_pool_size: int | None = None,
+        max_pool_size: int | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self._dsn = dsn
-        self._min_pool_size = min_pool_size
-        self._max_pool_size = max_pool_size
+        self._db_config = config or {}
+        self._min_pool_size = (
+            min_pool_size
+            if min_pool_size is not None
+            else int(self._db_config.get("persistence", {}).get("min_pool_size", 1))
+        )
+        self._max_pool_size = (
+            max_pool_size
+            if max_pool_size is not None
+            else int(self._db_config.get("persistence", {}).get("max_pool_size", 5))
+        )
         self._pool: Optional[asyncpg.Pool] = None
         self._log = logger.bind(dsn=self._mask_dsn(dsn))
 
@@ -117,29 +127,31 @@ class DatabaseManager:
             ssl=bool(ssl),
         )
 
-        for attempt in range(1, 6):
+        connect_retry_count = int(self._db_config.get("persistence", {}).get("connect_retry_count", 5))
+        for attempt in range(1, connect_retry_count + 1):
             try:
                 self._pool = await asyncpg.create_pool(
                     dsn=self._dsn,
                     min_size=self._min_pool_size,
                     max_size=self._max_pool_size,
-                    command_timeout=60,
+                    command_timeout=int(self._db_config.get("persistence", {}).get("command_timeout", 60)),
                     ssl=ssl,
                 )
                 break
             except Exception as exc:
-                if attempt == 5:
+                if attempt == connect_retry_count:
                     self._log.error(
                         "connect_retries_exhausted",
-                        max_attempts=5,
+                        max_attempts=connect_retry_count,
                         error=str(exc),
                     )
                     raise
-                sleep_secs = 2 ** (attempt - 1)  # 1, 2, 4, 8
+                backoff_base = float(self._db_config.get("persistence", {}).get("backoff_base_seconds", 2.0))
+                sleep_secs = backoff_base ** (attempt - 1)  # exponential backoff
                 self._log.warning(
                     "connect_retry",
                     attempt=attempt,
-                    max_attempts=5,
+                    max_attempts=connect_retry_count,
                     backoff_seconds=sleep_secs,
                     error=str(exc),
                 )

@@ -1,6 +1,6 @@
-"""Pluggable exchange adapter ABC for Binance Options trading.
+"""Pluggable exchange adapter ABC for Binance Futures trading.
 
-Every exchange adapter — live Binance, paper trading, or mock — implements
+Every exchange adapter — live Binance, testnet, or mock — implements
 this interface so the rest of the application remains exchange-agnostic.
 
 All monetary values use ``Decimal`` for precision.
@@ -14,17 +14,19 @@ from decimal import Decimal
 
 from quad.types.domain import (
     Account,
+    FuturesPosition,
+    FuturesPositionSide,
     Order,
     OrderRequest,
     OrderResult,
     Position,
 )
 from quad.types.exchange import AccountUpdate
-from quad.types.market import GreekTick, OptionContract, OptionPriceTick
+from quad.types.market import FundingRate, FuturesContract
 
 
 class ExchangeAdapter(ABC):
-    """Pluggable exchange adapter for Binance Options trading.
+    """Pluggable exchange adapter for Binance Futures trading.
 
     Subclasses must implement every abstract method.  The adapter is
     responsible for its own connection lifecycle (REST session and
@@ -65,7 +67,7 @@ class ExchangeAdapter(ABC):
 
     @abstractmethod
     async def get_account(self) -> Account:
-        """Fetch account information including balances.
+        """Fetch futures account information including balances.
 
         Returns:
             An ``Account`` dataclass with the current balance snapshot.
@@ -78,7 +80,7 @@ class ExchangeAdapter(ABC):
 
     @abstractmethod
     async def get_positions(self) -> list[Position]:
-        """Fetch all open positions from the exchange.
+        """Fetch all open futures positions from the exchange.
 
         Returns:
             A list of ``Position`` dataclasses for every open position.
@@ -86,20 +88,17 @@ class ExchangeAdapter(ABC):
         ...
 
     # ------------------------------------------------------------------
-    # REST — Market Data
+    # REST — Futures Market Data
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def get_option_chain(self, underlying: str) -> list[OptionContract]:
-        """Fetch the full option chain for an underlying asset.
+    async def get_funding_rate(self, symbol: str) -> FundingRate:
+        """Fetch current funding rate for a symbol."""
+        ...
 
-        Args:
-            underlying: Underlying asset symbol, e.g. ``"BTCUSDT"``.
-
-        Returns:
-            A list of ``OptionContract`` dataclasses for every listed
-            option on the given underlying.
-        """
+    @abstractmethod
+    async def get_mark_price(self, symbol: str) -> Decimal:
+        """Fetch current mark price for a symbol."""
         ...
 
     # ------------------------------------------------------------------
@@ -160,45 +159,27 @@ class ExchangeAdapter(ABC):
         ...
 
     # ------------------------------------------------------------------
-    # WebSocket — Market Data Streams
+    # REST — Futures Configuration
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def subscribe_option_prices(
-        self, symbols: list[str]
-    ) -> AsyncGenerator[OptionPriceTick, None]:
-        """Subscribe to real-time price ticks for one or more symbols.
-
-        The returned async generator yields ``OptionPriceTick`` objects
-        as they arrive from the exchange WebSocket.  The generator runs
-        indefinitely until the caller stops iteration or the adapter is
-        disconnected.
-
-        Args:
-            symbols: List of option symbols to subscribe to, e.g.
-                ``["BTC-220930-20000-C", "ETH-220930-1500-C"]``.
-
-        Yields:
-            ``OptionPriceTick`` for each price update received.
-        """
+    async def set_leverage(self, symbol: str, leverage: int) -> dict:
+        """Set leverage for a symbol."""
         ...
 
     @abstractmethod
-    def subscribe_greeks(
-        self, symbols: list[str]
-    ) -> AsyncGenerator[GreekTick, None]:
-        """Subscribe to real-time Greek updates for option symbols.
+    async def set_margin_mode(self, symbol: str, margin_type: str) -> dict:
+        """Set margin mode (isolated/cross) for a symbol."""
+        ...
 
-        The returned async generator yields ``GreekTick`` objects as
-        they arrive.  Runs until the caller stops iteration or the
-        adapter is disconnected.
+    @abstractmethod
+    async def set_position_mode(self, mode: str) -> dict:
+        """Set position mode (one_way/hedge)."""
+        ...
 
-        Args:
-            symbols: List of option symbols to subscribe to.
-
-        Yields:
-            ``GreekTick`` for each Greek update received.
-        """
+    @abstractmethod
+    async def get_position_mode(self) -> str:
+        """Get current position mode."""
         ...
 
     # ------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Domain model types for Quad options trading bot.
+"""Domain model types for Quad futures trading bot.
 
 This module defines the core domain entities used throughout the
 application: accounts, balances, positions, orders, and trades.
@@ -15,12 +15,16 @@ from typing import Literal
 __all__ = [
     "Account",
     "Balance",
-    "Position",
-    "PositionSide",
-    "PositionStatus",
+    "FuturesPosition",
+    "FuturesPositionSide",
+    "MarginType",
     "Order",
     "OrderRequest",
     "OrderResult",
+    "Position",
+    "PositionMode",
+    "PositionSide",
+    "PositionStatus",
     "Trade",
 ]
 
@@ -28,6 +32,22 @@ __all__ = [
 # ============================================================================
 # Enums
 # ============================================================================
+
+
+class FuturesPositionSide(str, Enum):
+    LONG = "long"
+    SHORT = "short"
+    BOTH = "both"
+
+
+class PositionMode(str, Enum):
+    ONE_WAY = "one_way"
+    HEDGE = "hedge"
+
+
+class MarginType(str, Enum):
+    ISOLATED = "isolated"
+    CROSS = "cross"
 
 
 class PositionSide(str, Enum):
@@ -65,6 +85,23 @@ class Balance:
 
 
 @dataclass
+class FuturesPosition:
+    symbol: str = ""
+    position_side: FuturesPositionSide = FuturesPositionSide.LONG
+    size: float = 0.0
+    entry_price: float = 0.0
+    mark_price: float = 0.0
+    liquidation_price: float = 0.0
+    leverage: int = 1
+    margin_type: MarginType = MarginType.ISOLATED
+    margin: float = 0.0
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    funding_paid: float = 0.0
+    update_time: int = 0
+
+
+@dataclass
 class Account:
     """Represents a trading account on an exchange."""
 
@@ -83,6 +120,12 @@ class Account:
     timestamp: int = 0
     """Snapshot timestamp in unix milliseconds."""
 
+    max_leverage: int = 1
+    total_wallet_balance: Decimal = Decimal("0")
+    total_margin_balance: Decimal = Decimal("0")
+    available_balance: Decimal = Decimal("0")
+    positions: list[FuturesPosition] = field(default_factory=list)
+
 
 @dataclass
 class Position:
@@ -94,8 +137,8 @@ class Position:
     strategy: str = ""
     """Name of the strategy that opened this position."""
 
-    contract_symbol: str = ""
-    """Option contract symbol for this position."""
+    symbol: str = ""
+    """Futures contract symbol for this position."""
 
     side: PositionSide = PositionSide.LONG
     """Position side: LONG or SHORT."""
@@ -115,6 +158,14 @@ class Position:
     realized_pnl: Decimal = Decimal("0")
     """Realized profit/loss from closed portions."""
 
+    leverage: int = 1
+    margin_type: MarginType = MarginType.ISOLATED
+    position_side: FuturesPositionSide = FuturesPositionSide.LONG
+    liquidation_price: Decimal = Decimal("0")
+    initial_margin: Decimal = Decimal("0")
+    maintenance_margin: Decimal = Decimal("0")
+    funding_paid: Decimal = Decimal("0")
+
     status: PositionStatus = PositionStatus.OPEN
     """Position status: OPEN, CLOSED, or LIQUIDATED."""
 
@@ -124,14 +175,17 @@ class Position:
     updated_at: int = 0
     """Last update timestamp in unix milliseconds."""
 
-    cost_basis: Decimal = Decimal("0")
-    """Total cost basis of the position."""
+    stop_loss_order_id: str = ""
+    """Exchange order ID for the stop-loss order."""
 
-    max_profit: Decimal | None = None
-    """Maximum potential profit, or None if unlimited."""
+    take_profit_order_id: str = ""
+    """Exchange order ID for the take-profit order."""
 
-    days_to_expiry: int = 0
-    """Days until option contract expiry."""
+    stop_loss_price: Decimal = Decimal("0")
+    """Stop-loss trigger price."""
+
+    take_profit_price: Decimal = Decimal("0")
+    """Take-profit target price."""
 
 
 @dataclass
@@ -177,6 +231,10 @@ class Order:
     updated_at: int = 0
     """Last update timestamp in unix milliseconds."""
 
+    working_type: str = ""
+    position_side: str = ""
+    price_protect: bool = False
+
 
 @dataclass
 class OrderRequest:
@@ -211,6 +269,10 @@ class OrderRequest:
 
     post_only: bool = False
     """If True, order will only be posted as a maker order."""
+
+    working_type: str = ""
+    position_side: str = ""
+    price_protect: bool = False
 
 
 @dataclass

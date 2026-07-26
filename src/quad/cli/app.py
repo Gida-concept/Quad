@@ -1,5 +1,5 @@
 """Quad CLI application — secondary interface for debugging, manual
-commands, and maintenance operations.
+commands, and maintenance operations for the futures trading bot.
 
 Built on Typer.  Most commands are async and use asyncio.run() internally.
 """
@@ -30,7 +30,7 @@ logger = structlog.get_logger(__name__)
 
 app = typer.Typer(
     name="quad",
-    help="Quad Options Trading Bot — CLI interface",
+    help="Quad Futures Trading Bot — CLI interface",
     no_args_is_help=True,
 )
 
@@ -115,18 +115,24 @@ def status(
 ) -> None:
     """Show bot status overview."""
     config = _load_config(config_path)
-    mode = config.get("_mode", "paper")
+    mode = config.get("_mode", "binance")
     dry_run = config.get("_dry_run", True)
     exchange_name = config.get("exchange", {}).get("name", "binance")
     testnet = config.get("exchange", {}).get("testnet", True)
+    leverage = config.get("trading", {}).get("leverage", 1)
+    margin_mode = config.get("trading", {}).get("margin_mode", "isolated")
+    position_mode = config.get("trading", {}).get("position_mode", "one_way")
 
     print("=" * 50)
-    print("  QUAD OPTIONS TRADING BOT — STATUS")
+    print("  QUAD FUTURES TRADING BOT — STATUS")
     print("=" * 50)
     print(f"  Mode:          {mode}")
     print(f"  Dry Run:       {dry_run}")
     print(f"  Exchange:      {exchange_name}")
     print(f"  Testnet:       {testnet}")
+    print(f"  Leverage:      {leverage}x")
+    print(f"  Margin Mode:   {margin_mode}")
+    print(f"  Position Mode: {position_mode}")
     print(f"  Config File:   {config_path}")
     print(f"  Timestamp:     {_time.strftime('%Y-%m-%d %H:%M:%S UTC', _time.gmtime())}")
     print("=" * 50)
@@ -140,7 +146,7 @@ def balance(
 ) -> None:
     """Show account balance."""
     config = _load_config(config_path)
-    print(f"Account balance (from config mode: {config.get('_mode', 'paper')})")
+    print(f"Account balance (from config mode: {config.get('_mode', 'binance')})")
     print()
     print("  Use the Telegram bot `/balance` command for live data,")
     print("  or connect the exchange adapter for REST queries.")
@@ -154,10 +160,11 @@ def positions(
 ) -> None:
     """List open positions (from database if available)."""
     _ = _load_config(config_path)
-    print("Open Positions")
+    print("Open Futures Positions")
     print()
     print("  Use the Telegram bot `/positions` command for live data.")
-    print("  CLI position queries require a running database connection.")
+    print("  CLI position queries require a running exchange adapter.")
+    print("  Columns: Symbol, Side (LONG/SHORT), Size, Entry, Mark, Liq.Px, PnL, Lev")
 
 
 @app.command()
@@ -175,25 +182,6 @@ def orders(
 
 
 @app.command()
-def chain(
-    underlying: str = typer.Argument(..., help="BTC or ETH"),
-    config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
-    ),
-) -> None:
-    """Show option chain for an underlying."""
-    _ = _load_config(config_path)
-
-    # Normalize
-    symbol = f"{underlying.upper()}USDT" if underlying.upper() in ("BTC", "ETH") else underlying.upper()
-
-    print(f"Option Chain: {symbol}")
-    print()
-    print("  Use the Telegram bot `/chain` command for live data.")
-    print("  CLI chain queries require a running market data engine.")
-
-
-@app.command()
 def risk(
     config_path: str = typer.Option(
         "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
@@ -205,15 +193,14 @@ def risk(
 
     print("Risk Status")
     print("=" * 50)
-    print(f"  Max Positions:          {risk_config.get('max_positions', 5)}")
-    print(f"  Max Position Size:      {float(risk_config.get('max_position_size_pct', 0.1)):.0%}")
-    print(f"  Max Portfolio Risk:     {risk_config.get('max_portfolio_risk_pct', 20)}%")
-    print(f"  Max Daily Loss:         ${risk_config.get('max_daily_loss_usd', 500)}")
-    print(f"  Max Drawdown:           {risk_config.get('max_drawdown_pct', 25)}%")
-    print(f"  Max Delta Exposure:     {risk_config.get('exposure', {}).get('max_delta', 100)}")
-    print(f"  Max Theta Exposure:     {risk_config.get('exposure', {}).get('max_theta', -500)}")
-    print(f"  Max Vega Exposure:      {risk_config.get('exposure', {}).get('max_vega', 500)}")
-    print(f"  Kelly Fraction:         {risk_config.get('kelly', {}).get('fraction', 0.25)}")
+    print(f"  Max Positions:             {risk_config.get('max_positions', 5)}")
+    print(f"  Max Position Size:         {float(risk_config.get('max_position_size_pct', 0.1)):.0%}")
+    print(f"  Max Portfolio Risk:        {risk_config.get('max_portfolio_risk_pct', 20)}%")
+    print(f"  Max Daily Loss:            ${risk_config.get('max_daily_loss_usd', 500)}")
+    print(f"  Max Drawdown:              {risk_config.get('max_drawdown_pct', 25)}%")
+    print(f"  Min Liquidation Distance:  {float(risk_config.get('min_distance_to_liquidation_pct', 0.2)):.0%}")
+    print(f"  Max Funding Rate:          {float(risk_config.get('max_funding_rate', 0.001)):.4%}")
+    print(f"  Max Position Concentration: {risk_config.get('max_position_concentration', 0.4):.0%}")
     print("=" * 50)
     print()
     print("  Use the Telegram bot `/risk` command for live risk status.")
@@ -313,7 +300,7 @@ def backtest(
     print("Backtesting engine ready.")
     print()
     print("Full backtest execution requires:")
-    print("  • A configured DatabaseManager with historical option data")
+    print("  • A configured DatabaseManager with historical futures data")
     print("  • A strategy instance")
     print("  • An underlying symbol to backtest")
     print()

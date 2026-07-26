@@ -1,4 +1,4 @@
-"""Database models for the Quad options trading bot.
+"""Database models for the Quad futures trading bot.
 
 This module defines all 12 table schemas as dataclasses with PostgreSQL DDL
 generation and row serialization/deserialization. All Decimal values are stored
@@ -21,7 +21,7 @@ else:
 # Schema versioning
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 2
+SCHEMA_VERSION: int = 3
 """Current schema version. Increment when making breaking changes."""
 
 SCHEMA_MIGRATIONS: dict[int, list[str]] = {
@@ -99,7 +99,7 @@ class PositionModel:
 
     id: int
     strategy: str
-    contract_symbol: str
+    symbol: str
     side: str
     quantity: str
     entry_price: str
@@ -109,28 +109,36 @@ class PositionModel:
     status: str
     opened_at: int
     updated_at: int
-    cost_basis: str
-    max_profit: str
-    days_to_expiry: int
+    leverage: int = 1
+    margin_type: str = "isolated"
+    position_side: str = "LONG"
+    liquidation_price: str = "0"
+    initial_margin: str = "0"
+    maintenance_margin: str = "0"
+    funding_paid: str = "0"
 
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS positions (
     id SERIAL PRIMARY KEY,
     strategy TEXT NOT NULL,
-    contract_symbol TEXT NOT NULL,
+    symbol TEXT NOT NULL,
     side TEXT NOT NULL,
     quantity TEXT NOT NULL DEFAULT '0',
     entry_price TEXT NOT NULL DEFAULT '0',
     current_price TEXT NOT NULL DEFAULT '0',
     unrealized_pnl TEXT NOT NULL DEFAULT '0',
     realized_pnl TEXT NOT NULL DEFAULT '0',
+    leverage INTEGER NOT NULL DEFAULT 1,
+    margin_type TEXT NOT NULL DEFAULT 'isolated',
+    position_side TEXT NOT NULL DEFAULT 'LONG',
+    liquidation_price TEXT NOT NULL DEFAULT '0',
+    initial_margin TEXT NOT NULL DEFAULT '0',
+    maintenance_margin TEXT NOT NULL DEFAULT '0',
+    funding_paid TEXT NOT NULL DEFAULT '0',
     status TEXT NOT NULL DEFAULT 'OPEN',
     opened_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL,
-    cost_basis TEXT NOT NULL DEFAULT '0',
-    max_profit TEXT NOT NULL DEFAULT '0',
-    days_to_expiry INTEGER NOT NULL DEFAULT 0
+    updated_at BIGINT NOT NULL
 )"""
 
     @classmethod
@@ -164,6 +172,10 @@ class OrderModel:
     time_in_force: str
     created_at: int
     updated_at: int
+    working_type: str = ""
+    position_side: str = ""
+    price_protect: bool = False
+    avg_fill_price: str = "0"
 
     @classmethod
     def create_table_ddl(cls) -> str:
@@ -181,6 +193,10 @@ class OrderModel:
     time_in_force TEXT NOT NULL DEFAULT 'GTC',
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
+    working_type TEXT NOT NULL DEFAULT '',
+    position_side TEXT NOT NULL DEFAULT '',
+    price_protect INTEGER NOT NULL DEFAULT 0,
+    avg_fill_price TEXT NOT NULL DEFAULT '0',
     FOREIGN KEY (position_id) REFERENCES positions(id)
 )"""
 
@@ -244,7 +260,7 @@ class TradeModel:
 
 @dataclass
 class OptionContractModel:
-    """Option chain contract snapshot."""
+    """Option chain contract snapshot (historical reference)."""
 
     __tablename__: ClassVar[str] = "option_contracts"
 
@@ -310,7 +326,7 @@ class DecisionModel:
     timestamp: int
     strategy: str
     action: str
-    contract_symbol: str
+    symbol: str
     reason: str
     risk_passed: int
     executed: int
@@ -323,7 +339,7 @@ class DecisionModel:
     timestamp BIGINT NOT NULL,
     strategy TEXT NOT NULL,
     action TEXT NOT NULL,
-    contract_symbol TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
     reason TEXT NOT NULL DEFAULT '',
     risk_passed INTEGER NOT NULL DEFAULT 0,
     executed INTEGER NOT NULL DEFAULT 0,
@@ -396,7 +412,7 @@ class SessionModel:
     id SERIAL PRIMARY KEY,
     start_time BIGINT NOT NULL,
     end_time BIGINT,
-    mode TEXT NOT NULL DEFAULT 'paper',
+    mode TEXT NOT NULL DEFAULT 'binance',
     state TEXT NOT NULL DEFAULT 'running',
     pnl TEXT NOT NULL DEFAULT '0',
     trades_count INTEGER NOT NULL DEFAULT 0
@@ -583,15 +599,15 @@ class OptimizationRunModel:
 
     id: int
     run_at: int
-    trigger: str                # "scheduled" | "manual" | "startup"
+    trigger: str
     decisions_analyzed: int
     trades_analyzed: int
     recommendations_count: int
     applied_count: int
-    status: str                 # "running" | "completed" | "failed" | "skipped"
+    status: str
     started_at: int
     completed_at: int | None
-    summary_json: str           # JSON: brief LLM summary + aggregated metrics
+    summary_json: str
     error_message: str
 
     @classmethod
@@ -638,17 +654,17 @@ class OptimizationRecommendationModel:
     __tablename__: ClassVar[str] = "optimization_recommendations"
 
     id: int
-    run_id: int                      # FK -> optimization_runs.id
-    recommendation_type: str         # "parameter_adjustment" | "prompt_update" | "risk_threshold" | "strategy_toggle"
-    target_area: str                 # e.g. "iron_condor.max_iv", "system_prompt", "circuit_breaker.max_daily_loss"
-    current_value: str               # Before value (JSON string)
-    recommended_value: str           # After value (JSON string)
-    rationale: str                   # LLM explanation
-    impact_estimate: str             # e.g. "+2.3% win rate", "medium"
-    confidence: str                  # "low" | "medium" | "high"
-    status: str                      # "pending" | "applied" | "rejected" | "failed"
+    run_id: int
+    recommendation_type: str
+    target_area: str
+    current_value: str
+    recommended_value: str
+    rationale: str
+    impact_estimate: str
+    confidence: str
+    status: str
     applied_at: int | None
-    applied_strategy_params_json: str  # Snapshot of strategy params at apply time
+    applied_strategy_params_json: str
 
     @classmethod
     def create_table_ddl(cls) -> str:
@@ -688,27 +704,141 @@ class OptimizationRecommendationModel:
         return cls(*field_values)
 
 
+@dataclass
+class FundingPaymentModel:
+    """Funding payment settlement record."""
+
+    __tablename__: ClassVar[str] = "funding_payments"
+
+    id: int
+    symbol: str
+    position_id: int
+    amount: str  # positive = paid, negative = received
+    rate: str  # the funding rate at settlement
+    funding_time: int  # unix ms of the funding settlement
+
+    @classmethod
+    def create_table_ddl(cls) -> str:
+        return """CREATE TABLE IF NOT EXISTS funding_payments (
+    id SERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    position_id INTEGER REFERENCES positions(id),
+    amount TEXT NOT NULL DEFAULT '0',
+    rate TEXT NOT NULL DEFAULT '0',
+    funding_time BIGINT NOT NULL
+)"""
+
+    @classmethod
+    def columns(cls) -> list[str]:
+        return _col_names(cls)
+
+    def to_row(self) -> tuple:
+        return _to_row(self)
+
+    @classmethod
+    def from_row(cls, row: tuple) -> Self:
+        return _from_row(cls, row)
+
+
+@dataclass
+class LiquidationEventModel:
+    """Liquidation event record."""
+
+    __tablename__: ClassVar[str] = "liquidation_events"
+
+    id: int
+    symbol: str
+    position_id: int
+    amount: str  # liquidated quantity
+    price: str  # liquidation price
+    side: str  # "BUY" or "SELL" (opposite of position side)
+    timestamp: int
+
+    @classmethod
+    def create_table_ddl(cls) -> str:
+        return """CREATE TABLE IF NOT EXISTS liquidation_events (
+    id SERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    position_id INTEGER REFERENCES positions(id),
+    amount TEXT NOT NULL DEFAULT '0',
+    price TEXT NOT NULL DEFAULT '0',
+    side TEXT NOT NULL DEFAULT '',
+    timestamp BIGINT NOT NULL
+)"""
+
+    @classmethod
+    def columns(cls) -> list[str]:
+        return _col_names(cls)
+
+    def to_row(self) -> tuple:
+        return _to_row(self)
+
+    @classmethod
+    def from_row(cls, row: tuple) -> Self:
+        return _from_row(cls, row)
+
+
+@dataclass
+class FundingRateRecordModel:
+    """Funding rate historical record."""
+
+    __tablename__: ClassVar[str] = "funding_rate_records"
+
+    id: int
+    symbol: str
+    rate: str
+    time: int
+    mark_price: str
+    index_price: str
+
+    @classmethod
+    def create_table_ddl(cls) -> str:
+        return """CREATE TABLE IF NOT EXISTS funding_rate_records (
+    id SERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    rate TEXT NOT NULL DEFAULT '0',
+    time BIGINT NOT NULL,
+    mark_price TEXT NOT NULL DEFAULT '0',
+    index_price TEXT NOT NULL DEFAULT '0'
+)"""
+
+    @classmethod
+    def columns(cls) -> list[str]:
+        return _col_names(cls)
+
+    def to_row(self) -> tuple:
+        return _to_row(self)
+
+    @classmethod
+    def from_row(cls, row: tuple) -> Self:
+        return _from_row(cls, row)
+
+
 # ---------------------------------------------------------------------------
 # Index DDL definitions
 # ---------------------------------------------------------------------------
 
 INDEX_DEFINITIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)",
-    "CREATE INDEX IF NOT EXISTS idx_positions_contract ON positions(contract_symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)",
     "CREATE INDEX IF NOT EXISTS idx_orders_position_id ON orders(position_id)",
     "CREATE INDEX IF NOT EXISTS idx_trades_position_id ON trades(position_id)",
     "CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_decisions_strategy ON decisions(strategy)",
     "CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp)",
-    "CREATE INDEX IF NOT EXISTS idx_option_contracts_underlying ON option_contracts(underlying)",
-    "CREATE INDEX IF NOT EXISTS idx_option_contracts_expiry ON option_contracts(expiry)",
     "CREATE INDEX IF NOT EXISTS idx_perf_snapshots_timestamp ON performance_snapshots(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_opt_runs_status ON optimization_runs(status)",
     "CREATE INDEX IF NOT EXISTS idx_opt_runs_run_at ON optimization_runs(run_at)",
     "CREATE INDEX IF NOT EXISTS idx_opt_recommendations_run_id ON optimization_recommendations(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_opt_recommendations_type ON optimization_recommendations(recommendation_type)",
     "CREATE INDEX IF NOT EXISTS idx_opt_recommendations_status ON optimization_recommendations(status)",
+    "CREATE INDEX IF NOT EXISTS idx_funding_payments_symbol ON funding_payments(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_funding_payments_time ON funding_payments(funding_time)",
+    "CREATE INDEX IF NOT EXISTS idx_liquidation_events_symbol ON liquidation_events(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_liquidation_events_time ON liquidation_events(timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_funding_rate_records_symbol ON funding_rate_records(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_funding_rate_records_time ON funding_rate_records(time)",
 ]
 """All CREATE INDEX statements for hot-path queries."""
 
@@ -733,7 +863,6 @@ ALL_MODELS: list[type] = [
     PositionModel,
     OrderModel,
     TradeModel,
-    OptionContractModel,
     DecisionModel,
     StrategyStateModel,
     SessionModel,
@@ -743,5 +872,8 @@ ALL_MODELS: list[type] = [
     ErrorLogModel,
     OptimizationRunModel,
     OptimizationRecommendationModel,
+    FundingPaymentModel,
+    LiquidationEventModel,
+    FundingRateRecordModel,
 ]
 """All model classes, in dependency-safe order."""

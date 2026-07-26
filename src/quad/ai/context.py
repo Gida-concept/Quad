@@ -1,8 +1,9 @@
 """Market context collector for AI trading decisions.
 
-Gathers all market data needed for AI-driven trading: candles (from Binance
-Spot klines API since the Options API does not serve klines), current positions
-and account state from the exchange adapter, and option chains.
+Gathers all market data needed for AI-driven futures trading: candles (from
+Binance Futures klines API), current positions and account state from the
+exchange adapter, and futures market data (funding rates, mark prices, order
+books, ticker info).
 
 Usage::
 
@@ -30,7 +31,7 @@ import structlog
 
 from quad.config.schema import AiConfig
 from quad.types.domain import Account, Position
-from quad.types.market import Candle, OptionContract
+from quad.types.market import Candle, FundingRate, FuturesContract
 
 # ---------------------------------------------------------------------------
 # Logger
@@ -42,7 +43,10 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_BINANCE_SPOT_KLINE_URL = "https://api.binance.com/api/v3/klines"
+_BINANCE_FUTURES_KLINE_URL = "https://fapi.binance.com/fapi/v1/klines"
+
+# Shared aiohttp session (created on first use, closed via close_http_session())
+_shared_session: aiohttp.ClientSession | None = None
 
 # Mapping from our timeframe strings to Binance interval strings
 _TIMEFRAME_MAP: dict[str, str] = {
@@ -72,9 +76,18 @@ class MarketContext:
         Current open positions fetched from the exchange adapter.
     account:
         Current account state (balances, total USDT).
-    option_chains:
+    funding_rates:
         Dict keyed by pair symbol (e.g. ``"BTCUSDT"``), each value being
-        a list of ``OptionContract`` objects.
+        a ``FundingRate`` dataclass.
+    futures_contracts:
+        Dict keyed by pair symbol, each value being a ``FuturesContract``
+        dataclass with ticker info (volume, OI, 24h change, etc.).
+    order_books:
+        Dict keyed by pair symbol, each value being a raw order book dict
+        with ``bids`` and ``asks`` lists.
+    mark_prices:
+        Dict keyed by pair symbol, each value being the mark price as a
+        float.
     timestamp:
         Unix timestamp (seconds) when this context was collected.
     errors:
@@ -84,7 +97,10 @@ class MarketContext:
     candles: dict[str, list[Candle]] = field(default_factory=dict)
     positions: list[Position] = field(default_factory=list)
     account: Account | None = None
-    option_chains: dict[str, list[OptionContract]] = field(default_factory=dict)
+    funding_rates: dict[str, FundingRate] = field(default_factory=dict)
+    futures_contracts: dict[str, FuturesContract] = field(default_factory=dict)
+    order_books: dict[str, dict] = field(default_factory=dict)
+    mark_prices: dict[str, float] = field(default_factory=dict)
     timestamp: float = 0.0
     errors: dict[str, str] = field(default_factory=dict)
 
@@ -92,6 +108,22 @@ class MarketContext:
 # ============================================================================
 # Candle fetching
 # ============================================================================
+
+
+def _get_http_session() -> aiohttp.ClientSession:
+    """Return the shared aiohttp session, creating it on first access."""
+    global _shared_session
+    if _shared_session is None or _shared_session.closed:
+        _shared_session = aiohttp.ClientSession()
+    return _shared_session
+
+
+async def close_http_session() -> None:
+    """Close the shared aiohttp session (call during application shutdown)."""
+    global _shared_session
+    if _shared_session is not None and not _shared_session.closed:
+        await _shared_session.close()
+        _shared_session = None
 
 
 async def _fetch_klines(
@@ -127,7 +159,7 @@ async def _fetch_klines(
 
     try:
         async with session.get(
-            _BINANCE_SPOT_KLINE_URL,
+            _BINANCE_FUTURES_KLINE_URL,
             params=params,
             timeout=aiohttp.ClientTimeout(total=_KLINE_TIMEOUT_S),
         ) as resp:
@@ -212,9 +244,10 @@ async def collect_market_context(
 ) -> MarketContext:
     """Collect a complete market snapshot for AI trading decisions.
 
-    Fetches candles (from Binance Spot klines), current positions and
-    account state (from the exchange adapter), and option chains (from
-    the market data engine).
+    Fetches candles (from Binance Futures klines), current positions and
+    account state (from the exchange adapter), and futures market data
+    (funding rates, mark prices, order books, ticker info) from the
+    market data engine.
 
     Parameters
     ----------
@@ -222,7 +255,9 @@ async def collect_market_context(
         The exchange adapter (must have ``get_account`` and
         ``get_positions`` methods).
     market_data_engine:
-        The market data engine (must have ``get_option_chain`` method).
+        The market data engine (must have ``get_funding_rate``,
+        ``get_mark_price``, ``get_order_book``, and ``get_ticker``
+        methods).
     db_manager:
         Optional database manager (currently unused; reserved for future
         historical queries).
@@ -251,53 +286,53 @@ async def collect_market_context(
     context = MarketContext(timestamp=time.time())
 
     # ------------------------------------------------------------------
-    # 1. Fetch candles via Binance Spot klines API
+    # 1. Fetch candles via Binance Futures klines API (reused session)
     # ------------------------------------------------------------------
     try:
-        async with aiohttp.ClientSession() as session:
-            tasks = []
-            for pair in pairs:
-                for tf in timeframes:
-                    interval = _TIMEFRAME_MAP.get(tf, tf)
-                    tasks.append(
-                        _fetch_klines(session, pair, interval, candle_count)
-                    )
+        session = _get_http_session()
+        tasks = []
+        for pair in pairs:
+            for tf in timeframes:
+                interval = _TIMEFRAME_MAP.get(tf, tf)
+                tasks.append(
+                    _fetch_klines(session, pair, interval, candle_count)
+                )
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            idx = 0
-            for pair in pairs:
-                for tf in timeframes:
-                    key = f"{pair}_{tf}"
-                    result = results[idx]
-                    idx += 1
+        idx = 0
+        for pair in pairs:
+            for tf in timeframes:
+                key = f"{pair}_{tf}"
+                result = results[idx]
+                idx += 1
 
-                    if isinstance(result, Exception):
-                        context.errors[f"candles_{key}"] = str(result)
-                        logger.warning(
-                            "candle_fetch_failed",
-                            pair=pair,
-                            timeframe=tf,
-                            error=str(result),
-                        )
-                        continue
-
-                    if result is None:
-                        context.errors[f"candles_{key}"] = "empty_response"
-                        logger.warning(
-                            "candle_fetch_empty",
-                            pair=pair,
-                            timeframe=tf,
-                        )
-                        continue
-
-                    context.candles[key] = _klines_to_candles(pair, result)
-                    logger.info(
-                        "candles_fetched",
+                if isinstance(result, Exception):
+                    context.errors[f"candles_{key}"] = str(result)
+                    logger.warning(
+                        "candle_fetch_failed",
                         pair=pair,
                         timeframe=tf,
-                        count=len(result),
+                        error=str(result),
                     )
+                    continue
+
+                if result is None:
+                    context.errors[f"candles_{key}"] = "empty_response"
+                    logger.warning(
+                        "candle_fetch_empty",
+                        pair=pair,
+                        timeframe=tf,
+                    )
+                    continue
+
+                context.candles[key] = _klines_to_candles(pair, result)
+                logger.debug(
+                    "candles_fetched",
+                    pair=pair,
+                    timeframe=tf,
+                    count=len(result),
+                )
 
     except Exception as exc:
         context.errors["candle_collection"] = str(exc)
@@ -309,7 +344,7 @@ async def collect_market_context(
     try:
         positions = await exchange_adapter.get_positions()
         context.positions = list(positions)
-        logger.info("positions_fetched", count=len(positions))
+        logger.debug("positions_fetched", count=len(positions))
     except Exception as exc:
         context.errors["positions"] = str(exc)
         logger.warning("positions_fetch_failed", error=str(exc))
@@ -319,7 +354,7 @@ async def collect_market_context(
     # ------------------------------------------------------------------
     try:
         context.account = await exchange_adapter.get_account()
-        logger.info(
+        logger.debug(
             "account_fetched",
             total_usdt=float(context.account.total_usdt)
             if context.account
@@ -330,23 +365,76 @@ async def collect_market_context(
         logger.warning("account_fetch_failed", error=str(exc))
 
     # ------------------------------------------------------------------
-    # 4. Fetch option chains for all pairs
+    # 4. Fetch futures market data for all pairs (parallelized)
     # ------------------------------------------------------------------
-    for pair in pairs:
+    async def _fetch_one_futures_data(p: str) -> dict[str, Any]:
+        out: dict[str, Any] = {"pair": p}
         try:
-            chain = await market_data_engine.get_option_chain(pair)
-            context.option_chains[pair] = list(chain)
-            logger.info(
-                "option_chain_fetched",
-                pair=pair,
-                count=len(chain),
-            )
+            fr = await market_data_engine.get_funding_rate(p)
+            out["funding_rate"] = fr
         except Exception as exc:
-            context.errors[f"option_chain_{pair}"] = str(exc)
-            logger.warning(
-                "option_chain_fetch_failed",
-                pair=pair,
-                error=str(exc),
-            )
+            context.errors[f"funding_rate_{p}"] = str(exc)
+            logger.warning("funding_rate_fetch_failed", pair=p, error=str(exc))
+
+        try:
+            mp = await market_data_engine.get_mark_price(p)
+            out["mark_price"] = float(mp) if mp is not None else None
+        except Exception as exc:
+            context.errors[f"mark_price_{p}"] = str(exc)
+            logger.warning("mark_price_fetch_failed", pair=p, error=str(exc))
+
+        try:
+            ob = await market_data_engine.get_order_book(p)
+            if ob is not None:
+                out["order_book"] = ob
+        except Exception as exc:
+            context.errors[f"order_book_{p}"] = str(exc)
+            logger.warning("order_book_fetch_failed", pair=p, error=str(exc))
+
+        try:
+            ticker = await market_data_engine.get_ticker(p)
+            if ticker is not None:
+                out["ticker"] = ticker
+        except Exception as exc:
+            context.errors[f"ticker_{p}"] = str(exc)
+            logger.warning("ticker_fetch_failed", pair=p, error=str(exc))
+
+        return out
+
+    results = await asyncio.gather(
+        *[_fetch_one_futures_data(p) for p in pairs], return_exceptions=True
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning("futures_data_gather_error", error=str(result))
+            continue
+        pair = result["pair"]
+        fr = result.get("funding_rate")
+        if fr is not None:
+            context.funding_rates[pair] = fr
+        mp = result.get("mark_price")
+        if mp is not None:
+            context.mark_prices[pair] = mp
+        ob = result.get("order_book")
+        if ob is not None:
+            context.order_books[pair] = ob
+        ticker = result.get("ticker")
+        if ticker is not None:
+            # Build a FuturesContract from ticker data if available
+            try:
+                contract = FuturesContract(
+                    symbol=pair,
+                    mark_price=Decimal(str(mp)) if mp else Decimal("0"),
+                    last_price=Decimal(str(ticker.get("lastPrice", 0))),
+                    volume_24h=Decimal(str(ticker.get("volume", 0))),
+                    price_change_24h=Decimal(str(ticker.get("priceChange", 0))),
+                    high_24h=Decimal(str(ticker.get("highPrice", 0))),
+                    low_24h=Decimal(str(ticker.get("lowPrice", 0))),
+                    last_update=int(time.time()),
+                )
+                context.futures_contracts[pair] = contract
+            except Exception as exc:
+                context.errors[f"contract_{pair}"] = str(exc)
+                logger.warning("contract_build_failed", pair=pair, error=str(exc))
 
     return context

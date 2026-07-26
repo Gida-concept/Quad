@@ -1,4 +1,4 @@
-"""Historical market data provider for Quad options trading bot.
+"""Historical market data provider for Quad futures trading bot.
 
 Provides queries against the persistence layer for backtesting and analysis
 use by strategies.  Some methods are stubs that will be fully implemented
@@ -8,35 +8,17 @@ when the backtesting engine (Phase 9) adds the required tables.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 if TYPE_CHECKING:
+    from quad.exchange.base import ExchangeAdapter
     from quad.persistence.database import DatabaseManager
     from quad.types.domain import Trade
-    from quad.types.market import Candle, OptionContract, OptionPriceTick
+    from quad.types.market import Candle
 
 logger = structlog.get_logger(__name__)
-
-# Column names for the option_contracts table (from models.py)
-_OPTION_CONTRACT_COLUMNS = [
-    "symbol",
-    "underlying",
-    "strike",
-    "expiry",
-    "option_type",
-    "mark_price",
-    "bid",
-    "ask",
-    "volume",
-    "open_interest",
-    "iv",
-    "delta",
-    "gamma",
-    "theta",
-    "vega",
-]
 
 _TRADE_COLUMNS = [
     "id",
@@ -56,18 +38,27 @@ class HistoricalDataProvider:
     """Provides historical market data from the database.
 
     Implements queries against the persistence layer for backtesting and
-    strategy analysis.
+    strategy analysis.  Futures-specific history endpoints (funding rate
+    history, open interest history) are available via the exchange adapter
+    passed optionally at construction.
     """
 
-    def __init__(self, db_manager: DatabaseManager) -> None:
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        exchange_adapter: ExchangeAdapter | None = None,
+    ) -> None:
         """Initialize the provider.
 
         Parameters
         ----------
         db_manager:
             The ``DatabaseManager`` instance to query.
+        exchange_adapter:
+            Optional exchange adapter for REST-based history queries.
         """
         self._db = db_manager
+        self._exchange = exchange_adapter
         self._log = logger.bind(dsn=str(db_manager.dsn))
 
     # ------------------------------------------------------------------
@@ -105,109 +96,190 @@ class HistoricalDataProvider:
         return []
 
     # ------------------------------------------------------------------
-    # Option chain snapshots
+    # Funding rate history
     # ------------------------------------------------------------------
 
-    async def get_option_chain_snapshot(
+    async def get_funding_rate_history(
         self,
         symbol: str,
-        timestamp: datetime,
-    ) -> list[OptionContract]:
-        """Return the most recent option chain snapshot for *symbol*.
+        start_time: int | None = None,
+        end_time: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return historical funding rate data for *symbol*.
 
-        Queries the ``option_contracts`` table for records that match the
-        given underlying symbol and were updated at or before *timestamp*.
+        Delegates to the exchange adapter's ``get_funding_rate_history``
+        if available.  Returns an empty list if the adapter does not
+        support historical queries.
 
         Parameters
         ----------
         symbol:
-            The underlying asset symbol (e.g. ``"BTCUSDT"``).
-        timestamp:
-            The snapshot cutoff time.
-        """
-        from decimal import Decimal
+            The trading pair symbol (e.g. ``"BTCUSDT"``).
+        start_time:
+            Optional start time in unix milliseconds.
+        end_time:
+            Optional end time in unix milliseconds.
+        limit:
+            Maximum number of records to return (default 100).
 
-        from quad.types.market import OptionContract
+        Returns
+        -------
+        list[dict]
+            Each dict contains ``symbol``, ``funding_rate``, ``mark_price``,
+            and ``funding_time`` keys.
+        """
+        if self._exchange is None or not hasattr(
+            self._exchange, "get_funding_rate_history"
+        ):
+            self._log.warning(
+                "get_funding_rate_history_not_available",
+                symbol=symbol,
+            )
+            return []
 
         try:
-            ts_ms = int(timestamp.timestamp() * 1000)
-
-            columns = ", ".join(_OPTION_CONTRACT_COLUMNS)
-            query = (
-                f"SELECT {columns} FROM option_contracts "
-                f"WHERE underlying = $1 AND updated_at <= $2 "
-                f"ORDER BY expiry ASC, strike ASC"
-            )
-
-            async with self._db.pool.acquire() as conn:
-                rows = await conn.fetch(query, symbol, ts_ms)
-
-            contracts: list[OptionContract] = []
-            for row in rows:
-                contracts.append(
-                    OptionContract(
-                        symbol=row[0],
-                        underlying=row[1],
-                        strike=Decimal(str(row[2])),
-                        expiry=row[3],
-                        option_type=row[4],
-                        mark_price=Decimal(str(row[5])),
-                        bid=Decimal(str(row[6])) if row[6] is not None else None,
-                        ask=Decimal(str(row[7])) if row[7] is not None else None,
-                        volume=Decimal(str(row[8])) if row[8] is not None else Decimal("0"),
-                        open_interest=int(row[9]) if row[9] is not None else 0,
-                        implied_volatility=Decimal(str(row[10])) if row[10] is not None else Decimal("0"),
-                        delta=Decimal(str(row[11])) if row[11] is not None else Decimal("0"),
-                        gamma=Decimal(str(row[12])) if row[12] is not None else Decimal("0"),
-                        theta=Decimal(str(row[13])) if row[13] is not None else Decimal("0"),
-                        vega=Decimal(str(row[14])) if row[14] is not None else Decimal("0"),
-                    )
-                )
-
-            self._log.debug(
-                "chain_snapshot_fetched",
+            result = await self._exchange.get_funding_rate_history(  # type: ignore[union-attr]
                 symbol=symbol,
-                count=len(contracts),
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
             )
-            return contracts
-
+            self._log.debug(
+                "funding_rate_history_fetched",
+                symbol=symbol,
+                count=len(result),
+            )
+            return result
         except Exception:
             self._log.exception(
-                "chain_snapshot_failed",
+                "funding_rate_history_failed",
                 symbol=symbol,
-                timestamp=timestamp.isoformat(),
             )
             return []
 
     # ------------------------------------------------------------------
-    # Price history (stub)
+    # Open interest history
     # ------------------------------------------------------------------
 
-    async def get_price_history(
+    async def get_open_interest_history(
         self,
         symbol: str,
+        period: str = "5m",
         limit: int = 100,
-    ) -> list[OptionPriceTick]:
-        """Return recent price history for *symbol*.
+    ) -> list[dict[str, Any]]:
+        """Return historical open interest data for *symbol*.
 
-        .. note::
-            This is a **stub** that returns an empty list.  Price history
-            will be available once the backtesting component records tick
-            data.
+        Delegates to the exchange adapter's ``get_open_interest_history``
+        if available.  Returns an empty list if the adapter does not
+        support historical queries.
 
         Parameters
         ----------
         symbol:
-            The option symbol (e.g. ``"BTC-220930-20000-C"``).
+            The trading pair symbol (e.g. ``"BTCUSDT"``).
+        period:
+            Data granularity (e.g. ``"5m"``, ``"15m"``, ``"30m"``,
+            ``"1h"``, ``"2h"``, ``"4h"``, ``"6h"``, ``"12h"``, ``"1d"``).
         limit:
-            Maximum number of ticks to return.
+            Maximum number of records to return (default 100).
+
+        Returns
+        -------
+        list[dict]
+            Each dict contains ``symbol``, ``open_interest``, ``timestamp``,
+            and ``open_interest_value`` keys.
         """
-        self._log.warning(
-            "get_price_history_not_implemented",
-            symbol=symbol,
-            limit=limit,
-        )
-        return []
+        if self._exchange is None or not hasattr(
+            self._exchange, "get_open_interest_history"
+        ):
+            self._log.warning(
+                "get_open_interest_history_not_available",
+                symbol=symbol,
+            )
+            return []
+
+        try:
+            result = await self._exchange.get_open_interest_history(  # type: ignore[union-attr]
+                symbol=symbol,
+                period=period,
+                limit=limit,
+            )
+            self._log.debug(
+                "open_interest_history_fetched",
+                symbol=symbol,
+                count=len(result),
+            )
+            return result
+        except Exception:
+            self._log.exception(
+                "open_interest_history_failed",
+                symbol=symbol,
+            )
+            return []
+
+    # ------------------------------------------------------------------
+    # Top trader long/short ratio
+    # ------------------------------------------------------------------
+
+    async def get_top_trader_long_short_ratio(
+        self,
+        symbol: str,
+        period: str = "5m",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return top trader long/short ratio for *symbol*.
+
+        Delegates to the exchange adapter's
+        ``get_top_trader_long_short_ratio`` if available.  Returns an
+        empty list if the adapter does not support this query.
+
+        .. note::
+            This endpoint may require special API key permissions.
+
+        Parameters
+        ----------
+        symbol:
+            The trading pair symbol (e.g. ``"BTCUSDT"``).
+        period:
+            Data granularity (e.g. ``"5m"``, ``"15m"``, ``"30m"``,
+            ``"1h"``, ``"2h"``, ``"4h"``, ``"6h"``, ``"12h"``, ``"1d"``).
+        limit:
+            Maximum number of records to return (default 100).
+
+        Returns
+        -------
+        list[dict]
+            Each dict contains ``symbol``, ``long_short_ratio``,
+            ``long_account``, ``short_account``, and ``timestamp`` keys.
+        """
+        if self._exchange is None or not hasattr(
+            self._exchange, "get_top_trader_long_short_ratio"
+        ):
+            self._log.warning(
+                "get_top_trader_ls_ratio_not_available",
+                symbol=symbol,
+            )
+            return []
+
+        try:
+            result = await self._exchange.get_top_trader_long_short_ratio(  # type: ignore[union-attr]
+                symbol=symbol,
+                period=period,
+                limit=limit,
+            )
+            self._log.debug(
+                "top_trader_ls_ratio_fetched",
+                symbol=symbol,
+                count=len(result),
+            )
+            return result
+        except Exception:
+            self._log.exception(
+                "top_trader_ls_ratio_failed",
+                symbol=symbol,
+            )
+            return []
 
     # ------------------------------------------------------------------
     # Trade history

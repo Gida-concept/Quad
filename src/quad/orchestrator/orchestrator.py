@@ -4,7 +4,7 @@ Wires all subsystems together and manages the full trading lifecycle:
 
     - Configuration loading (4-layer merge)
     - Database initialization and migrations
-    - Exchange adapter creation (binance / paper / mock)
+    - Exchange adapter creation (binance / mock)
     - Market data engine (WebSocket + cache + buffers)
     - Risk management (gates, circuit breakers, position sizing)
     - Strategy evaluation (all registered strategies)
@@ -52,11 +52,6 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG_PATH = "config/config.local.yaml"
-_DEFAULT_CYCLE_INTERVAL = 60  # seconds (deterministic fallback)
-_DEFAULT_AI_CYCLE_INTERVAL = 3600  # seconds (1 hour for AI-first mode)
-
-# Default underlyings to fetch option chains for
-_DEFAULT_UNDERLYINGS = ["BTCUSDT", "ETHUSDT"]
 
 
 # ============================================================================
@@ -82,7 +77,7 @@ class QuadOrchestrator:
     Attributes
     ----------
     _mode : str
-        Resolved trading mode: ``"paper"``, ``"live"``, or ``"dry_run"``.
+        Resolved trading mode: ``"binance"`` or ``"dry_run"``.
     _stop_event : asyncio.Event
         Set when a shutdown signal is received.
     """
@@ -115,17 +110,24 @@ class QuadOrchestrator:
 
         # Cached config dict (used by multiple subsystems)
         self._config_dict: dict[str, Any] = {}
-        self._mode: str = "paper"
-        self._cycle_interval: int = _DEFAULT_CYCLE_INTERVAL
+        self._mode: str = "binance"
+        self._cycle_interval: int = 60
 
         # AI-first mode tracking
-        self._ai_cycle_interval: int = _DEFAULT_AI_CYCLE_INTERVAL
+        self._ai_cycle_interval: int = 3600
         self._ai_enabled: bool = False
         self._ai_cycle_count: int = 0
         self._last_ai_decision: dict[str, Any] = {}
         self._last_ai_error: str | None = None
         self._last_ai_cycle_time_ms: float = 0.0
         self._consecutive_ai_failures: int = 0
+
+        # Telegram notification support
+        self._telegram_bot: Any = None
+        self._telegram_chat_id: int = 0
+
+        # Indicator cache (key: "SYMBOL_TIMEFRAME", invalidated every 60s)
+        self._indicator_cache: dict[str, dict[str, Any]] = {}
 
         # Lifecycle
         self._stop_event = asyncio.Event()
@@ -165,6 +167,20 @@ class QuadOrchestrator:
             await self._init_config_manager()
             await self._init_database()
             await self._init_exchange_adapter()
+
+            # Sync position state from exchange on startup
+            try:
+                exchange_positions = await self._exchange_adapter.get_positions()
+                self._log.info(
+                    "on_start_positions_synced",
+                    count=len(exchange_positions),
+                )
+            except Exception as exc:
+                self._log.warning(
+                    "on_start_positions_sync_failed",
+                    error=str(exc),
+                )
+
             await self._init_market_data()
             await self._init_risk_manager()
             await self._init_execution_engine()
@@ -293,7 +309,7 @@ class QuadOrchestrator:
         self._config_dict = self._config_manager.to_dict()
         self._mode = self._config_manager.get_mode()
         self._cycle_interval = int(
-            self._config_manager.get("trading.max_cycle_interval", _DEFAULT_CYCLE_INTERVAL)
+            self._config_manager.get("trading.max_cycle_interval", 60)
         )
 
         # Merge Telegram env vars into config dict if not already present
@@ -317,22 +333,6 @@ class QuadOrchestrator:
         if token and not _dot_get(self._config_dict, "telegram.bot_token"):
             self._set_telegram_config("bot_token", token)
 
-        # Telegram admin IDs
-        admin_ids_str = os.environ.get("TELEGRAM_ADMIN_IDS")
-        if admin_ids_str:
-            try:
-                ids = [
-                    int(x.strip())
-                    for x in admin_ids_str.split(",")
-                    if x.strip()
-                ]
-                self._set_telegram_config("admin_ids", ids)
-            except (ValueError, TypeError):
-                self._log.warning(
-                    "invalid_telegram_admin_ids",
-                    value=admin_ids_str,
-                )
-
         # Telegram notification chat ID
         chat_id_str = os.environ.get("TELEGRAM_NOTIFICATION_CHAT_ID")
         if chat_id_str:
@@ -352,7 +352,7 @@ class QuadOrchestrator:
         Parameters
         ----------
         key:
-            The config key to set (e.g. ``"bot_token"``, ``"admin_ids"``).
+            The config key to set (e.g. ``"bot_token"``).
         value:
             The value to store.
         """
@@ -366,7 +366,10 @@ class QuadOrchestrator:
         """Initialise the database (connect + create tables + migrate)."""
         dsn = self._config_manager.get(
             "persistence.dsn",
-            os.environ.get("DATABASE_URL", "postgresql://quad:quad@localhost:5432/quad"),
+            os.environ.get(
+                "DATABASE_URL",
+                self._config_dict.get("persistence", {}).get("dsn", "postgresql://quad:quad@localhost:5432/quad"),
+            ),
         )
 
         self._db_manager = DatabaseManager(
@@ -381,8 +384,8 @@ class QuadOrchestrator:
         """Create and connect the exchange adapter.
 
         Maps ``QUAD_MODE`` to the exchange implementation:
-            - ``"paper"`` / ``"dry_run"`` -> ``PaperTradingAdapter``
-            - ``"live"`` -> configured exchange (default ``BinanceOptionsAdapter``)
+            - ``"dry_run"`` -> binance with testnet=True
+            - ``"binance"`` -> configured exchange (testnet or live)
         """
         # Override exchange name based on mode
         mode = self._mode
@@ -390,9 +393,10 @@ class QuadOrchestrator:
             self._config_dict.get("exchange", {})
         )
 
-        if mode in ("paper", "dry_run"):
-            exchange_cfg["name"] = "paper"
-        elif mode == "live":
+        if mode == "dry_run":
+            exchange_cfg["name"] = "binance"
+            exchange_cfg["testnet"] = True
+        else:
             exchange_cfg["name"] = exchange_cfg.get("name", "binance")
 
         # Ensure rate_limit is a dict (for Binance adapter)
@@ -459,7 +463,7 @@ class QuadOrchestrator:
         - ``retrain`` section in config
         """
         retrain_cfg = self._config_dict.get("retrain", {})
-        if not retrain_cfg.get("enabled", True):
+        if not retrain_cfg.get("enabled", False):
             self._log.info("optimizer_disabled_config")
             self._optimizer = None
             return
@@ -534,15 +538,25 @@ class QuadOrchestrator:
             optimizer=self._optimizer,
         )
         await self._bot.start()
-        self._log.info("telegram_bot_initialized")
+
+        # Capture the PTB Bot instance for trade notifications
+        if self._bot is not None and self._bot.application is not None:
+            self._telegram_bot = self._bot.application.bot
+        self._telegram_chat_id = int(
+            telegram_cfg.get("notification_chat_id", 0) or 0
+        )
+
+        self._log.info(
+            "telegram_bot_initialized",
+            chat_id=self._telegram_chat_id,
+        )
 
     async def _init_health_server(self) -> None:
         """Initialise the health check HTTP server."""
         monitoring_cfg = self._config_dict.get("monitoring", {})
         health_cfg = monitoring_cfg.get("health_server", {})
         port = int(
-            health_cfg.get("port")
-            or os.environ.get("QUAD_HEALTH_PORT", "9090")
+            health_cfg.get("port", os.environ.get("QUAD_HEALTH_PORT", 9090))
         )
         enabled = health_cfg.get("enabled", True)
 
@@ -633,10 +647,10 @@ class QuadOrchestrator:
         # Set AI cycle interval from config, defaulting to 1 hour
         self._ai_cycle_interval = int(
             self._config_manager.get(
-                "trading.ai_cycle_interval", _DEFAULT_AI_CYCLE_INTERVAL
+                "trading.ai_cycle_interval", 3600
             )
             if self._config_manager
-            else _DEFAULT_AI_CYCLE_INTERVAL
+            else 3600
         )
         self._ai_enabled = True
 
@@ -889,9 +903,9 @@ class QuadOrchestrator:
         Original flow: evaluate registered strategies directly.
         """
         underlyings = list(
-            self._config_manager.get("trading.underlyings", _DEFAULT_UNDERLYINGS)
+            self._config_manager.get("trading.underlyings", ["BTCUSDT", "ETHUSDT"])
             if self._config_manager
-            else _DEFAULT_UNDERLYINGS
+            else ["BTCUSDT", "ETHUSDT"]
         )
 
         while not self._stop_event.is_set():
@@ -988,6 +1002,7 @@ class QuadOrchestrator:
                                 action, ctx_copy
                             )
                             if result.passed:
+                                action.risk_checked = True
                                 order_result = await self._execution_engine.execute(
                                     action, ctx_copy
                                 )
@@ -998,6 +1013,17 @@ class QuadOrchestrator:
                                     side=action.side,
                                     status=order_result.status,
                                 )
+                                # Notify on executed trade actions
+                                if action.type in ("ENTER", "EXIT"):
+                                    await self._notify_trade(
+                                        action_type=action.type,
+                                        strategy=action.strategy,
+                                        contract=action.contract or "",
+                                        side=action.side or "",
+                                        quantity=int(action.quantity),
+                                        price=str(action.price) if action.price else None,
+                                        reason=action.reason,
+                                    )
                             else:
                                 self._log.warning(
                                     "action_rejected_by_risk",
@@ -1019,6 +1045,19 @@ class QuadOrchestrator:
                 # ----------------------------------------------------------
                 try:
                     await self._risk_manager.update_monitoring(context)
+                    # Check if any circuit breaker was triggered
+                    if self._risk_manager is not None:
+                        try:
+                            cb_status = await self._risk_manager.get_status()
+                            for cb_name, cb in cb_status.circuit_breakers.items():
+                                if cb.active:
+                                    await self._notify_circuit_breaker(
+                                        name=cb_name,
+                                        reason=cb.reason or "Circuit breaker triggered",
+                                        tier=getattr(cb, "tier", 0),
+                                    )
+                        except Exception:
+                            pass
                 except Exception as exc:
                     self._log.warning(
                         "risk_monitoring_update_error",
@@ -1113,7 +1152,7 @@ class QuadOrchestrator:
             db_manager=self._db_manager,
             config=self._config_dict,
         )
-        self._log.info(
+        self._log.debug(
             "market_context_collected",
             pairs=len(context.candles),
             positions=len(context.positions),
@@ -1121,13 +1160,30 @@ class QuadOrchestrator:
             errors=len(context.errors),
         )
 
-        # 2. Compute technical indicators per pair/timeframe
+        # 2. Compute technical indicators per pair/timeframe (with 60s cache)
         from quad.ai.ta import compute_indicators
 
         indicators: dict[str, dict[str, Any]] = {}
+        now_ts = int(time.time())
         for key, candles in context.candles.items():
+            # Check cache
+            cache_key = key  # already "SYMBOL_TIMEFRAME" format
+            cached = self._indicator_cache.get(cache_key)
+            if cached is not None:
+                cached_ts = cached.get("_timestamp", 0)
+                indicator_cache_ttl = self._config_dict.get("trading", {}).get("indicator_cache_ttl_seconds", 60)
+                if now_ts - cached_ts < indicator_cache_ttl:
+                    indicators[key] = cached["indicators"]
+                    continue
+                else:
+                    del self._indicator_cache[cache_key]
+            # Compute fresh
             try:
                 indicators[key] = compute_indicators(candles)
+                self._indicator_cache[cache_key] = {
+                    "indicators": indicators[key],
+                    "_timestamp": now_ts,
+                }
             except Exception as exc:
                 self._log.warning(
                     "indicator_computation_failed",
@@ -1146,18 +1202,19 @@ class QuadOrchestrator:
         )
 
         # 4. Call Groq for trading decision
-        self._log.info(
+        self._log.debug(
             "ai_decision_request",
             cycle=self._ai_cycle_count,
             system_prompt_len=len(prompts["system"]),
             user_prompt_len=len(prompts["user"]),
         )
 
+        ai_trade_cfg = self._config_dict.get("ai", {})
         decision = await self._groq_client.decide_trades(
             system_prompt=prompts["system"],
             user_prompt=prompts["user"],
-            temperature=0.0,
-            max_tokens=2048,
+            temperature=ai_trade_cfg.get("temperature", 0.0),
+            max_tokens=ai_trade_cfg.get("max_tokens", 2048),
         )
 
         # Track timing
@@ -1172,7 +1229,7 @@ class QuadOrchestrator:
         except Exception as exc:
             self._log.warning("ai_decision_log_failed", error=str(exc))
 
-        self._log.info(
+        self._log.debug(
             "ai_decision_received",
             action=decision.get("action", "unknown"),
             strategy=decision.get("strategy"),
@@ -1219,10 +1276,10 @@ class QuadOrchestrator:
         ]
 
         if not open_positions:
-            log.info("close_all_positions_no_open_positions")
+            log.debug("close_all_positions_no_open_positions")
             return True  # Nothing to close — success by definition
 
-        log.info(
+        log.debug(
             "close_all_positions_started",
             count=len(open_positions),
         )
@@ -1333,7 +1390,7 @@ class QuadOrchestrator:
         """
         action_type = decision.get("action", "HOLD")
         if action_type == "HOLD":
-            self._log.info("ai_decision_hold", reason=decision.get("reasoning", ""))
+            self._log.debug("ai_decision_hold", reason=decision.get("reasoning", ""))
             return
 
         strategy_name = decision.get("strategy") or "ai_default"
@@ -1360,7 +1417,7 @@ class QuadOrchestrator:
                 else False
             )
             if serial_mode:
-                self._log.info(
+                self._log.debug(
                     "serial_trade_mode_closing_positions",
                     action=action_type,
                     contract=contract_symbol,
@@ -1389,7 +1446,7 @@ class QuadOrchestrator:
                 Decimal(str(limit_price)) if limit_price is not None else None
             ),
             reason=decision.get("reasoning", "AI trading decision"),
-            metadata={"ai_confidence": decision.get("confidence", 0.0)},
+            metadata={"ai_confidence": decision.get("confidence", self._config_dict.get("ai", {}).get("default_confidence", 0.0))},
         )
 
         # Risk check
@@ -1404,6 +1461,7 @@ class QuadOrchestrator:
                     gate=result.gate,
                 )
                 return
+            action.risk_checked = True
         except Exception as exc:
             self._log.exception("ai_risk_evaluation_error", error=str(exc))
             return
@@ -1419,6 +1477,18 @@ class QuadOrchestrator:
                 side=side,
                 status=getattr(order_result, "status", "unknown"),
             )
+
+            # Notify on successful execution (ENTER, EXIT, ADJUST, ROLL)
+            if action_type in ("ENTER", "EXIT"):
+                await self._notify_trade(
+                    action_type=action_type,
+                    strategy=strategy_name,
+                    contract=contract_symbol,
+                    side=side,
+                    quantity=int(quantity),
+                    price=str(action.price) if action.price else None,
+                    reason=action.reason,
+                )
         except Exception as exc:
             self._log.exception(
                 "ai_order_execution_error",
@@ -1456,6 +1526,188 @@ class QuadOrchestrator:
             )
         except Exception as exc:
             self._log.warning("ai_decision_db_log_error", error=str(exc))
+
+    # ------------------------------------------------------------------
+    # Telegram trade notifications
+    # ------------------------------------------------------------------
+
+    async def _notify_trade(
+        self,
+        action_type: str,
+        strategy: str,
+        contract: str,
+        side: str,
+        quantity: int,
+        price: str | None,
+        reason: str,
+        pnl: str | None = None,
+    ) -> None:
+        """Send trade notification via Telegram."""
+        if not self._telegram_bot or not self._telegram_chat_id:
+            return
+        try:
+            emoji = {
+                "ENTER": "\U0001f7e2",
+                "EXIT": "\U0001f534",
+                "ADJUST": "\U0001f7e1",
+                "ROLL": "\U0001f504",
+            }.get(action_type, "⚪")
+            msg = (
+                f"{emoji} *{action_type}* | {strategy}\n"
+                f"Contract: `{contract}`\n"
+                f"Side: {side} | Qty: {quantity}\n"
+                f"Price: {price or 'MARKET'}\n"
+            )
+            if pnl:
+                msg += f"PnL: {pnl}\n"
+            msg += f"Reason: {reason}"
+            await self._telegram_bot.send_message(
+                chat_id=self._telegram_chat_id,
+                text=msg,
+                parse_mode="Markdown",
+            )
+        except Exception as exc:
+            self._log.warning("telegram_notify_failed", error=str(exc))
+
+    async def _notify_circuit_breaker(
+        self, name: str, reason: str, tier: int
+    ) -> None:
+        """Send circuit breaker alert via Telegram."""
+        if not self._telegram_bot or not self._telegram_chat_id:
+            return
+        try:
+            msg = (
+                f"\U0001f6a8 *Circuit Breaker Triggered*\n"
+                f"Name: `{name}`\n"
+                f"Tier: {tier}\n"
+                f"Reason: {reason}"
+            )
+            await self._telegram_bot.send_message(
+                chat_id=self._telegram_chat_id,
+                text=msg,
+                parse_mode="Markdown",
+            )
+        except Exception as exc:
+            self._log.warning("telegram_cb_notify_failed", error=str(exc))
+
+    # ------------------------------------------------------------------
+    # Manual strategy execution (for Telegram /execute)
+    # ------------------------------------------------------------------
+
+    async def _build_strategy_context(self) -> StrategyContext | None:
+        """Collect fresh market context for a single strategy evaluation.
+
+        Fetches account state, positions, open orders, and option chains
+        from the exchange adapter and market data engine, then assembles
+        a ``StrategyContext`` for strategy evaluation.
+
+        Returns
+        -------
+        StrategyContext or None
+            ``None`` if exchange or market data is unavailable.
+        """
+        if self._exchange_adapter is None or self._market_data is None:
+            return None
+
+        try:
+            account = await self._exchange_adapter.get_account()
+            positions = await self._exchange_adapter.get_positions()
+            open_orders = []
+            try:
+                open_orders = await self._exchange_adapter.get_open_orders()
+            except Exception:
+                pass
+
+            all_chains: list[Any] = []
+            underlyings = list(
+                self._config_manager.get("trading.underlyings", ["BTCUSDT", "ETHUSDT"])
+                if self._config_manager
+                else ["BTCUSDT", "ETHUSDT"]
+            )
+            for underlying in underlyings:
+                try:
+                    chain = await self._market_data.get_option_chain(underlying)
+                    all_chains.extend(chain)
+                except Exception as exc:
+                    self._log.warning(
+                        "build_context_chain_fetch_failed",
+                        underlying=underlying,
+                        error=str(exc),
+                    )
+
+            return StrategyContext(
+                account=account,
+                positions=positions,
+                orders=open_orders,
+                option_chain=all_chains,
+                config=self._config_dict,
+            )
+        except Exception as exc:
+            self._log.exception("build_strategy_context_error", error=str(exc))
+            return None
+
+    async def execute_strategy(self, strategy_name: str, dry_run: bool = False) -> dict[str, Any]:
+        """Execute a single strategy by name and return the result.
+
+        Parameters
+        ----------
+        strategy_name:
+            The strategy name to execute (e.g., ``'cash_secured_put'``).
+        dry_run:
+            If True, evaluate but don't submit orders.
+
+        Returns
+        -------
+        dict with keys: strategy, actions_count, actions (list), error (if any)
+        """
+        log = self._log.bind(strategy=strategy_name)
+        log.info("execute_strategy_manual", dry_run=dry_run)
+
+        try:
+            # 1. Get the strategy instance
+            strategy_cls = StrategyBase.registry.get(strategy_name)
+            if strategy_cls is None:
+                return {"strategy": strategy_name, "error": f"Unknown strategy: {strategy_name}"}
+
+            strategy = strategy_cls()
+
+            # 2. Collect market context
+            context = await self._build_strategy_context()
+            if context is None:
+                return {"strategy": strategy_name, "error": "Failed to build market context"}
+
+            # 3. Evaluate the strategy
+            strategy_params = self._config_dict.get("strategy", {}).get(strategy_name, {})
+            ctx = replace(context, strategy_params=strategy_params)
+            actions = await strategy.evaluate(ctx)
+
+            if not actions:
+                return {"strategy": strategy_name, "actions_count": 0, "actions": []}
+
+            # 4. Execute actions (or log if dry run)
+            executed = []
+            for action in actions:
+                if action.type == "HOLD":
+                    continue
+                if not dry_run:
+                    try:
+                        result = await self._execution_engine.execute(action, context)
+                        executed.append({"action": action.type, "result": str(getattr(result, "status", "submitted"))})
+                    except Exception as exec_err:
+                        executed.append({"action": action.type, "error": str(exec_err)})
+                else:
+                    executed.append({"action": action.type, "dry_run": True})
+
+            return {
+                "strategy": strategy_name,
+                "actions_count": len(actions),
+                "actions": [{"type": a.type, "contract": a.contract, "side": a.side, "reason": a.reason} for a in actions],
+                "executed": executed,
+            }
+
+        except Exception as exc:
+            log.exception("execute_strategy_error", error=str(exc))
+            return {"strategy": strategy_name, "error": str(exc)}
 
     # ------------------------------------------------------------------
     # Status

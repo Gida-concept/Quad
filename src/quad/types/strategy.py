@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from quad.types.domain import Account, Order, Position
-from quad.types.market import OptionContract, UnderlyingPrice
+from quad.types.domain import Account, FuturesPosition, Order, Position
+from quad.types.market import FundingRate, FuturesContract
 from quad.types.risk import RiskStatus
 
 
@@ -47,19 +47,18 @@ class HistoricalDataAccess(Protocol):
         """
         ...
 
-    async def get_option_chain_snapshot(
-        self,
-        symbol: str,
-        timestamp: int,
-    ) -> list[dict[str, Any]]:
-        """Retrieve a snapshot of the option chain at a given timestamp.
+    async def get_funding_rate_history(
+        self, symbol: str, start: int, end: int
+    ) -> list[FundingRate]:
+        """Retrieve funding rate history for a symbol.
 
         Args:
-            symbol: Underlying asset symbol.
-            timestamp: Snapshot timestamp in unix milliseconds.
+            symbol: Trading pair symbol.
+            start: Start timestamp in unix milliseconds.
+            end: End timestamp in unix milliseconds.
 
         Returns:
-            List of option contract dicts with full market data.
+            List of FundingRate objects.
         """
         ...
 
@@ -78,17 +77,23 @@ class StrategyContext:
     positions: list[Position] = field(default_factory=list)
     """Currently open positions."""
 
+    futures_positions: list[FuturesPosition] = field(default_factory=list)
+    """Currently open futures positions."""
+
     orders: list[Order] = field(default_factory=list)
     """Currently open orders."""
 
-    option_chain: list[OptionContract] = field(default_factory=list)
-    """Current option chain data as list of OptionContract dicts."""
+    futures_contracts: dict[str, FuturesContract] = field(default_factory=dict)
+    """Current futures contract data keyed by symbol."""
 
-    underlying_price: UnderlyingPrice | None = None
+    funding_rates: dict[str, FundingRate] = field(default_factory=dict)
+    """Current funding rates keyed by symbol."""
+
+    mark_prices: dict[str, float] = field(default_factory=dict)
+    """Current mark prices keyed by symbol."""
+
+    underlying_price: float | None = None
     """Current underlying asset price."""
-
-    greeks: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Mapping of symbol to Greek values dict."""
 
     risk_status: RiskStatus | None = None
     """Current risk management status."""

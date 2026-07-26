@@ -1,58 +1,45 @@
-"""Exposure limiter for monitoring and enforcing portfolio Greek limits.
+"""Futures position tracker for monitoring portfolio exposure.
 
-Tracks total delta, gamma, theta, and vega exposure across all positions
-and enforces configured maximums per Greek.
+Tracks per-symbol notional exposure, average leverage, liquidation proximity,
+margin utilization, and funding rate snapshots across all futures positions.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from typing import Any
 
 import structlog
 
-from quad.types.domain import Position
-from quad.types.market import OptionContract
+from quad.types.strategy import StrategyContext
 
 
-# Default exposure limits
-_DEFAULTS: dict[str, Any] = {
-    "max_delta": Decimal("100"),
-    "max_theta": Decimal("-500"),
-    "max_vega": Decimal("500"),
-}
+class FuturesPositionTracker:
+    """Tracks and reports futures position exposure metrics.
 
-# Supported Greek keys
-GREEK_KEYS = ["delta", "gamma", "theta", "vega"]
-
-
-class ExposureLimiter:
-    """Monitors and enforces portfolio Greek exposure limits.
-
-    Computes total portfolio Greeks by summing each position's Greek
-    contribution (position quantity * contract Greek value) and compares
-    them against configured limits.
+    Monitors total notional exposure per symbol, aggregated leverage,
+    liquidation risk, margin utilization, and funding rate history.
 
     Parameters
     ----------
     config:
-        Configuration dictionary. The exposure sub-section is extracted
-        from ``config.get('risk', {}).get('exposure', {})``.
+        Configuration dictionary. The risk sub-section is extracted
+        automatically.
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
         self._log = structlog.get_logger(__name__)
-        self._log.info("exposure_limiter_init")
+        self._log.info("futures_position_tracker_init")
 
         raw = config.get("risk", config)
         self._cfg: dict[str, Any] = raw if isinstance(raw, dict) else config
 
-        self._exposure_cfg: dict[str, Any] = self._cfg.get("exposure", {})
-
         # Cached exposure data
-        self._last_exposure: dict[str, Decimal] = {
-            k: Decimal("0") for k in GREEK_KEYS
-        }
+        self._notional_exposure: dict[str, Decimal] = {}
+        self._avg_leverage: Decimal = Decimal("0")
+        self._liquidation_risk: list[dict[str, Any]] = []
+        self._margin_utilization: Decimal = Decimal("0")
+        self._funding_rate_snapshots: dict[str, list[Decimal]] = {}
         self._last_report: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -61,250 +48,138 @@ class ExposureLimiter:
 
     async def compute_exposure(
         self,
-        positions: list[Position],
-        option_chain: list[OptionContract],
-    ) -> dict[str, Decimal]:
-        """Compute total portfolio Greek exposure.
-
-        For each open position, finds the matching OptionContract by
-        symbol and multiplies the position quantity by the contract
-        Greek value. Results are summed across all positions.
+        context: StrategyContext,
+    ) -> dict[str, Any]:
+        """Compute portfolio futures exposure from strategy context.
 
         Parameters
         ----------
-        positions:
-            List of current positions.
-        option_chain:
-            List of option contracts with Greek values.
+        context:
+            Current strategy execution context with futures_positions,
+            funding_rates, and account data.
 
         Returns
         -------
-        dict[str, Decimal]
-            Mapping of Greek name to total exposure value.
+        dict[str, Any]
+            Exposure report with per-symbol notional exposure, average
+            leverage, liquidation proximity, margin utilization, and
+            funding rate data.
         """
-        # Build a lookup from contract symbol to OptionContract
-        contract_map: dict[str, OptionContract] = {
-            c.symbol: c for c in option_chain
-        }
+        positions = context.futures_positions or []
+        funding_rates = context.funding_rates or {}
+        account = context.account
 
-        exposure: dict[str, Decimal] = {
-            "delta": Decimal("0"),
-            "gamma": Decimal("0"),
-            "theta": Decimal("0"),
-            "vega": Decimal("0"),
-        }
+        # ------------------------------------------------------------------
+        # 1. Per-symbol notional exposure
+        # ------------------------------------------------------------------
+        notional_per_symbol: dict[str, Decimal] = {}
+        total_notional = Decimal("0")
+        total_margin = Decimal("0")
 
         for pos in positions:
-            contract = contract_map.get(pos.contract_symbol)
-            if contract is None:
-                self._log.debug(
-                    "contract_not_found_for_exposure",
-                    symbol=pos.contract_symbol,
+            symbol = pos.symbol
+            size = Decimal(str(abs(pos.size)))
+            mark_price = Decimal(str(pos.mark_price))
+            notional = size * mark_price
+            notional_per_symbol[symbol] = (
+                notional_per_symbol.get(symbol, Decimal("0")) + notional
+            )
+            total_notional += notional
+            total_margin += Decimal(str(pos.margin))
+
+        self._notional_exposure = notional_per_symbol
+
+        # ------------------------------------------------------------------
+        # 2. Aggregated leverage
+        # ------------------------------------------------------------------
+        if account and account.total_wallet_balance > Decimal("0"):
+            self._avg_leverage = (
+                total_notional / account.total_wallet_balance
+            ).quantize(Decimal("0.01"))
+        else:
+            self._avg_leverage = Decimal("0")
+
+        # ------------------------------------------------------------------
+        # 3. Liquidation monitoring
+        # ------------------------------------------------------------------
+        liquidation_risk: list[dict[str, Any]] = []
+        for pos in positions:
+            if pos.liquidation_price > 0 and pos.mark_price > 0:
+                if pos.position_side.value == "long":
+                    distance = (
+                        (pos.mark_price - pos.liquidation_price) / pos.mark_price
+                    )
+                else:
+                    distance = (
+                        (pos.liquidation_price - pos.mark_price) / pos.mark_price
+                    )
+                liquidation_risk.append({
+                    "symbol": pos.symbol,
+                    "side": pos.position_side.value,
+                    "distance_to_liquidation_pct": round(distance * 100, 4),
+                    "liquidation_price": pos.liquidation_price,
+                    "mark_price": pos.mark_price,
+                })
+        self._liquidation_risk = liquidation_risk
+
+        # ------------------------------------------------------------------
+        # 4. Margin utilization
+        # ------------------------------------------------------------------
+        if account and account.total_wallet_balance > Decimal("0"):
+            self._margin_utilization = (
+                total_margin / account.total_wallet_balance
+            ).quantize(Decimal("0.0001"))
+        else:
+            self._margin_utilization = Decimal("0")
+
+        # ------------------------------------------------------------------
+        # 5. Funding rate tracking
+        # ------------------------------------------------------------------
+        symbol_funding: dict[str, Decimal] = {}
+        for sym, fr in funding_rates.items():
+            rate_dec = Decimal(str(fr.funding_rate))
+            self._funding_rate_snapshots.setdefault(sym, []).append(rate_dec)
+            # Keep only the last 100 snapshots
+            if len(self._funding_rate_snapshots[sym]) > 100:
+                self._funding_rate_snapshots[sym] = (
+                    self._funding_rate_snapshots[sym][-100:]
                 )
-                continue
+            symbol_funding[sym] = rate_dec
 
-            qty = pos.quantity
-            exposure["delta"] += contract.delta * qty
-            exposure["gamma"] += contract.gamma * qty
-            exposure["theta"] += contract.theta * qty
-            exposure["vega"] += contract.vega * qty
-
-        # Round for consistency
-        for key in exposure:
-            exposure[key] = exposure[key].quantize(
-                Decimal("0.0001"), rounding=ROUND_HALF_UP
-            )
-
-        self._last_exposure = dict(exposure)
-        return exposure
-
-    async def check_delta_limit(self, exposure: dict[str, Decimal]) -> bool:
-        """Check if absolute portfolio delta is within the configured limit.
-
-        Returns
-        -------
-        bool
-            True if ``|delta| <= max_delta``.
-        """
-        limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_delta", _DEFAULTS["max_delta"]
-                )
-            )
-        )
-        delta = exposure.get("delta", Decimal("0"))
-        result = abs(delta) <= limit
-
-        if not result:
-            self._log.warning(
-                "delta_limit_exceeded",
-                delta=str(delta),
-                limit=str(limit),
-            )
-        return result
-
-    async def check_theta_limit(self, exposure: dict[str, Decimal]) -> bool:
-        """Check if portfolio theta is within the configured limit.
-
-        For short option positions theta is typically negative (time
-        decay works in our favour). The limit is a negative number
-        (e.g. -500), so the check ensures theta is not too positive
-        (too much long premium).
-
-        theta > max_theta means theta is *better* (more negative) and
-        passes. theta < max_theta means theta is worse and fails.
-
-        Returns
-        -------
-        bool
-            True if ``theta >= max_theta`` (theta is within acceptable
-            range).
-        """
-        limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_theta", _DEFAULTS["max_theta"]
-                )
-            )
-        )
-        theta = exposure.get("theta", Decimal("0"))
-
-        # We want theta to be >= limit (i.e., not worse than the limit)
-        # For short premium strategies, theta is negative and more negative
-        # (e.g. -1000) is more short premium.
-        # Theta > max_theta (e.g. -400 > -500) means less short premium = okay
-        # Theta < max_theta (e.g. -600 < -500) means more short premium = exceeds
-        result = theta >= limit
-
-        if not result:
-            self._log.warning(
-                "theta_limit_exceeded",
-                theta=str(theta),
-                limit=str(limit),
-            )
-        return result
-
-    async def check_vega_limit(self, exposure: dict[str, Decimal]) -> bool:
-        """Check if portfolio vega is within the configured limit.
-
-        Returns
-        -------
-        bool
-            True if ``|vega| <= max_vega``.
-        """
-        limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_vega", _DEFAULTS["max_vega"]
-                )
-            )
-        )
-        vega = exposure.get("vega", Decimal("0"))
-        result = abs(vega) <= limit
-
-        if not result:
-            self._log.warning(
-                "vega_limit_exceeded",
-                vega=str(vega),
-                limit=str(limit),
-            )
-        return result
-
-    def get_exposure_report(self) -> dict[str, Any]:
-        """Return a full exposure report with current values and limits.
-
-        The report includes all calculated Greeks, their configured
-        limits, and whether each is within bounds.
-        """
-        delta_limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_delta", _DEFAULTS["max_delta"]
-                )
-            )
-        )
-        theta_limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_theta", _DEFAULTS["max_theta"]
-                )
-            )
-        )
-        vega_limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_vega", _DEFAULTS["max_vega"]
-                )
-            )
-        )
-
-        exposure = self._last_exposure
-
-        return {
-            "exposure": {
-                "delta": str(exposure.get("delta", Decimal("0"))),
-                "gamma": str(exposure.get("gamma", Decimal("0"))),
-                "theta": str(exposure.get("theta", Decimal("0"))),
-                "vega": str(exposure.get("vega", Decimal("0"))),
+        # ------------------------------------------------------------------
+        # Build report
+        # ------------------------------------------------------------------
+        report: dict[str, Any] = {
+            "notional_exposure": {
+                k: str(v) for k, v in notional_per_symbol.items()
             },
-            "limits": {
-                "max_delta": str(delta_limit),
-                "max_theta": str(theta_limit),
-                "max_vega": str(vega_limit),
-            },
-            "within_limits": {
-                "delta": abs(exposure.get("delta", Decimal("0"))) <= delta_limit,
-                "theta": exposure.get("theta", Decimal("0")) >= theta_limit,
-                "vega": abs(exposure.get("vega", Decimal("0"))) <= vega_limit,
-            },
-            "exceeded_limits": self.exceeds_limits(exposure),
+            "total_notional_usd": str(total_notional.quantize(Decimal("0.01"))),
+            "avg_leverage": str(self._avg_leverage),
+            "margin_utilization_pct": str(
+                (self._margin_utilization * Decimal("100")).quantize(Decimal("0.01"))
+            ),
+            "liquidation_risk": liquidation_risk,
+            "num_positions": len(positions),
+            "funding_rates": {k: str(v) for k, v in symbol_funding.items()},
         }
 
-    def exceeds_limits(
-        self, exposure: dict[str, Decimal]
-    ) -> list[str]:
-        """Return a list of Greek names whose limits are exceeded.
+        self._last_report = report
+        return report
 
-        Parameters
-        ----------
-        exposure:
-            Computed Greek exposure dict.
+    def get_exposure_report(self) -> dict[str, Any]:
+        """Return the latest computed exposure report.
 
-        Returns
-        -------
-        list[str]
-            Names of Greeks exceeding configured limits (e.g. ``["delta"]``).
+        Returns an empty-structured report if no data has been computed yet.
         """
-        delta_limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_delta", _DEFAULTS["max_delta"]
-                )
-            )
-        )
-        theta_limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_theta", _DEFAULTS["max_theta"]
-                )
-            )
-        )
-        vega_limit = Decimal(
-            str(
-                self._exposure_cfg.get(
-                    "max_vega", _DEFAULTS["max_vega"]
-                )
-            )
-        )
+        if self._last_report:
+            return dict(self._last_report)
 
-        exceeded: list[str] = []
-
-        if abs(exposure.get("delta", Decimal("0"))) > delta_limit:
-            exceeded.append("delta")
-        if exposure.get("theta", Decimal("0")) < theta_limit:
-            exceeded.append("theta")
-        if abs(exposure.get("vega", Decimal("0"))) > vega_limit:
-            exceeded.append("vega")
-
-        return exceeded
+        return {
+            "notional_exposure": {},
+            "total_notional_usd": "0",
+            "avg_leverage": "0",
+            "margin_utilization_pct": "0",
+            "liquidation_risk": [],
+            "num_positions": 0,
+            "funding_rates": {},
+        }

@@ -7,6 +7,7 @@ suitable for display in Telegram or logging.
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -25,10 +26,12 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _MARKET_ANALYSIS_SYSTEM = (
-    "You are a professional options trading analyst. "
+    "You are a professional futures trading analyst. "
     "Analyse the provided market data and give concise, actionable insights. "
-    "Focus on: implied volatility levels, put/call skew, unusual activity, "
-    "Greeks positioning, and notable DTE clusters. "
+    "Focus on: funding rate sentiment (positive = longs paying shorts, "
+    "indicating bullish crowding; negative = shorts paying longs), market "
+    "regime (trending/ranging/volatile), order book imbalance (bid/ask "
+    "volume ratio), and any notable liquidation clusters. "
     "Keep responses under 300 words. "
     "Use plain language suitable for a Telegram message."
 )
@@ -40,23 +43,26 @@ _MARKET_ANALYSIS_SYSTEM = (
 
 async def analyze_market(
     client: GroqClient,
-    underlying: str,
-    underlying_price: Decimal | None,
-    option_chain: list[Any],
+    symbol: str,
+    mark_price: Decimal | None,
+    funding_rate: Any | None,
+    order_book: dict[str, Any] | None,
     positions: list[Any] | None = None,
 ) -> str:
-    """Analyse current market conditions from option chain data.
+    """Analyse current futures market conditions.
 
     Parameters
     ----------
     client:
         Initialised ``GroqClient`` instance.
-    underlying:
-        Underlying symbol, e.g. ``"BTCUSDT"``.
-    underlying_price:
-        Current price of the underlying, or ``None``.
-    option_chain:
-        List of ``OptionContract`` objects (or compatible dicts).
+    symbol:
+        Trading pair symbol, e.g. ``"BTCUSDT"``.
+    mark_price:
+        Current mark price, or ``None``.
+    funding_rate:
+        Current ``FundingRate`` object, or ``None``.
+    order_book:
+        Raw order book dict with ``bids`` and ``asks``, or ``None``.
     positions:
         Optional list of open ``Position`` objects for context.
 
@@ -65,8 +71,8 @@ async def analyze_market(
     str
         AI-generated market analysis text.
     """
-    # Build a compact market summary from the option chain data
-    chain_summary = _summarise_chain(option_chain, underlying_price)
+    # Build a compact market summary from futures data
+    market_summary = _summarize_market(symbol, mark_price, funding_rate, order_book)
 
     position_summary = ""
     if positions:
@@ -81,16 +87,15 @@ async def analyze_market(
         )
 
     user_prompt = (
-        f"Analyse {underlying} options market:\n"
-        f"Underlying price: ${float(underlying_price or 0):,.2f}\n"
-        f"{chain_summary}"
+        f"Analyse {symbol} futures market:\n"
+        f"Mark price: ${float(mark_price or 0):,.2f}\n"
+        f"{market_summary}"
         f"{position_summary}"
     )
 
     logger.info(
         "ai_analyze_market",
-        underlying=underlying,
-        chain_size=len(option_chain),
+        symbol=symbol,
         positions=len(positions) if positions else 0,
     )
 
@@ -111,70 +116,61 @@ async def analyze_market(
 # ============================================================================
 
 
-def _summarise_chain(
-    chain: list[Any],
-    underlying_price: Decimal | None,
+def _summarize_market(
+    symbol: str,
+    mark_price: Decimal | None,
+    funding_rate: Any | None,
+    order_book: dict[str, Any] | None,
 ) -> str:
-    """Build a compact text summary from an option chain list.
+    """Build a compact text summary from futures market data.
 
-    Extracts key metrics: ATM IV, put/call skew, volume clusters,
-    and extreme strikes.
+    Extracts key metrics: funding rate sentiment, order book imbalance,
+    volume activity, and technical regime.
     """
-    if not chain:
-        return "Option chain: empty."
-
-    calls = [c for c in chain if getattr(c, "option_type", "") == "CALL"]
-    puts = [c for c in chain if getattr(c, "option_type", "") == "PUT"]
-
     lines: list[str] = []
+    spot = float(mark_price or 0)
+    lines.append(f"Mark Price: ${spot:,.2f}")
 
-    # Underlying context
-    spot = float(underlying_price or 0)
+    # Current price and 24h context
+    if spot > 0:
+        lines.append(f"Price context: current at ${spot:,.2f}")
 
-    # ATM implied volatility (closest to spot)
-    atm_ivs = []
-    for c in chain:
-        strike = float(getattr(c, "strike", 0))
-        iv = float(getattr(c, "implied_volatility", 0))
-        if spot > 0 and abs(strike - spot) / spot < 0.05 and iv > 0:
-            atm_ivs.append(iv)
+    # Funding rate analysis
+    if funding_rate is not None:
+        fr = float(getattr(funding_rate, "funding_rate", 0))
+        fr_pct = fr * 100
+        if fr > 0.0001:
+            sentiment = "positive (longs paying shorts — bullish crowding)"
+        elif fr < -0.0001:
+            sentiment = "negative (shorts paying longs — bearish crowding)"
+        else:
+            sentiment = "neutral"
+        lines.append(
+            f"Funding Rate: {fr_pct:+.6f}% ({sentiment})"
+        )
+        next_time = getattr(funding_rate, "next_funding_time", 0)
+        if next_time and int(next_time) > 0:
+            remaining = int(next_time) - int(time.time() * 1000)
+            hours_remaining = max(0, remaining) / 3600000
+            lines.append(f"  Next funding in ~{hours_remaining:.1f}h")
+    else:
+        lines.append("Funding Rate: N/A")
 
-    if atm_ivs:
-        avg_atm_iv = sum(atm_ivs) / len(atm_ivs)
-        if spot > 0:
-            lines.append(f"ATM IV: {avg_atm_iv:.1%} ({len(atm_ivs)} contracts)")
-            lines.append(f"ATM IV range: {min(atm_ivs):.1%} - {max(atm_ivs):.1%}")
-
-    # Put / Call IV skew (OTM put IV vs OTM call IV)
-    otm_puts = [
-        float(p.implied_volatility)
-        for p in puts
-        if float(p.strike) < spot * 0.95 and float(p.implied_volatility) > 0
-    ]
-    otm_calls = [
-        float(c.implied_volatility)
-        for c in calls
-        if float(c.strike) > spot * 1.05 and float(c.implied_volatility) > 0
-    ]
-
-    if otm_puts and otm_calls:
-        put_iv = sum(otm_puts) / len(otm_puts)
-        call_iv = sum(otm_calls) / len(otm_calls)
-        skew = (put_iv - call_iv) / call_iv * 100 if call_iv > 0 else 0
-        lines.append(f"Put IV: {put_iv:.1%} | Call IV: {call_iv:.1%} | Skew: {skew:+.1f}%")
-
-    # Total contracts in chain
-    lines.append(f"Contracts: {len(calls)} calls, {len(puts)} puts")
-
-    # Greeks snapshot (average absolute delta for near-term)
-    near_chain = [
-        c
-        for c in chain
-        if float(getattr(c, "delta", 0)) != 0
-    ]
-    if near_chain:
-        avg_delta = sum(abs(float(c.delta)) for c in near_chain) / len(near_chain)
-        avg_gamma = sum(abs(float(c.gamma)) for c in near_chain) / len(near_chain)
-        lines.append(f"Avg |delta|: {avg_delta:.4f} | Avg |gamma|: {avg_gamma:.6f}")
+    # Order book imbalance
+    if order_book is not None:
+        bids = order_book.get("bids", [])
+        asks = order_book.get("asks", [])
+        if bids and asks:
+            bid_vol = sum(float(b[1]) for b in bids[:10])
+            ask_vol = sum(float(a[1]) for a in asks[:10])
+            ratio = bid_vol / ask_vol if ask_vol > 0 else 0
+            bid_price = float(bids[0][0])
+            ask_price = float(asks[0][0])
+            spread_pct = (ask_price - bid_price) / bid_price * 100 if bid_price > 0 else 0
+            lines.append(f"Order Book: spread={spread_pct:.4f}%, bid/ask vol ratio={ratio:.2f}")
+            lines.append(f"  Top bid: ${bid_price:,.2f} ({float(bids[0][1]):.4f})")
+            lines.append(f"  Top ask: ${ask_price:,.2f} ({float(asks[0][1]):.4f})")
+    else:
+        lines.append("Order Book: N/A")
 
     return "\n".join(lines)

@@ -1,8 +1,16 @@
-"""Centralized WebSocket connection manager for market data streams.
+"""Centralized WebSocket connection manager for futures market data streams.
 
 Provides ``WebSocketManager`` that manages subscriptions to named streams,
 handles automatic reconnection with exponential backoff, and routes incoming
 messages to registered callbacks.
+
+Supports Binance Futures WebSocket streams including:
+  - ``!miniTicker@arr`` — 24-hour mini ticker array
+  - ``!markPrice@arr@1s`` — mark price + funding rate array (1s updates)
+  - ``!bookTicker`` — real-time best bid/ask for all symbols
+  - ``{symbol}@kline_{interval}`` — individual kline/candle streams
+  - ``{symbol}@ticker_1h`` — 1-hour ticker window
+  - ``!forceOrder@arr`` — liquidation order monitoring
 
 Uses ``aiohttp`` for WebSocket connections.
 """
@@ -28,20 +36,19 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Constants
+# Default constants (fallback values when config is not provided)
+# Instance lookups on WebSocketManager read from config and fall back to
+# these defaults.
 # ---------------------------------------------------------------------------
 
-# Default combined-stream WebSocket URL for Binance Options
-_DEFAULT_WS_COMBINED_URL = "wss://fstream.binance.com/market/stream"
+_WS_URL_FALLBACK = "wss://fstream.binance.com/ws"
 
-# Reconnection backoff parameters
-_BASE_BACKOFF_S = 1.0
-_MAX_BACKOFF_S = 30.0
-_BACKOFF_MULTIPLIER = 2.0
-_JITTER_FRACTION = 0.1
+_WS_BASE_BACKOFF_S_FALLBACK = 1.0
+_WS_MAX_BACKOFF_S_FALLBACK = 30.0
+_WS_BACKOFF_MULTIPLIER_FALLBACK = 2.0
+_WS_JITTER_FRACTION_FALLBACK = 0.1
 
-# How long to wait between health-check pings on idle connections
-_HEARTBEAT_INTERVAL_S = 30.0
+_WS_HEARTBEAT_INTERVAL_S_FALLBACK = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +64,7 @@ class _Subscription:
     """Unique subscription identifier (uuid4)."""
 
     stream_name: str
-    """Name of the stream (e.g. ``"BTCUSDT@optionMarkPrice"``)."""
+    """Name of the stream (e.g. ``"BTCUSDT@kline_1m"``)."""
 
     handler: Callable[[dict], Awaitable[None]]
     """Async callback invoked with each parsed JSON message."""
@@ -81,18 +88,18 @@ class _Subscription:
 
 
 class WebSocketManager:
-    """Manages multiple WebSocket subscriptions to market data streams.
+    """Manages multiple WebSocket subscriptions to futures market data streams.
 
-    * Accepts a list of stream names to subscribe to.
+    * Accepts a list of stream names to subscribe to (e.g. ``!miniTicker@arr``).
     * Handles reconnection with exponential backoff + jitter.
     * Routes received messages to registered handlers by stream name.
-    * Supports combined streams (multiple streams in one connection).
+    * Supports individual connections per stream.
 
     Usage::
 
         mgr = WebSocketManager(exchange_adapter)
         await mgr.start()
-        sub_id = await mgr.subscribe("BTCUSDT@optionMarkPrice", my_handler)
+        sub_id = await mgr.subscribe("BTCUSDT@kline_1m", my_handler)
         ...
         await mgr.unsubscribe(sub_id)
         await mgr.stop()
@@ -112,17 +119,19 @@ class WebSocketManager:
         config:
             Optional configuration dict.  Recognised keys:
 
-            * ``ws_combined_url`` — Override the combined-stream WebSocket URL.
-              Defaults to ``wss://fstream.binance.com/market/stream``.
+            * ``ws_url`` — Override the WebSocket URL.
+              Defaults to ``wss://fstream.binance.com/ws``.
             * ``ws_heartbeat_interval`` — Seconds between keepalive pings.
         """
         self._exchange = exchange_adapter
         self._config = config or {}
+        self._market_data_config = self._config.get("market_data", {})
+        self._ws_config = self._market_data_config.get("websocket", {})
 
-        # Combined-stream WebSocket endpoint
-        self._ws_url = self._config.get(
-            "ws_combined_url",
-            _DEFAULT_WS_COMBINED_URL,
+        # WebSocket endpoint
+        self._ws_url = self._ws_config.get(
+            "ws_url",
+            self._config.get("ws_url", _WS_URL_FALLBACK),
         )
 
         self._log = logger.bind(ws_url=self._ws_url)
@@ -220,7 +229,7 @@ class WebSocketManager:
         Parameters
         ----------
         stream_name:
-            The stream to subscribe to (e.g. ``"BTCUSDT@optionMarkPrice"``).
+            The stream to subscribe to (e.g. ``"BTCUSDT@kline_1m"``).
         handler:
             Async callback invoked with each decoded JSON message.
 
@@ -381,12 +390,25 @@ class WebSocketManager:
     async def _run_stream_connection(self, stream_name: str) -> None:
         """Background task that maintains one WebSocket connection.
 
-        Connects to the combined-stream endpoint, subscribes to
-        *stream_name*, reads messages, and dispatches them to registered
-        handlers.  Reconnects automatically on failure with exponential
-        backoff, unless the subscription has been removed.
+        Connects to the WebSocket endpoint, subscribes to *stream_name*,
+        reads messages, and dispatches them to registered handlers.
+        Reconnects automatically on failure with exponential backoff,
+        unless the subscription has been removed.
         """
-        backoff = _BASE_BACKOFF_S
+        ws_base_backoff = float(
+            self._ws_config.get("base_backoff_seconds", _WS_BASE_BACKOFF_S_FALLBACK)
+        )
+        ws_max_backoff = float(
+            self._ws_config.get("max_backoff_seconds", _WS_MAX_BACKOFF_S_FALLBACK)
+        )
+        ws_backoff_mult = float(
+            self._ws_config.get("backoff_multiplier", _WS_BACKOFF_MULTIPLIER_FALLBACK)
+        )
+        ws_jitter = float(
+            self._ws_config.get("jitter_fraction", _WS_JITTER_FRACTION_FALLBACK)
+        )
+
+        backoff = ws_base_backoff
 
         while self._running:
             # Check whether the subscription still exists
@@ -402,7 +424,7 @@ class WebSocketManager:
             try:
                 await self._connect_and_read(stream_name)
                 # Connection closed cleanly --- reset backoff
-                backoff = _BASE_BACKOFF_S
+                backoff = ws_base_backoff
             except asyncio.CancelledError:
                 self._log.debug(
                     "ws_task_cancelled",
@@ -426,21 +448,21 @@ class WebSocketManager:
                     sub.reconnect_count += 1
 
             # Exponential backoff with jitter
-            jitter = random.uniform(0, backoff * _JITTER_FRACTION)
+            jitter = random.uniform(0, backoff * ws_jitter)
             await asyncio.sleep(backoff + jitter)
             backoff = min(
-                backoff * _BACKOFF_MULTIPLIER,
-                _MAX_BACKOFF_S,
+                backoff * ws_backoff_mult,
+                ws_max_backoff,
             )
 
         self._tasks.pop(stream_name, None)
 
     async def _connect_and_read(self, stream_name: str) -> None:
-        """Connect to the combined stream and read messages.
+        """Connect to WebSocket and read messages.
 
-        Opens a WebSocket to ``self._ws_url``, subscribes to
-        *stream_name*, and forwards every incoming message to registered
-        handlers until the connection is closed or cancelled.
+        Opens a WebSocket to ``self._ws_url``, subscribes to *stream_name*,
+        and forwards every incoming message to registered handlers until
+        the connection is closed or cancelled.
         """
         session = self._session
         if session is None:
@@ -448,7 +470,9 @@ class WebSocketManager:
 
         async with session.ws_connect(
             self._ws_url,
-            heartbeat=_HEARTBEAT_INTERVAL_S,
+            heartbeat=float(
+                self._ws_config.get("heartbeat_interval_seconds", _WS_HEARTBEAT_INTERVAL_S_FALLBACK)
+            ),
         ) as ws:
             # Store the connection so we can close it later
             async with self._lock:
@@ -565,12 +589,10 @@ class WebSocketManager:
     ) -> None:
         """Parse a JSON message and dispatch to registered handlers.
 
-        Combined stream responses are wrapped:
-        ``{"stream": "...", "data": {...}}``
-
-        This method extracts the data payload and routes it based on the
-        ``stream`` field.  If the message lacks a ``stream`` wrapper, it
-        is dispatched to all handlers for *stream_name*.
+        Messages from the Binance WebSocket API are typically raw JSON
+        (not wrapped in a ``stream`` / ``data`` envelope).  This method
+        dispatches the parsed message to all handlers registered for
+        *stream_name*.
         """
         try:
             parsed: dict[str, Any] = json.loads(raw)
@@ -587,7 +609,7 @@ class WebSocketManager:
         data: dict[str, Any] | None = parsed.get("data")
 
         if actual_stream and data is not None:
-            # Combined stream wrapper
+            # Combined stream wrapper (used by the /stream endpoint)
             message = data
             origin_stream = actual_stream
         else:

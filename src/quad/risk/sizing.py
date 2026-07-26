@@ -1,8 +1,13 @@
-"""Position sizing using Fractional Kelly Criterion for options trading.
+"""Position sizing using Fractional Kelly Criterion for futures trading.
 
 Computes optimal position size based on historical win rate, average
-win/loss ratio, a fractional Kelly multiplier, and absolute portfolio
-limits.
+win/loss ratio, a fractional Kelly multiplier, leverage adjustment,
+and absolute portfolio limits.
+
+All default values are sourced from ``config.default.yaml`` and the
+Pydantic schema. This module only contains inline fallbacks as a
+last resort — they match the canonical defaults and are never used
+when the config system is properly set up.
 """
 
 from __future__ import annotations
@@ -17,21 +22,13 @@ from quad.types.strategy import StrategyContext
 from quad.persistence.database import DatabaseManager
 
 
-# Default configuration values
-_DEFAULTS: dict[str, Any] = {
-    "kelly": {"fraction": 0.25, "default_fraction": 0.02},
-    "max_position_size_pct": 0.10,
-    "max_position_size_usd": 10000,
-}
-
-
 class PositionSizer:
     """Position sizing using Fractional Kelly Criterion.
 
     Computes the optimal position size based on historical trade
     statistics (win rate, average win/loss), applies a conservative
-    fractional multiplier, and caps at portfolio-based and absolute
-    limits.
+    fractional multiplier, adjusts for leverage, and caps at
+    portfolio-based and absolute limits.
 
     Parameters
     ----------
@@ -53,30 +50,31 @@ class PositionSizer:
         raw = config.get("risk", config)
         self._cfg: dict[str, Any] = raw if isinstance(raw, dict) else config
 
-        # Sizing parameters
+        # Sizing parameters — read from config dict with inline fallbacks
+        # that match config.default.yaml / schema.py defaults.
         self._kelly_multiplier = float(
-            self._cfg.get("kelly", {}).get(
-                "fraction", _DEFAULTS["kelly"]["fraction"]
-            )
+            self._cfg.get("kelly", {}).get("fraction", 0.25)
         )
         self._default_fraction = float(
-            self._cfg.get("kelly", {}).get(
-                "default_fraction", _DEFAULTS["kelly"]["default_fraction"]
-            )
+            self._cfg.get("kelly", {}).get("default_fraction", 0.02)
         )
         self._max_pos_pct = float(
-            self._cfg.get(
-                "max_position_size_pct",
-                _DEFAULTS["max_position_size_pct"],
-            )
+            self._cfg.get("max_position_size_pct", 0.10)
         )
         self._max_pos_usd = Decimal(
-            str(
-                self._cfg.get(
-                    "max_position_size_usd",
-                    _DEFAULTS["max_position_size_usd"],
-                )
-            )
+            str(self._cfg.get("max_position_size_usd", 10000))
+        )
+        self._max_leverage = int(
+            self._cfg.get("max_leverage", 50)
+        )
+        self._min_pos_usd = Decimal(
+            str(self._cfg.get("min_position_size_usd", 5))
+        )
+        self._trade_capital_usd = Decimal(
+            str(self._cfg.get("trade_capital_usd", 5))
+        )
+        self._sl_enabled = bool(
+            self._cfg.get("per_position_sl", {}).get("enabled", True)
         )
 
     # ------------------------------------------------------------------
@@ -93,8 +91,10 @@ class PositionSizer:
            context strategy parameters.
         2. Calculates the full Kelly fraction.
         3. Applies the fractional multiplier.
-        4. Caps at portfolio-based and absolute limits.
-        5. Returns a copy of the action with the adjusted quantity.
+        4. Adjusts for leverage.
+        5. Applies portfolio-based and absolute caps.
+        6. Checks minimum position size.
+        7. Returns a copy of the action with the adjusted quantity.
 
         Parameters
         ----------
@@ -126,23 +126,29 @@ class PositionSizer:
                 avg_win=str(avg_win),
                 avg_loss=str(avg_loss),
             )
-            adjusted_qty = self._default_size(portfolio_value, action)
+            sized_qty = self._default_size(portfolio_value)
         else:
             kelly_f = self._kelly_fraction(win_rate, avg_win, avg_loss)
-            adjusted_qty = self._adjusted_kelly(kelly_f, portfolio_value)
+            sized_qty = self._adjusted_kelly(kelly_f, portfolio_value)
 
         # Cap at the original requested quantity (don't oversize)
-        if action.quantity > Decimal("0") and adjusted_qty > action.quantity:
-            adjusted_qty = action.quantity
+        if action.quantity > Decimal("0") and sized_qty > action.quantity:
+            sized_qty = action.quantity
 
-        # Ensure minimum of 1 contract
-        if adjusted_qty < Decimal("1"):
-            adjusted_qty = Decimal("1") if action.type == "ENTER" else Decimal("0")
+        # Ensure non-negative
+        if sized_qty < Decimal("0"):
+            sized_qty = Decimal("0")
+
+        # TP/SL size cap: ensure position isn't larger than what the bracket
+        # stop-loss can protect given the trade capital
+        tp_sl_max = self._max_size_from_tp_sl(action, portfolio_value)
+        if sized_qty > tp_sl_max and tp_sl_max > Decimal("0"):
+            sized_qty = tp_sl_max
 
         self._log.debug(
             "position_sized",
             original_qty=str(action.quantity),
-            adjusted_qty=str(adjusted_qty),
+            adjusted_qty=str(sized_qty),
             kelly_fraction=self._kelly_multiplier,
             portfolio_value=str(portfolio_value),
         )
@@ -150,16 +156,16 @@ class PositionSizer:
         return Action(
             type=action.type,
             strategy=action.strategy,
-            contract=action.contract,
-            side=action.side,
-            quantity=adjusted_qty.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
-            order_type=action.order_type,
+            symbol=action.symbol,
+            quantity=sized_qty.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             price=action.price,
             reason=action.reason,
+            confidence=action.confidence,
+            risk_checked=action.risk_checked,
             metadata={
                 **action.metadata,
                 "sizing_kelly_fraction": self._kelly_multiplier,
-                "sizing_adjusted_qty": str(adjusted_qty),
+                "sizing_adjusted_qty": str(sized_qty),
             },
         )
 
@@ -180,14 +186,6 @@ class PositionSizer:
         Where:
             p = win_rate (probability of winning)
             b = avg_win / avg_loss (payout ratio)
-
-        Simplified form when b != 0::
-
-            f = p * (b + 1) - 1 / b
-
-        But the more common form for trading is::
-
-            f = p - (1 - p) * (avg_loss / avg_win)
 
         Parameters
         ----------
@@ -214,8 +212,7 @@ class PositionSizer:
         if payout_ratio <= 0:
             return 0.0
 
-        # f = p - (1-p) / b
-        # f = p - q/b  where q = 1-p
+        # f = p - q/b  where q = 1 - p
         loss_prob = 1.0 - win_rate
         kelly_f = win_rate - (loss_prob / payout_ratio)
 
@@ -224,13 +221,16 @@ class PositionSizer:
     def _adjusted_kelly(
         self, kelly_f: float, portfolio_value: Decimal
     ) -> Decimal:
-        """Apply fractional multiplier and portfolio caps to Kelly size.
+        """Apply fractional multiplier, leverage adjustment, and caps.
 
         Steps:
-        1. Multiply full Kelly by ``kelly.fraction`` multiplier.
-        2. Cap at ``max_position_size_pct`` of portfolio value.
-        3. Cap at ``max_position_size_usd`` absolute limit.
-        4. Never exceed full portfolio value.
+        1. Compute full Kelly amount: ``kelly_f * portfolio_value``.
+        2. Apply fractional multiplier.
+        3. Adjust for leverage: divide by max_leverage.
+        4. Cap at ``max_position_size_pct`` of portfolio value.
+        5. Cap at ``max_position_size_usd`` absolute limit.
+        6. Never exceed portfolio value.
+        7. Check minimum position size; use default if undersized.
 
         Parameters
         ----------
@@ -242,45 +242,52 @@ class PositionSizer:
         Returns
         -------
         Decimal
-            Adjusted position size in contracts (approximate).
+            Adjusted position size in USD notional value.
         """
         if portfolio_value <= Decimal("0"):
             return Decimal("0")
 
-        # Step 1: Fractional Kelly
+        # Step 1 & 2: Fractional Kelly amount
         fraction = Decimal(str(self._kelly_multiplier))
         size = Decimal(str(kelly_f)) * fraction * portfolio_value
 
-        # Step 2: Cap at percentage of portfolio
+        # Step 3: Leverage adjustment (leverage multiplies exposure)
+        leverage = Decimal(str(self._max_leverage))
+        if leverage > Decimal("1"):
+            size = size / leverage
+
+        # Step 4: Cap at percentage of portfolio
         max_pct = Decimal(str(self._max_pos_pct))
         pct_cap = max_pct * portfolio_value
         if size > pct_cap:
             size = pct_cap
 
-        # Step 3: Cap at absolute USD limit
+        # Step 5: Cap at absolute USD limit
         if size > self._max_pos_usd:
             size = self._max_pos_usd
 
-        # Step 4: Never exceed 100% of portfolio
+        # Step 6: Never exceed 100% of portfolio
         if size > portfolio_value:
             size = portfolio_value
 
-        # Convert to approximate contract count (divide by approximate premium)
-        # For options, we approximate 1 contract = ~$100 notional as baseline
-        # This is a simplification — real pricing would use option price
-        contract_size = (size / Decimal("100")).quantize(
-            Decimal("1"), rounding=ROUND_HALF_UP
-        )
+        # Step 7: Minimum position size check
+        if size < self._min_pos_usd:
+            self._log.debug(
+                "sized_below_minimum",
+                sized_value=str(size.quantize(Decimal("0.01"))),
+                min_value=str(self._min_pos_usd),
+            )
+            size = self._default_size(portfolio_value)
 
-        return max(contract_size, Decimal("0"))
+        return max(size, Decimal("0"))
 
-    def _default_size(
-        self, portfolio_value: Decimal, action: Action
-    ) -> Decimal:
+    def _default_size(self, portfolio_value: Decimal) -> Decimal:
         """Compute default position size when no historical data is available.
 
         Uses the ``kelly.default_fraction`` config value as a percentage
         of the portfolio, capped at ``max_position_size_usd``.
+
+        Returns the size as a USD notional value.
         """
         if portfolio_value <= Decimal("0"):
             return Decimal("0")
@@ -291,10 +298,55 @@ class PositionSizer:
         if size > self._max_pos_usd:
             size = self._max_pos_usd
 
-        contract_size = (size / Decimal("100")).quantize(
-            Decimal("1"), rounding=ROUND_HALF_UP
-        )
-        return max(contract_size, Decimal("1"))
+        if size < self._min_pos_usd:
+            size = self._min_pos_usd
+
+        return max(size, Decimal("0"))
+
+    # ------------------------------------------------------------------
+    # TP/SL-aware sizing
+    # ------------------------------------------------------------------
+
+    def _max_size_from_tp_sl(
+        self,
+        action: Action,
+        portfolio_value: Decimal,
+    ) -> Decimal:
+        """Compute max position size based on TP/SL ratio and trade capital.
+
+        For a 2:1 TP/SL ratio with the user's $5 trade capital at 50x leverage:
+        - SL = 30% of $5 = $1.50 risk
+        - At 50x leverage, $1.50 risk means a 0.6% price move against you
+        - Max size = trade_capital * leverage
+
+        This prevents the position from being larger than what the
+        per-position SL/TP can reasonably protect.
+
+        Parameters
+        ----------
+        action:
+            The proposed trading action (unused, kept for future flexibility).
+        portfolio_value:
+            Total portfolio value in USDT (unused, kept for future flexibility).
+
+        Returns
+        -------
+        Decimal
+            Maximum position size in USD notional. ``Decimal("Infinity")``
+            if per-position SL is disabled.
+        """
+        risk_cfg = self._cfg.get("per_position_sl", {})
+        sl_enabled = risk_cfg.get("enabled", True)
+        if not sl_enabled:
+            return Decimal("Infinity")
+
+        trade_capital = self._trade_capital_usd
+        max_leverage = Decimal(str(self._max_leverage))
+
+        # At 50x leverage on $5 capital, notional = $5 * 50 = $250
+        max_notional = trade_capital * max_leverage
+
+        return max_notional
 
     # ------------------------------------------------------------------
     # Reporting
@@ -307,4 +359,6 @@ class PositionSizer:
             "default_fraction": self._default_fraction,
             "max_position_size_pct": self._max_pos_pct,
             "max_position_size_usd": str(self._max_pos_usd),
+            "max_leverage": self._max_leverage,
+            "min_position_size_usd": str(self._min_pos_usd),
         }

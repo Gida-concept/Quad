@@ -100,23 +100,44 @@ class GroqClient:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = _DEFAULT_MODEL,
-        timeout: float = _DEFAULT_TIMEOUT,
-        max_retries: int = _MAX_RETRIES,
-        max_requests_per_day: int = _MAX_REQUESTS_PER_DAY,
+        model: str | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        max_requests_per_day: int | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
+        self._config = config or {}
+        self._ai_config = self._config.get("ai", {})
+        self._groq_config = self._ai_config.get("groq", {})
+
         self._api_key = api_key or os.environ.get("GROQ_API_KEY", "")
         if not self._api_key:
             logger.warning("groq_api_key_missing")
 
-        self._model = model
-        self._timeout = timeout
-        self._max_retries = max_retries
-        self._max_requests_per_day = max_requests_per_day
-        self._log = logger.bind(model=model)
+        self._model = model or self._ai_config.get("model", _DEFAULT_MODEL)
+        self._timeout = timeout or self._groq_config.get("timeout_seconds", _DEFAULT_TIMEOUT)
+        self._max_retries = max_retries or self._groq_config.get("max_retries", _MAX_RETRIES)
 
-        # Internal async client (created lazily)
-        self._client: AsyncGroq | None = None
+        # Rate limiter / backoff configuration
+        rate_limiter_cfg = self._groq_config.get("rate_limiter", {})
+        self._max_requests_per_day = (
+            max_requests_per_day
+            or rate_limiter_cfg.get("max_requests_per_day", _MAX_REQUESTS_PER_DAY)
+        )
+        self._rate_limit_window_s = rate_limiter_cfg.get("window_seconds", _RATE_LIMIT_WINDOW_S)
+        self._warning_level_1 = rate_limiter_cfg.get("warning_level_1", _WARNING_LEVEL_1)
+        self._warning_level_2 = rate_limiter_cfg.get("warning_level_2", _WARNING_LEVEL_2)
+        self._warning_level_3 = rate_limiter_cfg.get("warning_level_3", _WARNING_LEVEL_3)
+        self._base_backoff = self._groq_config.get("base_backoff_seconds", _BASE_BACKOFF)
+
+        self._log = logger.bind(model=self._model)
+
+        # Internal async client (created eagerly to warm the connection)
+        self._client: AsyncGroq = AsyncGroq(
+            api_key=self._api_key,
+            timeout=self._timeout,
+            max_retries=0,  # We handle retries ourselves
+        )
 
         # Retry / rate-limit stats
         self._total_requests: int = 0
@@ -176,7 +197,7 @@ class GroqClient:
         """Remove timestamps outside the sliding window."""
         if now is None:
             now = time.time()
-        cutoff = now - _RATE_LIMIT_WINDOW_S
+        cutoff = now - self._rate_limit_window_s
         while self._request_timestamps and self._request_timestamps[0] < cutoff:
             self._request_timestamps.popleft()
 
@@ -203,21 +224,21 @@ class GroqClient:
             )
 
         # Warning levels
-        if count >= _WARNING_LEVEL_3 and self._rate_limit_warning_sent < 3:
+        if count >= self._warning_level_3 and self._rate_limit_warning_sent < 3:
             self._log.warning(
                 "groq_rate_limit_critical",
                 count=count,
                 max_per_day=self._max_requests_per_day,
             )
             self._rate_limit_warning_sent = 3
-        elif count >= _WARNING_LEVEL_2 and self._rate_limit_warning_sent < 2:
+        elif count >= self._warning_level_2 and self._rate_limit_warning_sent < 2:
             self._log.warning(
                 "groq_rate_limit_high",
                 count=count,
                 max_per_day=self._max_requests_per_day,
             )
             self._rate_limit_warning_sent = 2
-        elif count >= _WARNING_LEVEL_1 and self._rate_limit_warning_sent < 1:
+        elif count >= self._warning_level_1 and self._rate_limit_warning_sent < 1:
             self._log.warning(
                 "groq_rate_limit_warning",
                 count=count,
@@ -315,7 +336,7 @@ class GroqClient:
             except RateLimitError as exc:
                 self._total_retries += 1
                 self._last_rate_limit = asyncio.get_event_loop().time()
-                wait = _BASE_BACKOFF * (2 ** (attempt - 1)) + (
+                wait = self._base_backoff * (2 ** (attempt - 1)) + (
                     hash(str(exc)) % 50
                 ) / 100.0  # jitter
 
@@ -334,7 +355,7 @@ class GroqClient:
 
             except APIConnectionError as exc:
                 self._total_retries += 1
-                wait = _BASE_BACKOFF * (2 ** (attempt - 1))
+                wait = self._base_backoff * (2 ** (attempt - 1))
 
                 self._log.warning(
                     "groq_connection_error",
@@ -370,12 +391,12 @@ class GroqClient:
         system_prompt: str,
         user_prompt: str,
         *,
-        temperature: float = 0.0,
-        max_tokens: int = 2048,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Request a structured trading decision from the LLM.
 
-        Sends the system and user prompts with ``temperature=0.0`` for
+        Sends the system and user prompts with configurable temperature for
         deterministic output, expects a JSON response conforming to the
         format defined in the system prompt.
 
@@ -386,10 +407,9 @@ class GroqClient:
         user_prompt:
             User prompt with market data, context, and decision request.
         temperature:
-            Sampling temperature. Defaults to 0.0 for deterministic,
-            predictable trading decisions.
+            Sampling temperature. Falls back to config or 0.0.
         max_tokens:
-            Maximum tokens in the response.
+            Maximum tokens in the response. Falls back to config or 2048.
 
         Returns
         -------
@@ -405,11 +425,19 @@ class GroqClient:
         RuntimeError
             If the API key is missing or rate limit is exceeded.
         """
+        effective_temperature = (
+            temperature if temperature is not None
+            else self._groq_config.get("decide_trades_temperature", 0.0)
+        )
+        effective_max_tokens = (
+            max_tokens if max_tokens is not None
+            else self._groq_config.get("decide_trades_max_tokens", 2048)
+        )
         raw = await self.chat(
             system=system_prompt,
             user=user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=effective_temperature,
+            max_tokens=effective_max_tokens,
         )
 
         return self._parse_trading_decision(raw)
@@ -474,14 +502,16 @@ class GroqClient:
                 decision[key] = "HOLD" if key == "action" else "Missing field"
 
         # Ensure action is one of the expected values
-        valid_actions = {"ENTER", "EXIT", "HOLD"}
-        action = decision.get("action", "HOLD")
+        valid_actions = set(self._groq_config.get("valid_actions", ["ENTER", "EXIT", "HOLD"]))
+        default_action = self._groq_config.get("default_action", "HOLD")
+        fallback_action = self._groq_config.get("fallback_action", "HOLD")
+        action = decision.get("action", default_action)
         if action not in valid_actions:
             self._log.warning(
                 "groq_decision_invalid_action",
                 action=action,
             )
-            decision["action"] = "HOLD"
+            decision["action"] = fallback_action
 
         return decision
 
@@ -490,26 +520,16 @@ class GroqClient:
     # ------------------------------------------------------------------
 
     async def _ensure_client(self) -> None:
-        """Lazily create the ``AsyncGroq`` client."""
-        if self._client is not None:
-            return
-
-        self._client = AsyncGroq(
-            api_key=self._api_key,
-            timeout=self._timeout,
-            max_retries=0,  # We handle retries ourselves
-        )
-        self._log.debug("groq_client_created")
+        """Client is created eagerly in ``__init__``; this is a no-op."""
+        pass
 
     async def close(self) -> None:
         """Close the underlying HTTP client session.
 
         Safe to call multiple times.
         """
-        if self._client is not None:
-            try:
-                await self._client.close()
-            except Exception as exc:
-                self._log.warning("groq_client_close_error", error=str(exc))
-            self._client = None
-            self._log.debug("groq_client_closed")
+        try:
+            await self._client.close()
+        except Exception as exc:
+            self._log.warning("groq_client_close_error", error=str(exc))
+        self._log.debug("groq_client_closed")

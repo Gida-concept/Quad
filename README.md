@@ -1,6 +1,6 @@
 # Quad
 
-_Production-Grade Options Trading Bot for Binance Options_
+_Production-Grade USD-M Futures Trading Bot for Binance_
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.12%2B-blue" alt="Python 3.12+">
@@ -12,17 +12,17 @@ _Production-Grade Options Trading Bot for Binance Options_
 
 ## Executive Summary
 
-Quad is a production-grade, open-source options trading bot purpose-built for Binance Options. It is a **single-process Python 3.12+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, options strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
+Quad is a production-grade, open-source USD-M futures trading bot purpose-built for Binance Futures. It is a **single-process Python 3.12+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, futures strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
 
 Unlike the previous Quadrant project (Node.js/Python dual-runtime, Binance Futures, PostgreSQL), Quad is:
 
 - **Python-only** -- One language, one process, one deployment
-- **Option-native** -- Built from the ground up for European-style cash-settled options
+- **Futures-native** -- Built from the ground up for USD-M perpetual and delivery futures
 - **Telegram-first** -- Primary user interface via Telegram bot (python-telegram-bot v20+), with CLI for secondary debugging
 - **Plugin-based** -- Strategies are pluggable via setuptools entry points
 - **Optional AI** -- Groq/LLaMA integration for market analysis and decision support. Deterministic fallback when AI is disabled or unavailable.
 
-Quad is designed for personal use by individual traders who want a self-hosted, reliable, and understandable options trading system.
+Quad is designed for personal use by individual traders who want a self-hosted, reliable, and understandable futures trading system.
 
 ---
 
@@ -31,7 +31,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    TELEGRAM INTERFACE (python-telegram-bot)           │
-│              (/start, /status, /positions, /pnl, /risk, etc.)        │
+│              (/start, /status, /positions, /balance, /risk, etc.)        │
 │                         PRIMARY USER INTERFACE                        │
 └─────────────────────────────────┬───────────────────────────────────┘
                                   │
@@ -69,17 +69,13 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐
 │   RISK MANAGER   │  │    STRATEGY      │  │  EXCHANGE ADAPTER    │
 │                  │  │    PLUGIN        │  │                      │
-│  6 Pre-Trade     │  │                  │  │ Binance Options API  │
-│   Gates          │  │  Covered Call    │  │  (REST + WebSocket)  │
-│  4 Circuit       │  │  Cash-Secured   │  │                      │
-│   Breakers       │  │  Put            │  │  Paper Trading       │
-│  Position Sizing │  │  Iron Condor    │  │  Mock Exchange       │
-│  (Kelly)         │  │  Straddle       │  │                      │
-└──────────────────┘  │  Strangle       │  └──────────────────────┘
-                       │  Vertical       │
-                       │  Spread         │
-                       │  Custom         │
-                       └──────────────────┘
+│  9 Pre-Trade     │  │                  │  │ Binance USD-M       │
+│   Gates          │  │  Trend Following │  │  Futures API         │
+│  7 Circuit       │  │  Grid Trading    │  │  (REST + WebSocket)  │
+│   Breakers       │  │  Mean Reversion  │  │                      │
+│  Position Sizing │  │  DCA Bot         │  │  Paper Trading       │
+│  (Leverage-Adj.) │  │  Market Making   │  │  Mock Exchange       │
+└──────────────────┘  └──────────────────┘  └──────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      PERSISTENCE (PostgreSQL)                           │
@@ -96,16 +92,16 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 ## Key Features
 
-- **Options-Native** -- Built for European-style cash-settled options with full Greek monitoring (delta, gamma, theta, vega)
-- **Telegram Commands** -- 10 user commands (/start, /status, /positions, /orders, /pnl, /risk, /strategies, /history, /help, /stop) plus 4 admin commands (/config, /kill, /logs, /backtest)
-- **6 Built-in Strategies** -- Covered call, cash-secured put, iron condor, straddle, strangle, vertical spread, each with IV rank filtering, forced gamma exits, and rolling logic
+- **Futures-Native** -- Built for Binance USD-M perpetual and delivery futures with dual position mode (HEDGE/ONE_WAY), isolated or cross margin, and full leverage control
+- **Telegram Commands** -- 18+ user commands (/start, /status, /help, /balance, /positions, /orders, /funding_rate, /book, /strategies, /execute, /risk, /kill, /cancel, /settings, /set, /analyze, /ai_strategy, /ai_status, /ai_decision)
+- **5 Built-in Strategies** -- Trend following, grid trading, mean reversion, DCA bot, market making, each with leverage-aware sizing and configurable position limits
 - **Plugin Architecture** -- Write custom strategies as Python classes with setuptools entry point registration
-- **6-Gate Risk Pipeline** -- Every trade validated against margin, position size, delta, theta, volatility, and concentration limits
-- **4 Circuit Breakers** -- P&L drawdown, Greek exposure, volatility spike, and connection loss with graduated responses
-- **Fractional Kelly Sizing** -- Position sizing adapted for options with IV, DTE, and streak adjustments
+- **9-Gate Risk Pipeline** -- Every trade validated against max positions, portfolio risk, daily loss, drawdown, liquidation risk, funding rate cost, leverage limit, position concentration, and correlation
+- **7 Circuit Breakers** -- P&L drawdown, daily loss, consecutive losses, position growth, liquidation cascade, funding rate spike, and volatility with graduated responses
+- **Leverage-Adjusted Position Sizing** -- Position sizing adapted for futures with min position size checks, leverage-aware notional, and margin utilization tracking
 - **Backtesting Engine** -- Test strategies against historical data before risking capital
 - **Telegram + CLI Interface** -- Primary control via Telegram bot (python-telegram-bot v20+), with Typer CLI for secondary debugging
-- **PostgreSQL Persistence** -- 12-table schema with asyncpg connection pool for concurrent reads/writes
+- **PostgreSQL Persistence** -- 16-table schema with asyncpg connection pool for concurrent reads/writes
 - **Docker Deployable** -- Single-container deployment with health checks and Prometheus metrics
 - **Hot-Reload Configuration** -- Risk and strategy parameters update without restart
 - **Structured Logging** -- JSON-formatted logs for easy parsing and analysis
@@ -119,7 +115,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 | Runtime | Python 3.12+ asyncio | Single-process event-driven architecture |
 | Telegram Bot | python-telegram-bot v20+ | Primary user interface via Telegram |
 | CLI Framework | Typer | Secondary command-line interface for debugging |
-| Exchange API | Binance Options (REST + WebSocket) | Market data, account, order execution |
+| Exchange API | Binance USD-M Futures (REST + WebSocket) | Market data, account, order execution |
 | Persistence | PostgreSQL + asyncpg | Connection pool, no local server file |
 | Configuration | PyYAML + python-dotenv | Layered config with hot-reload |
 | Logging | structlog | Structured JSON logging |
@@ -166,36 +162,39 @@ quad --help
 
 Quad's primary user interface is a Telegram bot. All bot operations are available through Telegram commands, with the CLI serving as a secondary interface for debugging.
 
-### User Commands (available to all whitelisted chat IDs)
+### Commands
 
 | Command | Description |
 |---|---|
-| `/start` | Start the trading bot |
-| `/status` | Show current bot status, state, uptime |
+| `/start` | Welcome message with available commands |
+| `/status` | Show bot health, position summary, PnL, risk status |
 | `/positions` | List all open positions with P&L |
-| `/orders` | Show recent open orders |
-| `/pnl` | Show portfolio P&L and performance summary |
-| `/risk` | Show risk status and circuit breaker state |
+| `/orders` | Show open or pending orders |
+| `/balance` | Account balances, total USDT value |
+| `/funding_rate` | Current funding rates across tracked symbols |
+| `/book <symbol>` | Show order book depth for a symbol |
 | `/strategies` | List available strategies |
-| `/history` | Show recent trade history |
+| `/execute` | Interactive multi-step strategy execution flow |
+| `/risk` | Show risk status and circuit breaker state |
+| `/kill` | Emergency kill switch (requires confirmation) |
+| `/cancel <id>` | Cancel an order by its ID |
+| `/settings` | Current configuration overview |
+| `/set <key> <value>` | Set a configuration value at runtime |
+| `/leverage` | Set or view leverage for a symbol |
+| `/position_mode` | Toggle between ONE_WAY and HEDGE position mode |
+| `/liquidation_warnings` | Show liquidation risk warnings for open positions |
+| `/market_regime` | Show detected market regime (trending, ranging, volatile) |
+| `/analyze` | AI analysis of current market conditions |
+| `/ai_strategy` | AI strategy recommendation |
+| `/ai_status` | AI trading system status and metrics |
+| `/ai_decision` | AI-driven trading decision (ENTER/EXIT/HOLD) |
 | `/help` | Show available commands |
-| `/stop` | Stop the trading bot gracefully |
-
-### Admin Commands (requires admin chat ID)
-
-| Command | Description |
-|---|---|
-| `/config` | View or set configuration at runtime |
-| `/kill` | Emergency shutdown (close all positions) |
-| `/logs` | View recent log entries |
-| `/backtest` | Run a backtest for a strategy |
 
 ### Setup
 
 1. Create a bot via [@BotFather](https://t.me/botfather) on Telegram
 2. Set the bot token as `TELEGRAM_BOT_TOKEN` in your `.env` file
-3. Add your Telegram chat ID to `TELEGRAM_ADMIN_IDS` in `.env`
-4. The bot uses **polling mode** (no webhook configuration needed)
+3. The bot uses **polling mode** (no webhook configuration needed)
 
 ---
 
@@ -287,11 +286,11 @@ __main__.py  -->  QuadOrchestrator()  -->  orchestrator.run_forever()
    | 1 | ConfigManager | Loads `config.default.yaml`, overlays `config.local.yaml`, overlays env vars. Resolves `${VAR}` substitutions. |
    | 2 | DatabaseManager | Connects to PostgreSQL, creates pool, runs DDL and migrations. |
    | 3 | ExchangeAdapter | Created via factory (`binance`/`paper`/`mock` based on mode). Connects and authenticates. |
-   | 4 | MarketDataEngine | Starts WebSocket subscriptions, initialises price buffers and option chain cache. |
-   | 5 | RiskManager | Initialises 6 pre-trade gates, 4 circuit breakers, Kelly position sizer. |
+   | 4 | MarketDataEngine | Starts WebSocket subscriptions, initialises price buffers, funding rate cache, order book cache, and mark price cache. |
+   | 5 | RiskManager | Initialises 9 pre-trade gates, 7 circuit breakers, leverage-adjusted position sizer. |
    | 6 | ExecutionEngine | Starts order gateway (UUID idempotency), background reconciliation loop. |
-   | 7 | Strategies | Loads all auto-registered strategies (6 built-in) via `__init_subclass__`. |
-   | 8 | QuadBot (Telegram) | Initialises PTB v20+ Application, registers 14+ command handlers, 3 recurring jobs. Starts polling. |
+   | 7 | Strategies | Loads all auto-registered strategies (5 built-in) via `__init_subclass__`. |
+   | 8 | QuadBot (Telegram) | Initialises PTB v20+ Application, registers 18+ command handlers, 5 recurring jobs. Starts polling. |
    | 9 | HealthServer | Starts aiohttp HTTP server on port 9090 (configurable) with `/health`, `/readiness`, `/liveness`, `/metrics`. |
    | 10 | MetricsCollector | Creates in-memory metrics registry (gauges, counters, histograms). |
    | 11 | Groq AI Client | Lazy initialisation -- only created if `GROQ_API_KEY` is set. Wraps `groq.AsyncGroq`. |
@@ -313,19 +312,23 @@ The main cycle runs as a background `asyncio.Task` at a configurable interval (d
 |     |                ExchangeAdapter.get_positions()              |
 |     |                ExchangeAdapter.get_open_orders()            |
 |     v                                                            |
-|  2. Option Chains --- MarketDataEngine.get_option_chain()        |
+|  2. Market Data --- MarketDataEngine.get_funding_rate()          |
+|     |               MarketDataEngine.get_order_book()            |
+|     |               MarketDataEngine.get_mark_price()            |
+|     |               MarketDataEngine.get_ticker()                |
 |     |                (for BTCUSDT, ETHUSDT, ...)                  |
 |     v                                                            |
 |  3. Evaluate ------- StrategyContext(account, positions,         |
-|     Strategies        chain, config)                              |
+|     Strategies        funding_rates, order_books, mark_prices,   |
+|     |                 config)                                     |
 |     |                For each active strategy:                    |
 |     |                  strategy.evaluate(context) -> Action[]     |
 |     v                                                            |
 |  4. Risk Check ----- For each Action:                            |
 |     |                RiskManager.evaluate(action, context)        |
-|     |                  -> 6 pre-trade gates                       |
+|     |                  -> 9 pre-trade gates                       |
 |     |                  -> Circuit breaker check                   |
-|     |                  -> Kelly position sizing                   |
+|     |                  -> Leverage-adjusted position sizing       |
 |     v                                                            |
 |  5. Execute -------- ExecutionEngine.execute(action)             |
 |     |                  -> OrderGateway.submit()                   |
@@ -357,7 +360,6 @@ Telegram User --- /command --- Telegram Servers
                           |                     |
                    QuadBotCommands         QuadBotJobs
                           |                     |
-                    _check_admin()              |
                           |                     |
                     Subsystem calls -----------> Notifications
                     (market_data, risk,         (status, alerts,
@@ -370,15 +372,15 @@ Telegram User --- /command --- Telegram Servers
                    ------> User
 ```
 
-Admin enforcement checks the user's Telegram ID against the configured `admin_ids` list.
+
 
 ### Data Flow: WebSocket to PostgreSQL
 
 ```
-Binance Options API
+Binance USD-M Futures API
         |
    WebSocket Streams
-   (markPrice, trades, user data)
+   (!miniTicker@arr, !markPrice@arr@1s, !bookTicker, !forceOrder@arr, user data)
         |
         v
   WebSocketManager
@@ -387,36 +389,39 @@ Binance Options API
    +-- Dispatch to handlers
         |
         v
-  PriceBuffer (ring buffer, deque maxlen=1000 per symbol)
+  Data Buffers (ring buffers, deque maxlen=1000 per symbol)
    +-- asyncio.Lock for thread-safe access
-   +-- Methods: append, get_latest, get_recent, vwap
+   +-- Order books, funding rates, mark prices, 24h tickers
         |
         v
   MarketDataEngine
    +-- Coordinates all data subsystems
-   +-- get_option_chain() --- OptionChainCache (TTL + stampede prevention)
-   +-- get_candles()    --- HistoricalDataProvider
+   +-- get_funding_rate()  --- FundingRateCache (TTL + stampede prevention)
+   +-- get_order_book()    --- OrderBookCache
+   +-- get_mark_price()    --- MarkPriceCache
+   +-- get_ticker()        --- TickerCache
         |
         v
   StrategyContext --- Strategy.evaluate() --- Action[]
         |
         v
   RiskManager.evaluate()
-   +-- GatePipeline (6 sequential gates, short-circuits on first failure)
-   +-- CircuitBreakerManager (4 tiers)
-   +-- PositionSizer (Fractional Kelly)
+   +-- GatePipeline (9 sequential gates, short-circuits on first failure)
+   +-- CircuitBreakerManager (7 tiers)
+   +-- PositionSizer (Leverage-adjusted with min position size checks)
         |
         v
   ExecutionEngine.execute()
-   +-- OrderGateway.submit() --- Binance REST API
+   +-- OrderGateway.submit() --- Binance Futures REST API
    +-- Background reconciliation loop (60s)
    +-- FillReconciler (detects missed fills, stale orders)
         |
         v
   DatabaseManager / Repositories
-   +-- 12 tables: accounts, positions, orders, trades, decisions,
-   |              option_contracts, sessions, performance_snapshots,
-   |              circuit_breaker_events, config_changes, error_logs
+   +-- 16 tables: accounts, positions, orders, trades, decisions,
+   |              futures_contracts, sessions, performance_snapshots,
+   |              circuit_breaker_events, config_changes, error_logs,
+   |              funding_payments, liquidation_events, funding_rate_records
    +-- PostgreSQL connection pool (asyncpg)
    +-- Automatic backups (hourly, max 24)
    +-- Automatic snapshots (60s)
@@ -488,7 +493,7 @@ The webhook receiver:
 
 1. **Safety first** -- Risk checks run before every trade. Circuit breakers protect against catastrophic loss.
 2. **Pluggable architecture** -- Exchange adapters and strategy plugins enable extensibility without core changes.
-3. **Deterministic strategies** -- Options trading uses defined logic, not ML models. Strategies are code, not black boxes.
+3. **Deterministic strategies** -- Futures trading uses defined logic, not ML models. Strategies are code, not black boxes.
 4. **Backtesting-first** -- Every strategy can be backtested against historical data before going live.
 5. **Self-hosted and simple** -- PostgreSQL database, single Python process, no external dependencies beyond the exchange and a PostgreSQL server.
 

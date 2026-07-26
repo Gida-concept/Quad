@@ -1,4 +1,4 @@
-"""Persistence layer for the Quad options trading bot.
+"""Persistence layer for the Quad futures trading bot.
 
 This module provides the database manager, repository classes, and model
 definitions for PostgreSQL-based persistence (via asyncpg).
@@ -11,7 +11,8 @@ from .repositories import (
     ConfigChangeRepository,
     DecisionRepository,
     ErrorLogRepository,
-    OptionsContractRepository,
+    FundingRepository,
+    LiquidationRepository,
     OptimizationRecommendationRepository,
     OptimizationRunRepository,
     OrderRepository,
@@ -29,7 +30,8 @@ __all__ = [
     "ConfigChangeRepository",
     "DecisionRepository",
     "ErrorLogRepository",
-    "OptionsContractRepository",
+    "FundingRepository",
+    "LiquidationRepository",
     "OptimizationRecommendationRepository",
     "OptimizationRunRepository",
     "OrderRepository",

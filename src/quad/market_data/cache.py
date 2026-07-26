@@ -1,97 +1,84 @@
-"""TTL cache for option chain data with stampede prevention.
+"""TTL caches for futures market data with stampede prevention.
 
-Provides ``OptionChainCache`` that caches option chain snapshots keyed by
-underlying symbol, auto-expires entries after a configurable TTL, and uses
-per-key :class:`asyncio.Lock` to prevent duplicate API calls when multiple
-consumers request the same underlying simultaneously (cache stampede).
+Provides TTL-backed caches for funding rates, order books, mark prices, and
+open interest data.  Each cache uses per-key :class:`asyncio.Lock` to prevent
+duplicate API calls when multiple consumers request the same key simultaneously
+(cache stampede).
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Generic, TypeVar
 
 import structlog
 
-if TYPE_CHECKING:
-    from quad.exchange.base import ExchangeAdapter
-    from quad.types.market import OptionContract
+from quad.types.market import FundingRate
 
 logger = structlog.get_logger(__name__)
 
 
+# ============================================================================
+# Generic cache entry
+# ============================================================================
+
+
+T = TypeVar("T")
+
+
 @dataclass
-class _CacheEntry:
+class _CacheEntry(Generic[T]):
     """Internal cache entry holding fetched data and expiry metadata."""
 
-    data: list[OptionContract]
+    data: T
     fetched_at: float  # time.monotonic() timestamp
     ttl: int  # seconds
 
 
-class OptionChainCache:
-    """Cache for option chain data keyed by underlying symbol.
+# ============================================================================
+# Base class (shared TTL + stampede prevention pattern)
+# ============================================================================
 
-    * Auto-expires entries after *default_ttl* seconds.
-    * Per-key :class:`asyncio.Lock` prevents cache stampede --- only one
-      coroutine fetches a given underlying at a time; others await the
-      result.
-    * Tracks hit / miss / expiry statistics for observability.
+
+class _BaseTTLCache(Generic[T]):
+    """Base TTL cache with per-key locks for stampede prevention.
+
+    Subclasses implement ``_fetch(key)`` to populate cache entries on miss.
     """
 
     def __init__(
         self,
-        exchange_adapter: ExchangeAdapter,
-        default_ttl: int = 60,
+        default_ttl: int | None = None,
+        config: dict | None = None,
     ) -> None:
-        """Initialize the cache.
-
-        Parameters
-        ----------
-        exchange_adapter:
-            The exchange adapter used to fetch option chains on cache miss.
-        default_ttl:
-            Default time-to-live in seconds for cached entries.
-        """
-        self._exchange = exchange_adapter
+        self._config = config or {}
+        self._cache_config = self._config.get("market_data", {}).get("cache_ttl", {})
+        if default_ttl is None:
+            default_ttl = int(self._cache_config.get("default_ttl", 60))
         self._default_ttl = default_ttl
-        self._cache: dict[str, _CacheEntry] = {}
+        self._cache: dict[str, _CacheEntry[T]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._hits = 0
         self._misses = 0
         self._expired = 0
         self._log = logger.bind(default_ttl=default_ttl)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    async def get(self, key: str) -> T | None:
+        """Return cached data for *key*, fetching if stale or missing.
 
-    async def get(self, underlying: str) -> list[OptionContract]:
-        """Return the option chain for *underlying*.
-
-        Fetches from the exchange adapter if the entry is missing or stale.
-        Uses a per-key lock so only one coroutine performs the actual fetch;
-        concurrent callers for the same underlying await the same result.
-
-        Parameters
-        ----------
-        underlying:
-            The underlying asset symbol, e.g. ``"BTCUSDT"``.
+        Returns ``None`` if the fetch fails and no stale data is available.
         """
-        # Fast path: check cache without lock
-        entry = self._cache.get(underlying)
+        entry = self._cache.get(key)
         if entry is not None and not self._is_expired(entry):
             self._hits += 1
             return entry.data
 
-        # Slow path: acquire per-key lock to prevent stampede
-        lock = self._get_or_create_lock(underlying)
+        lock = self._get_or_create_lock(key)
         async with lock:
-            # Double-check after acquiring the lock (another coroutine may
-            # have populated the cache while we were waiting).
-            entry = self._cache.get(underlying)
+            entry = self._cache.get(key)
             if entry is not None and not self._is_expired(entry):
                 self._hits += 1
                 return entry.data
@@ -101,83 +88,62 @@ class OptionChainCache:
                 self._expired += 1
 
             try:
-                data = await self._exchange.get_option_chain(underlying)
+                data = await self._fetch(key)
             except Exception:
-                self._log.exception(
-                    "cache_fetch_failed",
-                    underlying=underlying,
-                )
-                # If stale data is available, return it as a fallback
+                self._log.exception("cache_fetch_failed", key=key)
                 if entry is not None:
-                    self._log.warning(
-                        "cache_returning_stale_data",
-                        underlying=underlying,
-                    )
+                    self._log.warning("cache_returning_stale_data", key=key)
                     return entry.data
-                # No data at all --- re-raise
-                raise
+                return None
 
-            self._cache[underlying] = _CacheEntry(
+            if data is not None:
+                self._cache[key] = _CacheEntry(
+                    data=data,
+                    fetched_at=time.monotonic(),
+                    ttl=self._default_ttl,
+                )
+            return data
+
+    async def refresh(self, key: str) -> T | None:
+        """Force a re-fetch and cache update for *key*.
+
+        Unlike ``get()``, this always calls ``_fetch()`` regardless of
+        cache state.
+        """
+        try:
+            data = await self._fetch(key)
+        except Exception:
+            self._log.exception("cache_refresh_failed", key=key)
+            raise
+
+        if data is not None:
+            self._cache[key] = _CacheEntry(
                 data=data,
                 fetched_at=time.monotonic(),
                 ttl=self._default_ttl,
             )
-            return data
-
-    async def get_multi(
-        self, underlyings: list[str]
-    ) -> dict[str, list[OptionContract]]:
-        """Fetch option chains for multiple underlyings concurrently.
-
-        Returns a dict mapping each underlying to its option chain.  Hits
-        the cache where possible; fetches stale / missing entries in
-        parallel.
-        """
-        results: dict[str, list[OptionContract]] = {}
-
-        # Launch concurrent gets
-        tasks = {u: asyncio.create_task(self.get(u)) for u in underlyings}
-        for underlying, task in tasks.items():
-            try:
-                results[underlying] = await task
-            except Exception:
-                self._log.exception(
-                    "cache_multi_fetch_failed",
-                    underlying=underlying,
-                )
-                results[underlying] = []
-
-        return results
-
-    async def refresh(self, underlying: str) -> list[OptionContract]:
-        """Force a re-fetch and cache update for *underlying*.
-
-        Unlike ``get()``, this always calls the exchange adapter regardless
-        of cache state.
-        """
-        try:
-            data = await self._exchange.get_option_chain(underlying)
-        except Exception:
-            self._log.exception(
-                "cache_refresh_failed",
-                underlying=underlying,
-            )
-            raise
-
-        self._cache[underlying] = _CacheEntry(
-            data=data,
-            fetched_at=time.monotonic(),
-            ttl=self._default_ttl,
-        )
         return data
 
-    def invalidate(self, underlying: str) -> None:
-        """Mark the entry for *underlying* as stale.
+    async def get_multi(self, keys: list[str]) -> dict[str, T | None]:
+        """Fetch multiple keys concurrently.
 
-        The next call to ``get()`` will re-fetch.
+        Returns a dict mapping each key to its cached data (or ``None`` on
+        fetch failure).
         """
-        self._cache.pop(underlying, None)
-        self._log.debug("cache_invalidated", underlying=underlying)
+        results: dict[str, T | None] = {}
+        tasks = {k: asyncio.create_task(self.get(k)) for k in keys}
+        for key, task in tasks.items():
+            try:
+                results[key] = await task
+            except Exception:
+                self._log.exception("cache_multi_fetch_failed", key=key)
+                results[key] = None
+        return results
+
+    def invalidate(self, key: str) -> None:
+        """Mark the entry for *key* as stale."""
+        self._cache.pop(key, None)
+        self._log.debug("cache_invalidated", key=key)
 
     def invalidate_all(self) -> None:
         """Clear the entire cache."""
@@ -185,15 +151,15 @@ class OptionChainCache:
         self._cache.clear()
         self._log.debug("cache_invalidated_all", entries_removed=count)
 
-    def is_stale(self, underlying: str) -> bool:
-        """Return ``True`` if the entry for *underlying* needs a refresh."""
-        entry = self._cache.get(underlying)
+    def is_stale(self, key: str) -> bool:
+        """Return ``True`` if the entry for *key* needs a refresh."""
+        entry = self._cache.get(key)
         if entry is None:
             return True
         return self._is_expired(entry)
 
-    def get_cached_symbols(self) -> set[str]:
-        """Return the set of symbols currently in the cache."""
+    def get_cached_keys(self) -> set[str]:
+        """Return the set of keys currently in the cache."""
         return set(self._cache.keys())
 
     def stats(self) -> dict:
@@ -202,26 +168,157 @@ class OptionChainCache:
         Returns
         -------
         dict
-            Keys: ``hits``, ``misses``, ``expired``, ``symbols_cached``.
+            Keys: ``hits``, ``misses``, ``expired``, ``keys_cached``.
         """
         return {
             "hits": self._hits,
             "misses": self._misses,
             "expired": self._expired,
-            "symbols_cached": len(self._cache),
+            "keys_cached": len(self._cache),
         }
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    async def _fetch(self, key: str) -> T | None:
+        """Subclasses override this to fetch data on cache miss."""
+        raise NotImplementedError
 
     def _is_expired(self, entry: _CacheEntry) -> bool:
-        """Check whether a cache entry has exceeded its TTL."""
         elapsed = time.monotonic() - entry.fetched_at
         return elapsed >= entry.ttl
 
     def _get_or_create_lock(self, key: str) -> asyncio.Lock:
-        """Return the per-key lock, creating one if it does not exist."""
         if key not in self._locks:
             self._locks[key] = asyncio.Lock()
         return self._locks[key]
+
+
+# ============================================================================
+# FundingRateCache
+# ============================================================================
+
+
+class FundingRateCache(_BaseTTLCache[FundingRate]):
+    """TTL-backed cache for funding rate data.
+
+    Default TTL is 8 hours (28_800 seconds), matching Binance's 8-hour
+    funding interval.  Stores :class:`FundingRate` objects keyed by symbol.
+    """
+
+    def __init__(
+        self,
+        exchange_adapter: Any = None,
+        default_ttl: int | None = None,
+        config: dict | None = None,
+    ) -> None:
+        if default_ttl is None:
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
+            default_ttl = int(cfg.get("funding_rate", 28800))
+        super().__init__(default_ttl=default_ttl, config=config)
+        self._exchange = exchange_adapter
+        self._log = logger.bind(cache="FundingRateCache", ttl=default_ttl)
+
+    async def _fetch(self, key: str) -> FundingRate | None:
+        """Fetch a funding rate from the exchange adapter."""
+        if self._exchange is None:
+            return None
+        return await self._exchange.get_funding_rate(key)
+
+
+# ============================================================================
+# OrderBookCache
+# ============================================================================
+
+
+class OrderBookCache(_BaseTTLCache[dict]):
+    """Shallow TTL cache for order book snapshots.
+
+    Default TTL is 100ms (0.1 seconds) for near-real-time access.
+    Stores order book data as dicts with ``bids`` and ``asks`` lists.
+    """
+
+    def __init__(
+        self,
+        exchange_adapter: Any = None,
+        default_ttl: int | None = None,
+        limit: int | None = None,
+        config: dict | None = None,
+    ) -> None:
+        if default_ttl is None:
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
+            default_ttl = int(cfg.get("order_book", 5))
+        if limit is None:
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
+            limit = int(cfg.get("order_book_limit", 20))
+        super().__init__(default_ttl=default_ttl, config=config)
+        self._exchange = exchange_adapter
+        self._limit = limit
+        self._log = logger.bind(cache="OrderBookCache", ttl=default_ttl, limit=limit)
+
+    async def _fetch(self, key: str) -> dict | None:
+        """Fetch an order book snapshot from the exchange adapter."""
+        if self._exchange is None:
+            return None
+        return await self._exchange.get_order_book(key, limit=self._limit)
+
+
+# ============================================================================
+# MarkPriceCache
+# ============================================================================
+
+
+class MarkPriceCache(_BaseTTLCache[Decimal]):
+    """Dict-backed cache for mark prices.
+
+    No TTL-based eviction by default (mark prices update every second via
+    WebSocket anyway).  Useful for REST-based fallback lookups.
+    """
+
+    def __init__(
+        self,
+        exchange_adapter: Any = None,
+        default_ttl: int | None = None,
+        config: dict | None = None,
+    ) -> None:
+        if default_ttl is None:
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
+            default_ttl = int(cfg.get("mark_price", 2))
+        super().__init__(default_ttl=default_ttl, config=config)
+        self._exchange = exchange_adapter
+        self._log = logger.bind(cache="MarkPriceCache", ttl=default_ttl)
+
+    async def _fetch(self, key: str) -> Decimal | None:
+        """Fetch a mark price from the exchange adapter."""
+        if self._exchange is None:
+            return None
+        return await self._exchange.get_mark_price(key)
+
+
+# ============================================================================
+# OpenInterestCache
+# ============================================================================
+
+
+class OpenInterestCache(_BaseTTLCache[dict]):
+    """Cache for open interest data (daily/hourly per symbol).
+
+    Default TTL is 1 hour.  Stores open interest data as dicts with
+    ``symbol``, ``open_interest``, ``timestamp``, and ``value`` keys.
+    """
+
+    def __init__(
+        self,
+        exchange_adapter: Any = None,
+        default_ttl: int | None = None,
+        config: dict | None = None,
+    ) -> None:
+        if default_ttl is None:
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
+            default_ttl = int(cfg.get("open_interest", 3600))
+        super().__init__(default_ttl=default_ttl, config=config)
+        self._exchange = exchange_adapter
+        self._log = logger.bind(cache="OpenInterestCache", ttl=default_ttl)
+
+    async def _fetch(self, key: str) -> dict | None:
+        """Fetch open interest from the exchange adapter."""
+        if self._exchange is None:
+            return None
+        return await self._exchange.get_open_interest(key)

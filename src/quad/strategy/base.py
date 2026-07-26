@@ -7,14 +7,13 @@ for discovery and access.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import structlog
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
 
+from quad.types.domain import FuturesPositionSide
 from quad.types.risk import Action
 from quad.types.strategy import StrategyContext
 
@@ -82,18 +81,25 @@ class StrategyBase(ABC):
 
     # ---- Instance lifecycle ----
 
-    def __init__(self, params: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        params: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
         """Initialize strategy with optional parameter overrides.
 
         Args:
             params: Dictionary of parameter values overriding defaults.
                     Missing parameters fall back to ParamSpec.default.
+            config: Optional full application configuration dict. Used by
+                    strategies that need access to risk/trading sections.
 
         Raises:
             ValueError: If a required parameter is missing with no default.
             TypeError: If a parameter value has the wrong type.
         """
         self.params: dict[str, Any] = params or {}
+        self._config: dict[str, Any] = config or {}
         self.logger = logger.bind(strategy=self.get_name())
         self._validate_params()
 
@@ -164,17 +170,17 @@ class StrategyBase(ABC):
         return default
 
     def hold_action(self, reason: str = "No action required") -> list[Action]:
-        """Return a HOLD action indicating no trade decision.
+        """Return a hold action indicating no trade decision.
 
         Args:
             reason: Human-readable reason for the hold.
 
         Returns:
-            List containing a single HOLD Action.
+            List containing a single hold Action.
         """
         return [
             Action(
-                type="HOLD",
+                type="hold",
                 strategy=self.get_name(),
                 reason=reason,
             )
@@ -185,35 +191,90 @@ class StrategyBase(ABC):
     # ======================================================================
 
     @staticmethod
-    def _calculate_dte(contract: dict[str, Any]) -> int | None:
-        """Calculate days to expiry from a contract dict."""
-        expiry = contract.get("expiry")
-        if expiry is None:
-            return None
-        try:
-            expiry_ts = int(expiry) / 1000 if int(expiry) > 1e12 else int(expiry)
-            now = datetime.now(tz=timezone.utc).timestamp()
-            return max(0, int((expiry_ts - now) / 86400))
-        except (ValueError, TypeError):
-            return None
+    def _calculate_position_size_usd(
+        capital: float,
+        risk_pct: float,
+        stop_loss_pct: float,
+        max_size_usd: float = 0,
+    ) -> float:
+        """Calculate position size in USD based on risk parameters.
+
+        Args:
+            capital: Available capital in USD.
+            risk_pct: Fraction of capital to risk (e.g. 0.02 for 2%).
+            stop_loss_pct: Stop loss as fraction of entry (e.g. 0.05 for 5%).
+            max_size_usd: Maximum position size cap. 0 = no cap.
+
+        Returns:
+            Position size in USD.
+        """
+        risk_amount = capital * risk_pct
+        if stop_loss_pct <= 0:
+            return 0.0
+        size = risk_amount / stop_loss_pct
+        if max_size_usd > 0:
+            size = min(size, max_size_usd)
+        return round(size, 2)
 
     @staticmethod
-    def _mid_price(contract: dict[str, Any]) -> Decimal | None:
-        """Calculate mid price from bid/ask, falling back to mark price."""
-        bid = contract.get("bid")
-        ask = contract.get("ask")
-        if bid is not None and ask is not None:
-            try:
-                return (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
-            except Exception:
-                pass
-        mark = contract.get("mark_price")
-        if mark is not None:
-            try:
-                return Decimal(str(mark))
-            except Exception:
-                pass
-        return None
+    def _build_tp_sl_actions(
+        symbol: str,
+        side: str,
+        entry_price: float,
+        capital: float,
+        sl_capital_pct: float,
+        tp_capital_pct: float,
+        leverage: float = 1.0,
+        strategy_name: str = "",
+    ) -> list[Action]:
+        """Build set_stop_loss and set_take_profit actions for a position.
+
+        Uses the 2:1 TP/SL ratio relative to trade capital.
+
+        Args:
+            symbol: Trading pair symbol.
+            side: Position side ("LONG" or "SHORT").
+            entry_price: Average entry price.
+            capital: Trade capital in USD.
+            sl_capital_pct: Stop-loss as percentage of capital (e.g. 30.0 = 30%).
+            tp_capital_pct: Take-profit as percentage of capital (e.g. 50.0 = 50%).
+            leverage: Position leverage multiplier.
+            strategy_name: Strategy name for the actions.
+
+        Returns:
+            List of Action objects (set_stop_loss, set_take_profit).
+            Empty list if prices can't be computed.
+        """
+        actions: list[Action] = []
+
+        if side.upper() == "LONG":
+            # For LONG: SL is below entry, TP is above entry
+            # Price movement needed = capital_pct / leverage
+            sl_price = entry_price * (1 - sl_capital_pct / 100.0 / leverage)
+            tp_price = entry_price * (1 + tp_capital_pct / 100.0 / leverage)
+        else:
+            # For SHORT: SL is above entry, TP is below entry
+            sl_price = entry_price * (1 + sl_capital_pct / 100.0 / leverage)
+            tp_price = entry_price * (1 - tp_capital_pct / 100.0 / leverage)
+
+        if sl_price > 0:
+            actions.append(Action(
+                type="set_stop_loss",
+                strategy=strategy_name,
+                symbol=symbol,
+                stop_loss_price=Decimal(str(round(sl_price, 8))),
+                reason=f"Stop loss at {sl_price:.8f} ({sl_capital_pct}% of capital at {leverage}x)",
+            ))
+        if tp_price > 0:
+            actions.append(Action(
+                type="set_take_profit",
+                strategy=strategy_name,
+                symbol=symbol,
+                take_profit_price=Decimal(str(round(tp_price, 8))),
+                reason=f"Take profit at {tp_price:.8f} ({tp_capital_pct}% of capital at {leverage}x)",
+            ))
+
+        return actions
 
     @staticmethod
     def _to_decimal(value: Any) -> Decimal:
@@ -226,19 +287,6 @@ class StrategyBase(ABC):
             return Decimal("0")
 
     @staticmethod
-    def _iter_contracts(option_chain: list) -> list[dict[str, Any]]:
-        """Normalize option chain entries to dicts."""
-        result = []
-        for item in option_chain:
-            if hasattr(item, "__dataclass_fields__"):
-                result.append({f: getattr(item, f) for f in item.__dataclass_fields__})
-            elif isinstance(item, dict):
-                result.append(item)
-            else:
-                result.append({})
-        return result
-
-    @staticmethod
     def _to_dict(obj: Any) -> dict[str, Any]:
         """Convert a potentially dataclass object to dict."""
         if hasattr(obj, "__dataclass_fields__"):
@@ -247,70 +295,95 @@ class StrategyBase(ABC):
             return obj
         return {}
 
-    def _dte_in_range(self, contract: dict[str, Any], min_dte: int, max_dte: int) -> bool:
-        """Check if contract DTE falls within [min_dte, max_dte]."""
-        dte = self._calculate_dte(contract)
-        return dte is not None and min_dte <= dte <= max_dte
+    def _get_current_price(self, symbol: str, context: StrategyContext) -> float | None:
+        """Get current mark price for a symbol from context.
 
-    # ======================================================================
-    # Shared instance helpers — for multi-leg strategies
-    # ======================================================================
+        Args:
+            symbol: Trading pair symbol.
+            context: The strategy execution context.
 
-    def _combined_value(self, legs: list[dict[str, Any]]) -> Decimal:
-        """Calculate combined mid-price value of a list of legs."""
-        total = Decimal("0")
-        for leg in legs:
-            price = self._mid_price(leg)
-            if price is not None:
-                total += price
-        return total
+        Returns:
+            Mark price as float, or None if not available.
+        """
+        return context.mark_prices.get(symbol)
 
-    def _find_by_delta(
+    def _get_atr(self, symbol: str, context: StrategyContext, period: int | None = None) -> float | None:
+        """Estimate ATR from available price data in context.
+
+        Simple implementation: returns the ATR value from strategy_params
+        if pre-calculated, otherwise returns a default percentage.
+
+        Args:
+            symbol: Trading pair symbol.
+            context: The strategy execution context.
+            period: ATR period (for logging/documentation).
+
+        Returns:
+            Estimated ATR value, or None if unavailable.
+        """
+        if period is None:
+            period = int(float(self.get_param("atr_period", 14)))
+        atr_key = f"atr_{symbol}"
+        if context.strategy_params and atr_key in context.strategy_params:
+            return float(context.strategy_params[atr_key])
+        default_atr_pct = self.get_param("atr_default_pct", 0.02)
+        price = self._get_current_price(symbol, context)
+        if price:
+            return price * default_atr_pct
+        return None
+
+    def _check_liquidation_risk(
         self,
-        contracts: list[dict[str, Any]],
-        target_delta: float,
-        option_type: str,
-        underlying_price: Decimal,
-        above_strike: bool,
-    ) -> dict[str, Any] | None:
-        """Find contract closest to target delta, filtered by type and moneyness."""
-        eligible = []
-        for c in contracts:
-            if c.get("option_type") != option_type:
-                continue
-            strike = self._to_decimal(c.get("strike", 0))
-            if above_strike and strike <= underlying_price:
-                continue
-            if not above_strike and strike >= underlying_price:
-                continue
-            delta = abs(self._to_decimal(c.get("delta", 0)))
-            if delta <= Decimal("0"):
-                continue
-            eligible.append(c)
+        liquidation_price: float,
+        mark_price: float,
+        position_side: FuturesPositionSide,
+        threshold_pct: float | None = None,
+    ) -> tuple[bool, float]:
+        """Check distance to liquidation.
 
-        if not eligible:
-            return None
+        Args:
+            liquidation_price: Position's liquidation price.
+            mark_price: Current mark price.
+            position_side: LONG or SHORT.
+            threshold_pct: Minimum safe distance as fraction (0.2 = 20%).
 
-        target = Decimal(str(target_delta))
-        return min(eligible, key=lambda c: abs(abs(self._to_decimal(c.get("delta", 0))) - target))
+        Returns:
+            Tuple of (is_safe, distance_pct). is_safe is True if the position
+            is more than threshold_pct away from liquidation.
+        """
+        if threshold_pct is None:
+            threshold_pct = float(self.get_param("liquidation_threshold_pct", 0.2))
+        if liquidation_price <= 0 or mark_price <= 0:
+            return True, 1.0
+        if position_side == FuturesPositionSide.LONG:
+            distance = (mark_price - liquidation_price) / mark_price
+        else:
+            distance = (liquidation_price - mark_price) / mark_price
+        return distance > threshold_pct, float(distance)
 
-    def _find_nearest_strike(
+    def _calculate_funding_cost(
         self,
-        contracts: list[dict[str, Any]],
-        target_strike: Decimal,
-        option_type: str,
-    ) -> dict[str, Any] | None:
-        """Find contract of given type with strike closest to target."""
-        eligible = [
-            c for c in contracts
-            if c.get("option_type") == option_type
-        ]
-        if not eligible:
-            return None
-        return min(
-            eligible,
-            key=lambda c: abs(self._to_decimal(c.get("strike", 0)) - target_strike),
-        )
+        position_size_usd: float,
+        funding_rate: float,
+        hours_held: float | None = None,
+    ) -> float:
+        """Calculate projected funding cost for holding a position.
+
+        Binance funds every 8 hours. A positive funding rate means longs pay shorts.
+
+        Args:
+            position_size_usd: Position notional value in USD.
+            funding_rate: Current funding rate (e.g. 0.0001 for 0.01%).
+            hours_held: Expected hours until position close.
+
+        Returns:
+            Projected funding cost in USD (positive = cost to you as a long).
+        """
+        if hours_held is None:
+            hours_held = float(self.get_param("funding_hours_held", 8))
+        funding_interval_hours = float(self.get_param("funding_interval_hours", 8.0))
+        funding_intervals = hours_held / funding_interval_hours
+        return position_size_usd * funding_rate * funding_intervals
 
     # ---- Abstract interface ----
 

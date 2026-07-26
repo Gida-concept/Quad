@@ -15,7 +15,7 @@
 # ---------------------------------------------------------------------------
 trading:
   # Default strategy to use when bot starts (must match a registered strategy)
-  default_strategy: "cash_secured_put"
+  default_strategy: "swing_trading"
 
   # Maximum number of concurrent positions across all strategies
   max_positions: 10
@@ -34,21 +34,22 @@ trading:
     - "BNBUSDT"
     - "SOLUSDT"
 
-  # Preferred option expiry cycle: weekly, monthly, or quarterly
-  preferred_expiry: "weekly"
-
-  # Minimum and maximum days to expiry for option selection
-  min_dte: 7
-  max_dte: 45
-
   # When true, close all existing positions before opening a new ENTER trade
   serial_trade_mode: false
+
+  # Futures-specific settings
+  leverage: 1
+  margin_mode: "isolated"
+  position_mode: "one_way"
+
+  # Indicator cache TTL (seconds) — how long to cache computed indicator values
+  indicator_cache_ttl_seconds: 60
 
 # ---------------------------------------------------------------------------
 # Exchange Connection Settings
 # ---------------------------------------------------------------------------
 exchange:
-  # Exchange name (must be a registered adapter: binance, paper, mock)
+  # Exchange name (must be a registered adapter: binance, mock)
   name: "binance"
 
   # Use testnet environment (true) or production (false)
@@ -70,33 +71,114 @@ exchange:
     # Seconds between WebSocket keep-alive pings
     ping_interval: 30
 
+  # Binance-specific adapter parameters
+  binance:
+    # REST API base URLs (futures)
+    base_url: "https://fapi.binance.com"
+    testnet_base_url: "https://testnet.binancefuture.com"
+    # WebSocket base URLs (futures)
+    ws_base_url: "wss://fstream.binance.com/ws"
+    ws_testnet_base_url: "wss://stream.binancefuture.com/ws"
+    # Rate limit header keys
+    header_used_weight: "X-MBX-USED-WEIGHT-"
+    header_order_count: "X-MBX-ORDER-COUNT-"
+    # Rate limit thresholds (fraction of max weight)
+    rate_limit_warn_threshold: 0.80
+    rate_limit_hard_threshold: 0.95
+    # WebSocket reconnection backoff (flat keys)
+    ws_backoff_base_seconds: 1.0
+    ws_backoff_max_seconds: 30.0
+    ws_backoff_multiplier: 2.0
+    ws_backoff_jitter_factor: 0.1
+    ws_max_retries: 10
+    # Listen key refresh interval (seconds)
+    listen_key_refresh_seconds: 3300
+    # Request timeouts
+    request_timeout_seconds: 30.0
+    connect_timeout_seconds: 10.0
+    # Default signed-request receive window (ms)
+    recv_window: 5000
+    # WebSocket heartbeat
+    heartbeat_seconds: 30.0
+    # REST API max retries
+    max_retries: 3
+    # newOrderRespType parameter
+    new_order_resp_type: "ACK"
+    # Rate limiter throttle wait (seconds)
+    rate_limiter_wait_seconds: 1.0
+    # Fallback retry-after when header missing (seconds)
+    retry_after_fallback_seconds: 5.0
+
+  # Order gateway confirmation and retry parameters
+  gateway:
+    confirmation_timeout_seconds: 30.0
+    max_retries: 3
+    completed_ids_maxlen: 1000
+
+  # Fill reconciler discrepancy tracking parameters
+  reconciler:
+    max_discrepancy_history: 500
+    stale_order_hours: 24
+    recent_discrepancies_default_count: 20
+
 # ---------------------------------------------------------------------------
 # Risk Management Settings
 # ---------------------------------------------------------------------------
 risk:
-  # Maximum contracts per single position
-  max_position_size: 5
+  # Maximum number of concurrent positions
+  max_positions: 5
 
   # Maximum percentage of total portfolio value at risk in a single trade
-  max_portfolio_risk_pct: 10.0
+  max_portfolio_risk_pct: 20.0
 
   # Maximum allowable daily loss in USD (across all positions)
   max_daily_loss_usd: 500.0
 
   # Maximum drawdown from peak portfolio value (percentage trigger)
-  max_drawdown_pct: 20.0
+  max_drawdown_pct: 25.0
 
-  # Portfolio-level Greek exposure limits
-  max_delta_exposure: 10.0      # Aggregate delta across all positions
-  max_theta_decay: -100.0       # Maximum daily theta decay (negative)
-  max_vega_exposure: 500.0     # Aggregate vega exposure
+  # Maximum leverage enforcement limit (the risk system will block trades
+  # that would push effective leverage above this value)
+  max_leverage: 10
 
-  # Implied volatility percentile range for trade entry
-  iv_percentile_min: 10         # Minimum IV percentile (0-100)
-  iv_percentile_max: 90         # Maximum IV percentile (0-100)
+  # Minimum distance to liquidation (as a decimal fraction, e.g. 0.20 = 20%)
+  min_distance_to_liquidation_pct: 0.2
 
-  # Maximum percentage of portfolio concentrated in a single underlying
+  # Maximum acceptable funding rate cost per position (decimal fraction)
+  max_funding_rate_cost: 0.001
+
+  # Maximum position concentration as a fraction of portfolio (0.0 to 1.0)
+  max_position_concentration: 0.4
+
+  # Maximum percentage of portfolio in a single underlying
   concentration_limit_pct: 30.0
+
+  # Maximum acceptable funding rate
+  max_funding_rate: 0.001
+
+  # Minimum position size in USD (positions below this use the default fraction)
+  min_position_size_usd: 10
+
+  # Maximum position size as a fraction of portfolio (0.0 to 1.0)
+  max_position_size_pct: 0.10
+
+  # Absolute maximum position size in USD
+  max_position_size_usd: 10000
+
+  # Maximum position size in USD (schema field — kept for backward compatibility)
+  max_position_size: 1000.0
+
+  # Correlation threshold percentage — flags if any quote-asset group
+  # exceeds this % of portfolio value
+  correlation_threshold_pct: 60
+
+  # Kelly Criterion sizing parameters
+  kelly:
+    # Fractional Kelly multiplier (0.0 to 1.0) — the fraction of
+    # full-Kelly to use for conservative sizing
+    fraction: 0.25
+    # Default position fraction when no trade history is available
+    default_fraction: 0.02
 
   # Circuit breakers — automated risk controls
   circuit_breakers:
@@ -106,23 +188,57 @@ risk:
     # Tier 3: Full emergency shutdown
     drawdown_tiers: [5.0, 10.0, 15.0]
 
-    # Hard Greek limits that trigger circuit breakers
-    greek_limits:
-      delta: 15.0
-      gamma: 5.0
-      vega: 1000.0
+    # Per-breaker configuration (used by CircuitBreakerManager at runtime)
 
-  # Stop-loss configuration
-  stop_loss:
-    enabled: true
-    # Percentage of portfolio value to trigger stop-loss (across all positions)
-    portfolio_pct: 15.0
+    # Daily loss breaker
+    daily_loss:
+      max_loss_usd: 500
 
-  # Take-profit configuration
-  take_profit:
+    # Drawdown breaker
+    drawdown:
+      max_drawdown_pct: 25
+
+    # Consecutive losses breaker
+    consecutive_losses:
+      max_consecutive: 5
+
+    # Liquidation cascade breaker
+    liquidation_cascade:
+      min_distance_to_liquidation_pct: 0.05
+
+    # Funding rate spike breaker
+    funding_rate_spike:
+      funding_rate_spike_threshold: 0.001
+      max_consecutive_spikes: 3
+
+    # Volatility breaker
+    volatility:
+      volatility_breaker_atr_pct: 0.05
+
+  # Per-position stop-loss and take-profit (2:1 ratio)
+  per_position_sl:
     enabled: true
-    # Percentage of portfolio value to trigger take-profit (across all positions)
-    portfolio_pct: 30.0
+    type: "fixed"
+    capital_pct: 30.0
+  per_position_tp:
+    enabled: true
+    type: "fixed"
+    capital_pct: 50.0
+
+# ---------------------------------------------------------------------------
+# Execution Engine Settings
+# ---------------------------------------------------------------------------
+execution:
+  # Seconds between order reconciliation cycles
+  reconcile_interval_seconds: 60
+  # Default TWAP execution window (seconds)
+  twap_window_seconds: 300
+  # Default order type (LIMIT or MARKET)
+  default_order_type: "LIMIT"
+  # Default reduce-only flag
+  reduce_only: false
+  # Default post-only flag
+  post_only: false
 
 # ---------------------------------------------------------------------------
 # Market Data Settings
@@ -132,15 +248,35 @@ market_data:
   buffer_sizes:
     # Number of price ticks to keep per symbol
     ticks: 1000
-    # Number of Greek snapshots to keep per symbol
-    greeks: 500
 
   # Cache TTL values (in seconds)
   cache_ttl:
-    # How long option chain data remains valid
-    option_chain: 30
+    # How long order book data remains valid
+    order_book: 5
     # How long the underlying price remains valid before refresh
     underlying_price: 5
+    # How long funding rate data remains valid
+    funding_rate: 10
+    # How long mark price data remains valid
+    mark_price: 2
+
+  # Market data engine lifecycle parameters
+  engine:
+    # Max seconds to wait for engine shutdown
+    shutdown_timeout_seconds: 10.0
+
+  # Market data WebSocket connection parameters
+  websocket:
+    # WebSocket base URL (Binance Futures stream)
+    url: "wss://fstream.binance.com/ws"
+    # Reconnection backoff parameters
+    backoff:
+      base_seconds: 1.0
+      max_seconds: 30.0
+      multiplier: 2.0
+      jitter_fraction: 0.1
+    # Heartbeat interval (seconds)
+    heartbeat_interval_seconds: 30.0
 
   # Historical data access configuration
   historical:
@@ -156,6 +292,17 @@ persistence:
 
   # Interval between automatic database snapshots (seconds)
   snapshot_interval: 60
+
+  # Database connection pool configuration
+  database:
+    # Minimum pool connections
+    min_pool_size: 1
+    # Maximum pool connections
+    max_pool_size: 5
+    # Maximum connection retries
+    connect_retry_count: 5
+    # Command timeout (seconds)
+    command_timeout_seconds: 60
 
   # Database backup configuration
   backup:
@@ -192,11 +339,28 @@ telegram:
   # Enable Telegram bot for notifications and commands
   enabled: true
 
-  # Telegram user IDs authorized to send admin commands
-  admin_ids: []
-
   # Use long-polling (true) or webhook (false) mode
   polling: true
+
+  # Scheduled job intervals (seconds)
+  job_intervals:
+    # Status summary — how often to send hourly position/PnL summary
+    status_summary_seconds: 3600
+    # Risk alert — check circuit breakers
+    risk_alert_seconds: 300
+    # Funding rate countdown — check funding rates
+    funding_rate_countdown_seconds: 1800
+    # Liquidation warning — check distance to liquidation
+    liquidation_warning_seconds: 300
+
+  # Daily report scheduling (UTC)
+  daily_report:
+    hour: 23
+    minute: 0
+
+  # Funding cost report scheduling (UTC)
+  funding_cost_report:
+    hour: 22
 
 # ---------------------------------------------------------------------------
 # AI / Groq Integration Settings
@@ -244,6 +408,41 @@ ai:
   # Minimum open interest to consider a strike valid (avoids illiquid strikes)
   min_open_interest: 50
 
+  # Groq LLM client configuration
+  groq:
+    # Fallback model when primary is unavailable
+    fallback_model: "llama-3.1-8b-instant"
+    # Request parameters
+    max_tokens_default: 1024
+    temperature_default: 0.3
+    # API request timeout (seconds)
+    timeout_seconds: 30.0
+    # Retry/backoff
+    max_retries: 3
+    base_backoff_seconds: 1.0
+    # Rate limiter (sliding window, default 24h)
+    rate_limiter:
+      window_seconds: 86400
+      warning_level_1: 800
+      warning_level_2: 900
+      warning_level_3: 950
+    # Valid trading actions for AI decisions
+    valid_actions: ["ENTER", "EXIT", "HOLD"]
+    # Fallback action when decision fails
+    fallback_action: "HOLD"
+
+  # Prompt builder configuration
+  prompt:
+    # Default order book depth for prompts
+    order_book_depth: 5
+    # Max candles for compact display
+    max_candles_compact: 20
+    # System prompt risk parameters
+    system_risk_max_portfolio_pct: 50.0
+    system_max_hold_hours: 8
+    system_stop_loss_pct: 0.01
+    system_min_funding_rate_pct: 11.0
+
 # ---------------------------------------------------------------------------
 # TradingView Webhook Settings
 # ---------------------------------------------------------------------------
@@ -269,6 +468,10 @@ monitoring:
     enabled: true
     # Port for the health check HTTP server
     port: 9090
+    # Bind address
+    bind_address: "0.0.0.0"
+    # Application version string
+    version: "0.1.0"
 
   # Prometheus metrics endpoint
   metrics:
@@ -278,75 +481,66 @@ monitoring:
 # Strategy-Specific Parameters
 # ---------------------------------------------------------------------------
 strategy:
-  # --- Covered Call ---
-  # Sell OTM call options against held underlying
-  covered_call:
-    delta_target: 0.30          # Target delta for strike selection
-    min_dte: 7                   # Minimum days to expiry
-    max_dte: 45                  # Maximum days to expiry
-    roll_when_dte_lt: 3         # Roll position when DTE drops below this
-    allocation_pct: 0.5         # Fraction of underlying position to cover
-    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
-    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
-    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
+  # --- Swing Trading ---
+  # RSI + MACD + volume confirmation swing trading strategy
+  swing_trading:
+    enabled: false
+    rsi_period: 14
+    rsi_oversold: 30
+    rsi_overbought: 70
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    volume_sma_period: 20
+    volume_multiplier: 1.5
+    max_position_size_usd: 1000.0
+    trade_capital_usd: 5
+    leverage: 50
+    sl_capital_pct: 30.0
+    tp_capital_pct: 50.0
+    confidence_default: 0.7
+    confidence_high: 0.9
 
-  # --- Cash-Secured Put ---
-  # Sell OTM put options with cash collateral
-  cash_secured_put:
-    delta_target: 0.16          # Target delta for strike selection
-    min_dte: 7                   # Minimum days to expiry
-    max_dte: 45                  # Maximum days to expiry
-    roll_when_dte_lt: 3         # Roll position when DTE drops below this
-    cash_reserve_pct: 0.3       # Fraction of cash reserved per position
-    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
-    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
-    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
-    wheel_enabled: false        # After assignment, auto-transition to Covered Call
-    deep_itm_exit_pct: 0.85     # Exit when underlying drops below this fraction of strike
+  # --- Trend Following ---
+  # EMA crossover + ADX filter trend-following strategy
+  trend_following:
+    enabled: false
+    fast_ema: 9
+    slow_ema: 21
+    adx_period: 14
+    adx_threshold: 25
+    atr_period: 14
+    atr_multiplier_stop: 3.0
+    atr_default_pct: 0.02
+    max_position_size_usd: 1000.0
+    trade_capital_usd: 5
+    leverage: 50
+    sl_capital_pct: 30.0
+    tp_capital_pct: 50.0
+    confidence_default: 0.7
+    confidence_high: 0.9
 
-  # --- Iron Condor ---
-  # Sell OTM put spread + OTM call spread
-  iron_condor:
-    delta_short: 0.16           # Target delta for short legs
-    wing_width_pct: 10.0        # Width of each wing as % of underlying price
-    min_dte: 14                  # Minimum days to expiry
-    max_dte: 45                  # Maximum days to expiry
-    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
-    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
-    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
-    force_exit_dte: 21          # Force close position when DTE drops below this
-    take_profit_pct: 50         # Take profit when credit decays by this percentage
-
-  # --- Straddle ---
-  # Buy ATM call + ATM put (long volatility)
-  straddle:
-    delta_target: 0.50          # Target delta (ATM) for strike selection
-    min_dte: 7                   # Minimum days to expiry
-    max_dte: 30                  # Maximum days to expiry
-    min_iv_percentile: 50       # Minimum IV percentile for entry
-
-  # --- Strangle ---
-  # Sell OTM call + OTM put (short volatility / premium collection)
-  strangle:
-    call_delta_target: 0.16     # Target delta for call wing
-    put_delta_target: 0.16      # Target delta for put wing
-    min_dte: 14                  # Minimum days to expiry
-    max_dte: 45                  # Maximum days to expiry
-    min_iv_percentile: 50       # Minimum IV percentile for entry
-    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
-    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
-    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
-    force_exit_dte: 21          # Force close position when DTE drops below this
-    take_profit_pct: 50         # Take profit when credit decays by this percentage
-
-  # --- Vertical Spread ---
-  # Buy/sell same-expiry call or put spread
-  vertical_spread:
-    delta_short: 0.20           # Target delta for the short leg
-    delta_long: 0.20            # Target delta for the long leg
-    wing_width_pct: 5.0         # Width of the spread as % of underlying price
-    direction: "neutral"        # bullish, bearish, or neutral
-    min_iv_rank: 30             # Minimum IV percentile rank for entry (skip if below)
-    roll_when_delta_exceeds: 0.40  # Roll short leg when delta exceeds this threshold
-    roll_credit_min_pct: 0.0    # Minimum net credit percentage for a roll (0 = accept any credit)
-    force_exit_dte: 21          # Force close position when DTE drops below this
+# ---------------------------------------------------------------------------
+# Strategy Auto-Optimization
+# ---------------------------------------------------------------------------
+retrain:
+  # Enable the optimisation cycle
+  enabled: false
+  # Days between optimisation runs
+  interval_days: 7
+  # Minimum trades in the period to produce recommendations
+  min_trades_for_analysis: 10
+  # How far back (days) to pull data for analysis
+  max_history_days: 90
+  # Minimum confidence score to auto-apply a recommendation
+  confidence_threshold: 0.7
+  # Apply high-confidence recommendations without manual approval
+  auto_apply: false
+  # Cap on recommendations per cycle
+  max_recommendations_per_cycle: 5
+  # Temperature for optimisation analysis calls
+  groq_temperature: 0.2
+  # Max tokens for optimisation analysis calls
+  groq_max_tokens: 2048
+  # Override the default optimisation system prompt (optional)
+  # analysis_prompt_override: ""

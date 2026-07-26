@@ -2,7 +2,7 @@
 
 Provides the RiskManager class as the single entry point for the
 execution engine and orchestrator. Combines GatePipeline,
-CircuitBreakerManager, PositionSizer, and ExposureLimiter.
+CircuitBreakerManager, PositionSizer, and FuturesPositionTracker.
 """
 
 from __future__ import annotations
@@ -19,30 +19,7 @@ from quad.persistence.database import DatabaseManager
 from .gates import GatePipeline
 from .circuit_breakers import CircuitBreakerManager
 from .sizing import PositionSizer
-from .exposure import ExposureLimiter
-
-DEFAULT_RISK_CONFIG: dict[str, Any] = {
-    "max_positions": 5,
-    "max_portfolio_risk_pct": 20,
-    "max_daily_loss_usd": 500,
-    "max_concentration_pct": 15,
-    "max_drawdown_pct": 25,
-    "min_dte": 1,
-    "max_dte": 365,
-    "circuit_breakers": {
-        "daily_loss": {"max_loss_usd": 500},
-        "drawdown": {"max_drawdown_pct": 25},
-        "consecutive_losses": {"max_consecutive": 5},
-    },
-    "exposure": {
-        "max_delta": 100,
-        "max_theta": -500,
-        "max_vega": 500,
-    },
-    "kelly": {"fraction": 0.25, "default_fraction": 0.02},
-    "max_position_size_pct": 0.10,
-    "max_position_size_usd": 10000,
-}
+from .exposure import FuturesPositionTracker
 
 
 class RiskManager:
@@ -50,7 +27,7 @@ class RiskManager:
 
     Single entry point for the execution engine and orchestrator.
     Combines: GatePipeline, CircuitBreakerManager, PositionSizer,
-    ExposureLimiter.
+    FuturesPositionTracker.
 
     Parameters
     ----------
@@ -74,7 +51,7 @@ class RiskManager:
         self._gates = GatePipeline(self._config)
         self._breakers = CircuitBreakerManager(self._config)
         self._sizer = PositionSizer(self._config, db_manager=db_manager)
-        self._limiter = ExposureLimiter(self._config)
+        self._tracker = FuturesPositionTracker(self._config)
 
         self._log.info(
             "risk_manager_initialized",
@@ -93,8 +70,8 @@ class RiskManager:
 
         Full evaluation flow:
 
-        1. Check circuit breakers — if any active, reject with CB reason.
-        2. Run gate pipeline — if any gate fails, reject with gate reason.
+        1. Check circuit breakers -- if any active, reject with CB reason.
+        2. Run gate pipeline -- if any gate fails, reject with gate reason.
         3. Compute optimal position size via PositionSizer.
         4. Return a passing RiskResult with the sized Action.
 
@@ -132,8 +109,14 @@ class RiskManager:
             return RiskResult(
                 passed=False,
                 gate="CIRCUIT_BREAKER",
-                reason=f"Active breakers: {active_breakers}. Reasons: {reasons}",
-                details={"active_breakers": active_breakers, "reasons": reasons},
+                reason=(
+                    f"Active breakers: {active_breakers}. "
+                    f"Reasons: {reasons}"
+                ),
+                details={
+                    "active_breakers": active_breakers,
+                    "reasons": reasons,
+                },
             )
 
         # Phase 2: Gate pipeline check
@@ -170,23 +153,25 @@ class RiskManager:
     # ------------------------------------------------------------------
 
     async def update_monitoring(self, context: StrategyContext) -> None:
-        """Feed current state to circuit breakers and exposure limiter.
+        """Feed current state to circuit breakers and position tracker.
 
         Called each trading cycle before evaluation.
         """
         await self._breakers.update_monitoring_data(context)
 
-        if context.positions and context.option_chain:
+        if context.futures_positions or context.funding_rates:
             try:
-                exposure = await self._limiter.compute_exposure(
-                    context.positions,
-                    context.option_chain,
+                report = await self._tracker.compute_exposure(context)
+                self._log.debug(
+                    "position_exposure_updated",
+                    num_positions=report.get("num_positions", 0),
+                    total_notional=report.get("total_notional_usd", "0"),
+                    avg_leverage=report.get("avg_leverage", "0"),
                 )
-                self._log.debug("exposure_updated", exposure={
-                    k: str(v) for k, v in exposure.items()
-                })
             except Exception as exc:
-                self._log.exception("exposure_update_failed", error=str(exc))
+                self._log.exception(
+                    "exposure_update_failed", error=str(exc)
+                )
 
     # ------------------------------------------------------------------
     # Status
@@ -197,12 +182,15 @@ class RiskManager:
         cb_status = self._breakers.status()
         gate_status = self._gates.get_gate_status()
 
-        # Determine drawdown and PnL from breakers
-        dd_breaker = cb_status.get("DRAWDOWN_BREAKER", type("obj", (object,), {"active": False}))()
-        dl_breaker = cb_status.get("DAILY_LOSS_BREAKER", type("obj", (object,), {"active": False}))()
+        dd_breaker = cb_status.get(
+            "DRAWDOWN_BREAKER",
+            type("obj", (object,), {"active": False})(),
+        )
+        dl_breaker = cb_status.get(
+            "DAILY_LOSS_BREAKER",
+            type("obj", (object,), {"active": False})(),
+        )
 
-        # Note: actual drawdown and daily PnL values rely on StrategyContext.
-        # Here we report from circuit breaker status with defaults.
         drawdown = Decimal("0")
         daily_pnl = Decimal("0")
         daily_loss_limit = Decimal("500")
@@ -226,7 +214,7 @@ class RiskManager:
     # ------------------------------------------------------------------
 
     def trigger_kill_switch(self, reason: str) -> None:
-        """Emergency stop — triggers the Tier 4 kill switch."""
+        """Emergency stop -- triggers the Tier 4 kill switch."""
         self._log.critical("kill_switch_triggered", reason=reason)
         self._breakers.trigger("KILL_SWITCH", reason)
 
@@ -249,8 +237,8 @@ class RiskManager:
         return self._gates.get_gate_status()
 
     def get_exposure_report(self) -> dict[str, Any]:
-        """Return the full exposure report from the exposure limiter."""
-        return self._limiter.get_exposure_report()
+        """Return the full exposure report from the position tracker."""
+        return self._tracker.get_exposure_report()
 
     def get_sizing_stats(self) -> dict[str, Any]:
         """Return current position sizing parameters."""
@@ -262,14 +250,19 @@ class RiskManager:
 
     @staticmethod
     def _ensure_config(config: dict[str, Any]) -> dict[str, Any]:
-        """Ensure the config dict has a populated ``risk`` section."""
-        if "risk" not in config or not isinstance(config["risk"], dict):
-            config = dict(config)
-            config["risk"] = dict(DEFAULT_RISK_CONFIG)
-        else:
-            # Merge in any missing defaults
-            risk = dict(DEFAULT_RISK_CONFIG)
-            risk.update(config["risk"])
-            config = dict(config)
-            config["risk"] = risk
-        return config
+        """Ensure the config dict has a ``risk`` section.
+
+        All default values come from ``config.default.yaml``, the Pydantic
+        schema defaults, and inline fallbacks in each risk subsystem.
+        This method only guarantees the ``risk`` key exists as a dict so
+        downstream code can safely call ``config.get("risk", {})``.
+
+        User overrides from ``config.local.yaml``, environment variables,
+        and runtime overrides are already merged into *config* by
+        ``ConfigManager`` before being passed here.
+        """
+        result = dict(config)
+        result.setdefault("risk", {})
+        if not isinstance(result["risk"], dict):
+            result["risk"] = {}
+        return result

@@ -11,11 +11,14 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
 
+from quad.types.domain import FuturesPositionSide, MarginType
+
 
 __all__ = [
     "RiskStatus",
     "CircuitBreakerStatus",
     "RiskResult",
+    "FuturesRiskMetadata",
     "Action",
 ]
 
@@ -78,35 +81,49 @@ class RiskResult:
 
 
 @dataclass
+class FuturesRiskMetadata:
+    symbol: str = ""
+    position_side: FuturesPositionSide = FuturesPositionSide.LONG
+    entry_price: float = 0.0
+    mark_price: float = 0.0
+    liquidation_price: float = 0.0
+    leverage: int = 1
+    margin_type: MarginType = MarginType.ISOLATED
+    position_size_usd: float = 0.0
+    distance_to_liquidation_pct: float = 0.0
+    funding_rate: float = 0.0
+
+
+@dataclass
 class Action:
     """A trading action produced by a strategy after analysis.
 
     Represents a decision to enter, exit, adjust, or hold a position.
     """
 
-    type: Literal["ENTER", "EXIT", "ADJUST", "HOLD"] = "HOLD"
-    """Type of action to take."""
-
+    type: Literal["open_long", "open_short", "close_long", "close_short", "hold", "adjust_stop", "reduce_position", "set_stop_loss", "set_take_profit"] = "hold"
     strategy: str = ""
-    """Name of the strategy producing this action."""
-
-    contract: str | None = None
-    """Target contract symbol, or None for HOLD actions."""
-
-    side: str | None = None
-    """Order side: BUY or SELL, or None for HOLD."""
-
+    symbol: str = ""
     quantity: Decimal = Decimal("0")
-    """Number of contracts."""
-
-    order_type: str | None = None
-    """Order type: LIMIT, MARKET, etc., or None for HOLD."""
-
     price: Decimal | None = None
-    """Limit price, or None for market orders / HOLD."""
-
     reason: str = ""
-    """Human-readable reason for this action."""
-
+    confidence: float = 1.0
+    risk_checked: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
-    """Additional metadata about the action (IV, delta, DTE, etc.)."""
+    contract: str = ""
+    side: str = ""
+    order_type: str = ""
+    stop_loss_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        """Synchronise derived fields after initialisation."""
+        self.contract = self.contract or self.symbol
+        if self.type in ("open_long", "close_short"):
+            self.side = "BUY"
+        elif self.type in ("open_short", "close_long", "set_stop_loss", "set_take_profit"):
+            self.side = "SELL"
+        if self.type == "set_stop_loss":
+            self.order_type = "STOP_LOSS"
+        elif self.type == "set_take_profit":
+            self.order_type = "TAKE_PROFIT"

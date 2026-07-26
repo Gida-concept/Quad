@@ -16,7 +16,7 @@ import structlog
 from quad.ai.context import MarketContext
 from quad.config.schema import AiConfig
 from quad.types.domain import Account, Position
-from quad.types.market import OptionContract
+from quad.types.market import FundingRate
 
 # ---------------------------------------------------------------------------
 # Logger
@@ -28,27 +28,26 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are a professional options trading AI for Binance Options. Your role is to analyze market data and recommend trades.
+_SYSTEM_PROMPT_TEMPLATE = """You are a professional futures trading AI for Binance Futures. Your role is to analyze market data and recommend trades.
 
 ## Core Principles
 1. **Capital preservation first** — never risk more than is justified by the setup.
-2. **Trade with the trend** — prefer put selling in uptrends, call selling in downtrends.
-3. **Volatility is your friend** — sell when IV is elevated, buy when IV is depressed.
-4. **Always be delta-neutral-ish** — manage overall portfolio delta exposure.
-5. **No hero trades** — if the setup isn't clear, recommend HOLD.
+2. **Trade with the trend** — trend following and momentum are your primary edge.
+3. **Respect funding rates** — high positive funding (longs paying shorts) suggests crowding and potential reversal; high negative suggests the opposite.
+4. **Manage leverage carefully** — use lower leverage in volatile or ranging markets; higher leverage only in strong, clear trends.
+5. **Risk management first** — always check liquidation distance, funding costs, and stop-loss viability.
+6. **Market regime awareness** — trending markets favour trend following; ranging markets favour mean reversion or grid trading; volatile markets demand wider stops and lower size.
 
 ## Output Format
 You MUST respond with valid JSON only. No markdown, no explanation outside the JSON block.
 
 {
   "reasoning": "Brief explanation of market conditions and decision logic",
-  "action": "ENTER" | "EXIT" | "HOLD",
-  "contract": "SYMBOL_YYMMDD_OPTIONTYPE_STRIKE" or null,
-  "side": "BUY" | "SELL" | null,
-  "quantity": 1-5 or null,
-  "order_type": "LIMIT" | "MARKET" | null,
-  "limit_price": 0.0 or null,
-  "strategy": "cash_secured_put" | "covered_call" | "iron_condor" | "straddle" | "strangle" | "vertical_spread" | null,
+  "action": "open_long" | "open_short" | "close_long" | "close_short" | "hold" | "adjust_stop" | "reduce_position",
+  "symbol": "BTCUSDT" or null,
+  "quantity": 0.001-10 or null,
+  "price": 0.0 or null (limit price),
+  "strategy": "swing_trading" | null,
   "confidence": 0.0-1.0,
   "risk_checks": {
     "position_size_ok": true/false,
@@ -60,14 +59,11 @@ You MUST respond with valid JSON only. No markdown, no explanation outside the J
   }
 }
 
-## Contract Selection Rules
-- Prefer expiry 7-45 days out (DTE).
-- Prefer options with open_interest > 50.
-- For cash-secured puts: choose a strike ~0.25 delta (OTM).
-- For covered calls: choose a strike ~0.30 delta (OTM).
-- Never recommend a contract that is not in the provided option chain.
-- Use the exact contract symbol from the chain data.
-- Limit price must be between bid and ask (or near mid) when provided."""
+## Position Management Rules
+- Always check liquidation distance before opening. If price can move against you by more than {max_liquidation_pct}% of the distance to liquidation, reduce size or skip.
+- Factor funding rate into position cost: {funding_period_hours}h funding at {funding_rate_example}% annualises to ~{funding_annual_example}%. High cumulative funding cost can erode profits.
+- Use market orders for entry when speed matters; use limit orders for tight entries when there's no rush.
+- Prefer limit orders for take-profit and stop-loss placements."""
 
 
 # ============================================================================
@@ -97,53 +93,60 @@ def _format_positions(positions: list[Position]) -> str:
     if not positions:
         return "No open positions."
 
-    lines = [f"{'Contract':<30} {'Side':<6} {'Qty':<5} {'Entry':<12} {'PnL':<12} {'DTE':<5}"]
-    lines.append("-" * 80)
+    lines = [f"{'Symbol':<12} {'Side':<8} {'Size':<10} {'Entry':<12} {'Mark':<12} {'Liq':<12} {'PnL%':<10} {'Funding':<10}"]
+    lines.append("-" * 86)
     for p in positions:
-        pnl = float(p.unrealized_pnl) if p.unrealized_pnl else 0.0
-        entry = float(p.entry_price) if p.entry_price else 0.0
-        sym = p.contract_symbol[:28] if len(p.contract_symbol) > 28 else p.contract_symbol
-        dte = p.days_to_expiry if p.days_to_expiry else "?"
+        pnl_pct = (
+            (float(p.current_price) - float(p.entry_price)) / float(p.entry_price) * 100 * (1 if p.side == "LONG" else -1)
+        ) if p.entry_price and float(p.entry_price) > 0 else 0.0
         lines.append(
-            f"{sym:<30} {p.side:<6} {p.quantity:<5} "
-            f"{entry:<12,.2f} {pnl:<+12,.2f} {dte!s:<5}"
+            f"{p.symbol:<12} {p.side:<8} {float(p.quantity):<10.4f} "
+            f"{float(p.entry_price):<12,.2f} {float(p.current_price):<12,.2f} "
+            f"{float(p.liquidation_price or 0):<12,.2f} {pnl_pct:<+10.2f}% {float(p.funding_paid or 0):<+10.4f}"
         )
     return "\n".join(lines)
 
 
-def _format_option_chain(
-    chain: list[OptionContract], max_entries: int = 20
-) -> str:
-    """Format option chain as a compact, parseable table.
+def _format_funding_rates(rates: dict[str, FundingRate]) -> str:
+    """Format current funding rates as a compact table."""
+    if not rates:
+        return "No funding rate data available."
 
-    Shows only the most liquid strikes (highest open_interest) for each type.
-    """
-    if not chain:
-        return "No options data available."
-
-    # Separate calls and puts
-    calls = [c for c in chain if c.option_type == "CALL"]
-    puts = [c for c in chain if c.option_type == "PUT"]
-
-    # Sort by open_interest descending, take top N
-    calls.sort(key=lambda x: x.open_interest if x.open_interest else 0, reverse=True)
-    puts.sort(key=lambda x: x.open_interest if x.open_interest else 0, reverse=True)
-
-    lines = [f"{'Strike':<10} {'Type':<6} {'Bid':<10} {'Ask':<10} {'IV':<8} {'Delta':<8} {'OI':<8}"]
-    lines.append("-" * 70)
-
-    for opt in (calls[:max_entries // 2] + puts[:max_entries // 2]):
-        bid = float(opt.bid) if opt.bid else 0.0
-        ask = float(opt.ask) if opt.ask else 0.0
-        iv = round(float(opt.iv) * 100, 1) if opt.iv else 0.0
-        delta = round(float(opt.delta), 3) if opt.delta else 0.0
-        oi = int(opt.open_interest) if opt.open_interest else 0
-        strike = float(opt.strike)
-
+    lines = [f"{'Symbol':<12} {'Rate':<12} {'Next Funding':<20} {'Mark Price':<14} {'Index Price':<14}"]
+    lines.append("-" * 72)
+    for symbol, fr in sorted(rates.items()):
+        rate_pct = float(fr.funding_rate) * 100
+        next_funding = time.strftime(
+            "%m-%d %H:%M",
+            time.gmtime(fr.next_funding_time / 1000) if fr.next_funding_time else time.gmtime(0),
+        ) if fr.next_funding_time else "N/A"
         lines.append(
-            f"{strike:<10,.2f} {opt.option_type:<6} {bid:<10,.2f} {ask:<10,.2f} "
-            f"{iv:<7.1f}% {delta:<+8.3f} {oi:<8}"
+            f"{symbol:<12} {rate_pct:<+11.6f}% {next_funding:<20} "
+            f"{float(fr.mark_price):<14,.2f} {float(fr.index_price):<14,.2f}"
         )
+    return "\n".join(lines)
+
+
+def _format_order_book(book: dict, symbol: str, depth: int = 5) -> str:
+    """Format top-of-book bids and asks as a compact table."""
+    bids = book.get("bids", [])[:depth]
+    asks = book.get("asks", [])[:depth]
+
+    lines = [f"Order Book {symbol}:"]
+    lines.append(f"{'Bids':>20} {'':<5} {'Asks':<20}")
+    lines.append("-" * 45)
+
+    max_rows = max(len(bids), len(asks))
+    for i in range(max_rows):
+        bid_str = ""
+        ask_str = ""
+        if i < len(bids):
+            bid_price, bid_qty = bids[i][0], bids[i][1]
+            bid_str = f"{float(bid_price):<10,.2f} {float(bid_qty):<8.4f}"
+        if i < len(asks):
+            ask_price, ask_qty = asks[i][0], asks[i][1]
+            ask_str = f"{float(ask_price):<10,.2f} {float(ask_qty):<8.4f}"
+        lines.append(f"{bid_str:>25} {ask_str:<20}")
 
     return "\n".join(lines)
 
@@ -267,7 +270,19 @@ def build_trading_prompt(
     """
     cfg = config or {}
     ai_cfg = AiConfig.model_validate(cfg.get("ai", {}))
-    system_prompt = ai_cfg.system_prompt_override or _SYSTEM_PROMPT
+    prompt_cfg = ai_cfg.model_dump().get("prompt", {}) if hasattr(ai_cfg, "model_dump") else cfg.get("ai", {}).get("prompt", {})
+
+    # Build system prompt from template with config values
+    system_prompt = ai_cfg.system_prompt_override or _SYSTEM_PROMPT_TEMPLATE.format(
+        max_liquidation_pct=prompt_cfg.get("max_liquidation_pct", 50),
+        funding_period_hours=prompt_cfg.get("funding_period_hours", 8),
+        funding_rate_example=prompt_cfg.get("funding_rate_example", 0.01),
+        funding_annual_example=prompt_cfg.get("funding_annual_example", 11),
+    )
+
+    # Order book depth and candle count from prompt config
+    order_book_depth = prompt_cfg.get("order_book_depth", 5)
+    max_candles = prompt_cfg.get("max_candles", 20)
 
     # Build user prompt sections
     sections: list[str] = [
@@ -297,30 +312,35 @@ def build_trading_prompt(
             candle_key = key
             pair_candles = context.candles.get(candle_key, [])
             if pair_candles:
-                sections.append(_format_compact_candles(pair_candles, max_candles=20))
+                sections.append(_format_compact_candles(pair_candles, max_candles=max_candles))
             sections.append("")
 
-    # Option chains
-    sections.append("## Option Chains")
-    for pair in sorted(context.option_chains.keys()):
-        chain = context.option_chains[pair]
-        underlying_price = indicators.get(f"{pair}_1h", {}).get("price_current", "N/A")
-        sections.append(f"### {pair} (Underlying: ${underlying_price})")
-        sections.append(_format_option_chain(chain, max_entries=20))
+    # Market data (funding rates, order books)
+    sections.append("## Market Data")
+    if context.funding_rates:
+        sections.append("### Funding Rates")
+        sections.append(_format_funding_rates(context.funding_rates))
+        sections.append("")
+    for pair in sorted(context.order_books.keys()):
+        book = context.order_books[pair]
+        sections.append(_format_order_book(book, pair, depth=order_book_depth))
         sections.append("")
 
     # Risk context
     sections.append("## Risk Parameters")
     risk_cfg = cfg.get("risk", {})
-    sections.append(f"Max Position Size: {risk_cfg.get('max_position_size', 5)} contracts")
-    sections.append(f"Max Portfolio Risk: {risk_cfg.get('max_portfolio_risk_pct', 10)}%")
-    sections.append(f"Max Daily Loss: ${risk_cfg.get('max_daily_loss_usd', 500):,.2f}")
-    sections.append(f"Max Delta Exposure: {risk_cfg.get('max_delta_exposure', 10)}")
-    sections.append(f"Max Drawdown: {risk_cfg.get('max_drawdown_pct', 20)}%")
+    trading_cfg = cfg.get("trading", {})
+    sections.append(f"Max Position Size: {risk_cfg.get('max_position_size', prompt_cfg.get('risk_max_position_size', 5))} units")
+    sections.append(f"Max Portfolio Risk: {risk_cfg.get('max_portfolio_risk_pct', prompt_cfg.get('risk_max_portfolio_risk_pct', 10))}%")
+    sections.append(f"Max Daily Loss: ${risk_cfg.get('max_daily_loss_usd', prompt_cfg.get('risk_max_daily_loss_usd', 500)):,.2f}")
+    sections.append(f"Max Leverage: {trading_cfg.get('max_leverage', prompt_cfg.get('risk_max_leverage', 20))}x")
+    sections.append(f"Min Distance to Liquidation: {trading_cfg.get('min_distance_to_liquidation_pct', prompt_cfg.get('risk_min_distance_to_liquidation_pct', 0.2)) * 100:.0f}%")
+    sections.append(f"Max Funding Rate Cost: {trading_cfg.get('max_funding_rate_cost', prompt_cfg.get('risk_max_funding_rate_cost', 0.001)) * 100:.2f}%")
+    sections.append(f"Max Drawdown: {risk_cfg.get('max_drawdown_pct', prompt_cfg.get('risk_max_drawdown_pct', 20))}%")
     sections.append("")
 
     sections.append("## Decision Required")
-    sections.append("Based on the above data, recommend a trading action (ENTER, EXIT, or HOLD).")
+    sections.append("Based on the above data, recommend a trading action (open_long, open_short, close_long, close_short, hold, adjust_stop, or reduce_position).")
     sections.append("Respond with valid JSON only following the specified format.")
 
     user_prompt = "\n".join(sections)
@@ -335,7 +355,7 @@ def build_trading_prompt(
 # Optimisation Cycle Prompts
 # ============================================================================
 
-OPTIMIZATION_SYSTEM_PROMPT: str = """You are a trading strategy optimization analyst. Your job is to review recent trading performance and recommend concrete, actionable improvements.
+OPTIMIZATION_SYSTEM_PROMPT: str = """You are a futures trading strategy optimization analyst. Your job is to review recent trading performance and recommend concrete, actionable improvements.
 
 You will receive:
 1. A summary of recent trading decisions (actions taken, reasoning provided)
@@ -365,7 +385,7 @@ Your output must be valid JSON with this exact structure:
 }
 
 Focus recommendations on:
-- Strategy parameters that correlate with poor outcomes (e.g., IV too low, profit target too tight)
+- Strategy parameters that correlate with poor outcomes (e.g., ATR multiplier too tight, ADX threshold too high, grid spacing too wide)
 - Risk threshold adjustments based on drawdown history
 - Prompt improvements based on recurring reasoning errors
 - Strategy toggling if a strategy consistently underperforms in current conditions
@@ -443,8 +463,9 @@ def build_optimization_prompt(
     user += (
         f"\n**Current Configuration:**\n"
         f"- Max positions: {current_config.risk.max_positions}\n"
-        f"- Max daily loss: {current_config.risk.stop_loss.max_daily_loss}\n"
-        f"- Max drawdown: {current_config.risk.stop_loss.max_drawdown}\n"
+        f"- Max daily loss: ${current_config.risk.max_daily_loss_usd:.2f}\n"
+        f"- Max drawdown: {current_config.risk.max_drawdown_pct:.1f}%\n"
+        f"- Max leverage: {current_config.trading.max_leverage}x\n"
         f"- AI model: {current_config.ai.model}\n"
     )
 

@@ -1,4 +1,4 @@
-"""Repository classes for the Quad options trading bot.
+"""Repository classes for the Quad futures trading bot.
 
 Provides a generic ``BaseRepository[T]`` with CRUD operations and
 domain-specific repositories for each entity type. Uses asyncpg with
@@ -19,7 +19,9 @@ from .models import (
     ConfigChangeModel,
     DecisionModel,
     ErrorLogModel,
-    OptionContractModel,
+    FundingPaymentModel,
+    LiquidationEventModel,
+    FundingRateRecordModel,
     OptimizationRecommendationModel,
     OptimizationRunModel,
     OrderModel,
@@ -323,10 +325,67 @@ class PositionRepository(BaseRepository[PositionModel]):
         """Return positions opened by a specific strategy."""
         return await self.list(strategy=strategy)
 
-    async def get_by_contract(self, symbol: str) -> Optional[PositionModel]:
-        """Return the position for a given option contract symbol."""
-        results = await self.list(contract_symbol=symbol)
-        return results[0] if results else None
+    async def get_by_symbol(self, symbol: str) -> list[PositionModel]:
+        """Return positions for a given futures symbol."""
+        return await self.list(symbol=symbol)
+
+    async def get_open_futures_positions(self, symbol: str, position_side: str | None = None) -> list[PositionModel]:
+        """Return open futures positions, optionally filtered by side."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                if position_side:
+                    rows = await conn.fetch(
+                        f"SELECT {self._column_list()} FROM {self._table} "
+                        "WHERE status = 'OPEN' AND symbol = $1 AND position_side = $2",
+                        symbol, position_side,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        f"SELECT {self._column_list()} FROM {self._table} "
+                        "WHERE status = 'OPEN' AND symbol = $1",
+                        symbol,
+                    )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_open_futures_positions")
+            return [PositionModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_open_futures_positions_failed")
+            raise
+
+    async def get_liquidation_risk_positions(self, distance_threshold_pct: float) -> list[PositionModel]:
+        """Return positions where distance to liquidation is near threshold.
+
+        This is a client-side filter since liquidation_price is stored as text.
+        Returns positions where both liquidation_price and current_price are non-zero.
+        """
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "WHERE status = 'OPEN' AND liquidation_price != '0' AND current_price != '0'",
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_liquidation_risk_positions")
+            results: list[PositionModel] = []
+            for r in rows:
+                pos = PositionModel.from_row(r)
+                liq = float(pos.liquidation_price)
+                cur = float(pos.current_price)
+                if liq > 0 and cur > 0:
+                    if pos.position_side.upper() == "LONG":
+                        dist = abs(cur - liq) / cur
+                    else:
+                        dist = abs(liq - cur) / cur
+                    if dist < distance_threshold_pct / 100.0:
+                        results.append(pos)
+            return results
+        except Exception:
+            self._log.exception("get_liquidation_risk_positions_failed")
+            raise
 
     async def close(self, position_id: int, pnl: str) -> None:
         """Mark a position as CLOSED and record final realised PnL."""
@@ -515,69 +574,6 @@ class DecisionRepository(BaseRepository[DecisionModel]):
             return [DecisionModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_decisions_by_date_range_failed")
-            raise
-
-
-class OptionsContractRepository(BaseRepository[OptionContractModel]):
-    """Repository for option contract snapshots."""
-
-    def __init__(
-        self,
-        db_manager: DatabaseManager,
-        model_cls: Optional[type[OptionContractModel]] = None,
-    ) -> None:
-        super().__init__(db_manager, model_cls or OptionContractModel)
-
-    async def get_by_symbol(self, symbol: str) -> Optional[OptionContractModel]:
-        """Return a contract by its unique symbol."""
-        results = await self.list(symbol=symbol)
-        return results[0] if results else None
-
-    async def get_by_expiry(self, expiry: int) -> list[OptionContractModel]:
-        """Return all contracts expiring at a given timestamp."""
-        return await self.list(expiry=expiry)
-
-    async def get_active(self) -> list[OptionContractModel]:
-        """Return contracts with non-zero volume."""
-        t0 = time.monotonic()
-        try:
-            async with self._db.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    f"SELECT {self._column_list()} FROM {self._table} "
-                    f"WHERE volume > '0' ORDER BY expiry ASC",
-                )
-            dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
-                self._log.warning("slow_query", ms=round(dur), method="get_active")
-            return [OptionContractModel.from_row(r) for r in rows]
-        except Exception:
-            self._log.exception("get_active_contracts_failed")
-            raise
-
-    async def upsert_contract(self, contract: OptionContractModel) -> int:
-        """Insert or update a contract record (by symbol).
-
-        Uses ``INSERT ... ON CONFLICT DO UPDATE`` since ``symbol`` is UNIQUE.
-        """
-        t0 = time.monotonic()
-        try:
-            columns = self._column_list()
-            placeholders = self._param_placeholders()
-            set_pairs = self._column_set_pairs(self._columns)
-            async with self._db.pool.acquire() as conn:
-                last_id = await conn.fetchval(
-                    f"INSERT INTO {self._table} ({columns}) "
-                    f"VALUES ({placeholders}) "
-                    f"ON CONFLICT (symbol) DO UPDATE SET {set_pairs} "
-                    f"RETURNING id",
-                    *contract.to_row(),
-                )
-            dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
-                self._log.warning("slow_query", ms=round(dur), method="upsert_contract")
-            return last_id  # type: ignore[return-value]
-        except Exception:
-            self._log.exception("upsert_contract_failed")
             raise
 
 
@@ -1077,4 +1073,123 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
             return last_id  # type: ignore[return-value]
         except Exception:
             self._log.exception("upsert_strategy_state_failed")
+            raise
+
+
+# ---------------------------------------------------------------------------
+# Futures-specific repositories
+# ---------------------------------------------------------------------------
+
+
+class FundingRepository(BaseRepository[FundingPaymentModel]):
+    """Repository for funding payment records."""
+
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        model_cls: type[FundingPaymentModel] | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or FundingPaymentModel)
+
+    async def save_funding_payment(
+        self, symbol: str, position_id: int, amount: str, rate: str
+    ) -> int:
+        """Record a funding payment."""
+        import time as _time
+        now = int(_time.time() * 1000)
+        payment = FundingPaymentModel(
+            id=0, symbol=symbol, position_id=position_id,
+            amount=amount, rate=rate, funding_time=now,
+        )
+        return await self.create(payment)
+
+    async def get_funding_history(
+        self, symbol: str, limit: int = 50
+    ) -> list[FundingPaymentModel]:
+        """Return recent funding payments for a symbol."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    "WHERE symbol = $1 ORDER BY funding_time DESC LIMIT $2",
+                    symbol, limit,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_funding_history")
+            return [FundingPaymentModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_funding_history_failed")
+            raise
+
+    async def get_total_funding_paid(self, position_id: int) -> str:
+        """Return total funding paid for a position."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                row = await conn.fetchval(
+                    f"SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) FROM {self._table} "
+                    "WHERE position_id = $1",
+                    position_id,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_total_funding_paid")
+            return str(row) if row is not None else "0"
+        except Exception:
+            self._log.exception("get_total_funding_paid_failed")
+            raise
+
+
+class LiquidationRepository(BaseRepository[LiquidationEventModel]):
+    """Repository for liquidation events."""
+
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        model_cls: type[LiquidationEventModel] | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or LiquidationEventModel)
+
+    async def record_liquidation(
+        self, symbol: str, position_id: int, amount: str, price: str, side: str
+    ) -> int:
+        """Record a liquidation event."""
+        import time as _time
+        now = int(_time.time() * 1000)
+        event = LiquidationEventModel(
+            id=0, symbol=symbol, position_id=position_id,
+            amount=amount, price=price, side=side, timestamp=now,
+        )
+        return await self.create(event)
+
+    async def get_recent_liquidations(
+        self, symbol: str | None = None, hours: int = 24
+    ) -> list[LiquidationEventModel]:
+        """Return liquidation events from the past N hours."""
+        import time as _time
+        cutoff = int(_time.time() * 1000) - hours * 3600 * 1000
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                if symbol:
+                    rows = await conn.fetch(
+                        f"SELECT {self._column_list()} FROM {self._table} "
+                        "WHERE timestamp >= $1 AND symbol = $2 "
+                        "ORDER BY timestamp DESC",
+                        cutoff, symbol,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        f"SELECT {self._column_list()} FROM {self._table} "
+                        "WHERE timestamp >= $1 ORDER BY timestamp DESC",
+                        cutoff,
+                    )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > 500:
+                self._log.warning("slow_query", ms=round(dur), method="get_recent_liquidations")
+            return [LiquidationEventModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_recent_liquidations_failed")
             raise

@@ -34,9 +34,7 @@ from quad.types.domain import Order, Trade
 # Constants
 # ---------------------------------------------------------------------------
 
-_MAX_DISCREPANCY_HISTORY = 500
-_STALE_ORDER_HOURS = 24
-_STALE_ORDER_MS = _STALE_ORDER_HOURS * 3600 * 1000
+# (now configured via reconciler config section)
 
 # ---------------------------------------------------------------------------
 # Reconciler
@@ -58,13 +56,31 @@ class FillReconciler:
         self,
         exchange_adapter: ExchangeAdapter,
         db_manager: DatabaseManager | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self._log = structlog.get_logger(__name__)
         self._exchange = exchange_adapter
         self._db = db_manager
+        self._reconciler_config = config.get("exchange", {}).get("reconciler", {}) if config else {}
         self._discrepancy_history: deque[dict[str, Any]] = deque(
-            maxlen=_MAX_DISCREPANCY_HISTORY
+            maxlen=self._max_discrepancy_history
         )
+
+    # ------------------------------------------------------------------
+    # Config-derived properties
+    # ------------------------------------------------------------------
+
+    @property
+    def _max_discrepancy_history(self) -> int:
+        return int(self._reconciler_config.get("max_discrepancy_history", 500))
+
+    @property
+    def _stale_order_hours(self) -> int:
+        return int(self._reconciler_config.get("stale_order_hours", 24))
+
+    @property
+    def _stale_order_ms(self) -> int:
+        return self._stale_order_hours * 3600 * 1000
 
     # ------------------------------------------------------------------
     # Public API
@@ -151,7 +167,7 @@ class FillReconciler:
             if order.status in ("NEW", "PARTIALLY_FILLED"):
                 if order.created_at > 0:
                     age_ms = now_ms - order.created_at
-                    if age_ms > _STALE_ORDER_MS:
+                    if age_ms > self._stale_order_ms:
                         disc = self._record_discrepancy(
                             "STALE_ORDER",
                             order,
@@ -168,7 +184,7 @@ class FillReconciler:
                 # Also check exchange-side creation time if available
                 if ex_order.created_at > 0:
                     ex_age_ms = now_ms - ex_order.created_at
-                    if ex_age_ms > _STALE_ORDER_MS:
+                    if ex_age_ms > self._stale_order_ms:
                         disc = self._record_discrepancy(
                             "STALE_ORDER",
                             order,
@@ -331,7 +347,7 @@ class FillReconciler:
 
     def get_recent_discrepancies(
         self,
-        count: int = 20,
+        count: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return the most recent discrepancies.
 
@@ -345,6 +361,8 @@ class FillReconciler:
         list[dict]
             The most recent ``count`` discrepancies.
         """
+        if count is None:
+            count = int(self._reconciler_config.get("recent_discrepancies_default_count", 20))
         total = len(self._discrepancy_history)
         return list(self._discrepancy_history)[-min(count, total):]
 

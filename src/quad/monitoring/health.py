@@ -48,11 +48,18 @@ class HealthServer:
 
     def __init__(
         self,
-        port: int = 8080,
+        port: int | None = None,
         components: dict[str, Any] | None = None,
         metrics_collector: Any = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
-        self._port = port
+        self._config = config or {}
+        self._monitoring_config = self._config.get("monitoring", {})
+
+        self._port = (
+            port
+            or self._monitoring_config.get("health_server", {}).get("port", 9090)
+        )
         self._components: dict[str, Any] = dict(components or {})
         self._metrics: Any = metrics_collector
 
@@ -60,7 +67,7 @@ class HealthServer:
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._extra_routes: list[tuple[str, str, Callable]] = []
-        self._log = logger.bind(port=port)
+        self._log = logger.bind(port=self._port)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -116,7 +123,11 @@ class HealthServer:
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        self._site = web.TCPSite(self._runner, "0.0.0.0", self._port)
+        self._site = web.TCPSite(
+            self._runner,
+            self._monitoring_config.get("health_server", {}).get("bind_address", "0.0.0.0"),
+            self._port,
+        )
         await self._site.start()
 
         self._log.info("health_server_started", port=self._port)
@@ -164,7 +175,7 @@ class HealthServer:
             {
                 "status": "ok",
                 "uptime": round(uptime, 2),
-                "version": "0.1.0",
+                "version": self._monitoring_config.get("health_server", {}).get("version", "0.1.0"),
                 "timestamp": int(_time.time() * 1000),
             }
         )

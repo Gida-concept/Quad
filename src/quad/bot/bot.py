@@ -14,12 +14,11 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from telegram import Update
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
-    ContextTypes,
     ConversationHandler,
     MessageHandler,
     filters,
@@ -91,9 +90,8 @@ class QuadBot:
         self._groq_client = groq_client
         self._optimizer = optimizer
 
-        # Bot token and admin verification
+        # Bot token and notification config
         self._bot_token: str = self._telegram_config.get("bot_token", "")
-        self._admin_ids: list[int] = self._telegram_config.get("admin_ids", [])
         self._notification_chat_id: int | None = self._telegram_config.get(
             "notification_chat_id", None
         )
@@ -109,7 +107,6 @@ class QuadBot:
             "db_manager": db_manager,
             "groq_client": groq_client,
             "optimizer": optimizer,
-            "admin_ids": self._admin_ids,
             "notification_chat_id": self._notification_chat_id,
         }
 
@@ -135,7 +132,7 @@ class QuadBot:
         if not self._bot_token:
             msg = (
                 "Telegram bot token is not configured. "
-                "Set config['telegram']['bot_token'] or the QUAD_TELEGRAM_BOT_TOKEN "
+                "Set config['telegram']['bot_token'] or the TELEGRAM_BOT_TOKEN "
                 "environment variable."
             )
             self._log.error("bot_token_missing")
@@ -143,7 +140,6 @@ class QuadBot:
 
         self._log.info(
             "bot_starting",
-            admin_ids=self._admin_ids,
             notification_chat_id=self._notification_chat_id,
         )
 
@@ -199,40 +195,6 @@ class QuadBot:
         return self._application is not None
 
     # ------------------------------------------------------------------
-    # Admin authorization
-    # ------------------------------------------------------------------
-
-    def _is_admin(self, user_id: int | None) -> bool:
-        """Check whether a user ID is in the admin whitelist.
-
-        Returns ``True`` when no admin IDs are configured (open access),
-        or when *user_id* is present in the admin list.
-        """
-        if not self._admin_ids:
-            return True
-        if user_id is None:
-            return False
-        return user_id in self._admin_ids
-
-    async def _check_admin(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> bool:
-        """Verify the sender is an admin; reply ``⛔ Unauthorized`` if not.
-
-        Returns ``True`` when the user is authorized.
-        """
-        if self._is_admin(update.effective_user.id if update.effective_user else None):
-            return True
-
-        self._log.warning(
-            "unauthorized_access",
-            user=update.effective_user.id if update.effective_user else None,
-        )
-        if update.effective_chat:
-            await update.effective_chat.send_message("⛔ Unauthorized")
-        return False
-
-    # ------------------------------------------------------------------
     # Internal: handler / job registration
     # ------------------------------------------------------------------
 
@@ -250,12 +212,18 @@ class QuadBot:
         app.add_handler(CommandHandler("balance", self._commands.cmd_balance))
         app.add_handler(CommandHandler("positions", self._commands.cmd_positions))
         app.add_handler(CommandHandler("orders", self._commands.cmd_orders))
-        app.add_handler(CommandHandler("chain", self._commands.cmd_chain))
+        app.add_handler(CommandHandler("funding_rate", self._commands.cmd_funding_rate))
+        app.add_handler(CommandHandler("book", self._commands.cmd_book))
+        app.add_handler(CommandHandler("leverage", self._commands.cmd_leverage))
+        app.add_handler(CommandHandler("position_mode", self._commands.cmd_position_mode))
+        app.add_handler(CommandHandler("liquidation_warnings", self._commands.cmd_liquidation_warnings))
+        app.add_handler(CommandHandler("market_regime", self._commands.cmd_market_regime))
         app.add_handler(CommandHandler("strategies", self._commands.cmd_strategies))
         app.add_handler(CommandHandler("kill", self._commands.cmd_kill))
         app.add_handler(CommandHandler("risk", self._commands.cmd_risk))
         app.add_handler(CommandHandler("cancel", self._commands.cmd_cancel))
         app.add_handler(CommandHandler("settings", self._commands.cmd_settings))
+        app.add_handler(CommandHandler("set", self._commands.cmd_set))
 
         # AI-powered commands
         app.add_handler(CommandHandler("analyze", self._commands.cmd_analyze))
@@ -265,6 +233,11 @@ class QuadBot:
 
         # Execute conversation handler (multi-step)
         app.add_handler(self._commands.get_execute_conversation_handler())
+
+        # Kill switch inline keyboard callback handler
+        app.add_handler(
+            CallbackQueryHandler(self._commands.cmd_kill_callback, pattern=r"^kill_")
+        )
 
         # Error handler
         app.add_error_handler(self._commands.error_handler)
@@ -284,27 +257,34 @@ class QuadBot:
             self._log.warning("job_queue_not_available")
             return
 
-        # Status summary: every 60 minutes
+        import datetime as dt
+
+        self._job_intervals = self._telegram_config.get("job_intervals", {})
+
+        # Status summary: configurable interval (default 60 minutes)
+        status_interval = self._job_intervals.get("status_summary_seconds", 3600)
+        status_first = self._job_intervals.get("status_summary_first_seconds", 60)
         job_queue.run_repeating(
             self._jobs.job_status_summary,
-            interval=3600,
-            first=60,
+            interval=status_interval,
+            first=status_first,
             name="status_summary",
         )
 
-        # Risk alert check: every 5 minutes
+        # Risk alert check: configurable interval (default 5 minutes)
+        risk_alert_interval = self._job_intervals.get("risk_alert_seconds", 300)
+        risk_alert_first = self._job_intervals.get("risk_alert_first_seconds", 120)
         job_queue.run_repeating(
             self._jobs.job_risk_alert,
-            interval=300,
-            first=120,
+            interval=risk_alert_interval,
+            first=risk_alert_first,
             name="risk_alert",
         )
 
-        # Daily report: scheduled at configured time (default 23:00 UTC)
-        daily_hour = self._telegram_config.get("daily_report_hour", 23)
-        daily_minute = self._telegram_config.get("daily_report_minute", 0)
-
-        import datetime as dt
+        # Daily report: scheduled at configured time
+        daily_report_cfg = self._telegram_config.get("daily_report", {})
+        daily_hour = daily_report_cfg.get("hour", self._telegram_config.get("daily_report_hour", 23))
+        daily_minute = daily_report_cfg.get("minute", self._telegram_config.get("daily_report_minute", 0))
 
         now = dt.datetime.now(dt.timezone.utc)
         first_daily = now.replace(
@@ -344,11 +324,44 @@ class QuadBot:
                 first_s=first_s,
             )
 
+        # Funding rate countdown: configurable interval (default 30 minutes)
+        funding_interval = self._job_intervals.get("funding_rate_countdown_seconds", 1800)
+        funding_first = self._job_intervals.get("funding_rate_countdown_first_seconds", 300)
+        job_queue.run_repeating(
+            self._jobs.job_funding_rate_countdown,
+            interval=funding_interval,
+            first=funding_first,
+            name="funding_rate_countdown",
+        )
+
+        # Liquidation warning: configurable interval (default 5 minutes)
+        liq_interval = self._job_intervals.get("liquidation_warning_seconds", 300)
+        liq_first = self._job_intervals.get("liquidation_warning_first_seconds", 180)
+        job_queue.run_repeating(
+            self._jobs.job_liquidation_warning,
+            interval=liq_interval,
+            first=liq_first,
+            name="liquidation_warning",
+        )
+
+        # Funding cost report: daily at configured time (default 22:00 UTC)
+        funding_cost_cfg = self._telegram_config.get("funding_cost_report", {})
+        funding_cost_hour = funding_cost_cfg.get("hour", 22)
+        funding_cost_minute = funding_cost_cfg.get("minute", 0)
+        job_queue.run_daily(
+            self._jobs.job_funding_cost_report,
+            time=dt.time(hour=funding_cost_hour, minute=funding_cost_minute, tzinfo=dt.timezone.utc),
+            name="funding_cost_report",
+        )
+
         self._log.debug(
             "jobs_registered",
-            status_summary_interval_s=3600,
-            risk_alert_interval_s=300,
+            status_summary_interval_s=status_interval,
+            risk_alert_interval_s=risk_alert_interval,
             daily_report_hour=daily_hour,
             daily_report_minute=daily_minute,
             optimization_registered=self._optimizer is not None,
+            funding_rate_countdown_interval_s=funding_interval,
+            liquidation_warning_interval_s=liq_interval,
+            funding_cost_report_hour=funding_cost_hour,
         )

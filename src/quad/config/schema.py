@@ -27,7 +27,7 @@ class TradingConfig(BaseModel):
     """Configuration for trading behavior and parameters."""
 
     default_strategy: str = Field(
-        default="cash_secured_put",
+        default="swing_trading",
         description="Default strategy name for the bot",
     )
     max_positions: int = Field(
@@ -50,47 +50,35 @@ class TradingConfig(BaseModel):
         default_factory=lambda: ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"],
         description="List of underlying assets the bot monitors",
     )
-    preferred_expiry: str = Field(
-        default="weekly",
-        description="Preferred option expiry cycle: weekly, monthly, or quarterly",
-    )
-    min_dte: int = Field(
-        default=7,
-        ge=0,
-        description="Minimum days to expiry for option selection",
-    )
-    max_dte: int = Field(
-        default=45,
+    indicator_cache_ttl_seconds: int = Field(
+        default=60,
         ge=1,
-        le=365,
-        description="Maximum days to expiry for option selection",
+        le=3600,
+        description="TTL in seconds for cached indicator values",
     )
     serial_trade_mode: bool = Field(
         default=False,
         description="When True, close all existing positions before opening a new ENTER trade",
     )
+    leverage: int = Field(default=1, ge=1, le=125)
+    margin_mode: str = Field(default="isolated")
+    position_mode: str = Field(default="one_way")
 
-    @field_validator("preferred_expiry")
+    @field_validator("margin_mode")
     @classmethod
-    def validate_preferred_expiry(cls, value: str) -> str:
-        """Validate that preferred_expiry is one of the supported values."""
-        allowed = {"weekly", "monthly", "quarterly"}
-        if value.lower() not in allowed:
-            raise ValueError(
-                f"preferred_expiry must be one of {allowed}, got '{value}'"
-            )
-        return value.lower()
+    def validate_margin_mode(cls, v: str) -> str:
+        allowed = {"isolated", "cross"}
+        if v.lower() not in allowed:
+            raise ValueError(f"margin_mode must be one of {allowed}, got '{v}'")
+        return v.lower()
 
-    @field_validator("max_dte")
+    @field_validator("position_mode")
     @classmethod
-    def validate_dte_range(cls, value: int, info: Any) -> int:
-        """Ensure max_dte >= min_dte when both are available."""
-        data = info.data  # type: ignore[union-attr]
-        if "min_dte" in data and value < data["min_dte"]:
-            raise ValueError(
-                f"max_dte ({value}) must be >= min_dte ({data['min_dte']})"
-            )
-        return value
+    def validate_position_mode(cls, v: str) -> str:
+        allowed = {"one_way", "hedge"}
+        if v.lower() not in allowed:
+            raise ValueError(f"position_mode must be one of {allowed}, got '{v}'")
+        return v.lower()
 
 
 # ============================================================================
@@ -125,6 +113,137 @@ class WebSocketConfig(BaseModel):
     )
 
 
+class BinanceConfig(BaseModel):
+    """Binance-specific adapter configuration.
+
+    Controls URLs, rate-limit warning thresholds, WebSocket reconnection
+    backoff, listen-key refresh, request timeouts, and default order params.
+    """
+
+    base_url: str = Field(
+        default="https://fapi.binance.com",
+        description="Binance Futures REST API base URL",
+    )
+    testnet_base_url: str = Field(
+        default="https://testnet.binancefuture.com",
+        description="Binance Futures testnet REST API base URL",
+    )
+    ws_base_url: str = Field(
+        default="wss://fstream.binance.com/ws",
+        description="Binance Futures WebSocket base URL",
+    )
+    ws_testnet_base_url: str = Field(
+        default="wss://stream.binancefuture.com/ws",
+        description="Binance Futures testnet WebSocket base URL",
+    )
+    header_used_weight: str = Field(
+        default="X-MBX-USED-WEIGHT-",
+        description="Response header key for used request weight",
+    )
+    header_order_count: str = Field(
+        default="X-MBX-ORDER-COUNT-",
+        description="Response header key for order count",
+    )
+    rate_limit_warn_threshold: float = Field(
+        default=0.80, ge=0.0, le=1.0,
+        description="Rate-limit warning threshold as fraction of max weight",
+    )
+    rate_limit_hard_threshold: float = Field(
+        default=0.95, ge=0.0, le=1.0,
+        description="Rate-limit hard threshold as fraction of max weight",
+    )
+    ws_backoff_base_seconds: float = Field(
+        default=1.0, ge=0.1,
+        description="Initial WebSocket reconnection backoff in seconds",
+    )
+    ws_backoff_max_seconds: float = Field(
+        default=30.0, ge=1.0,
+        description="Maximum WebSocket reconnection backoff in seconds",
+    )
+    ws_backoff_multiplier: float = Field(
+        default=2.0, ge=1.0,
+        description="WebSocket backoff multiplier per retry",
+    )
+    ws_backoff_jitter_factor: float = Field(
+        default=0.1, ge=0.0, le=1.0,
+        description="WebSocket backoff jitter factor",
+    )
+    ws_max_retries: int = Field(
+        default=10, ge=1,
+        description="Maximum WebSocket reconnection retries",
+    )
+    listen_key_refresh_seconds: int = Field(
+        default=3300, ge=60,
+        description="Interval between listen-key refreshes (default 55 min)",
+    )
+    request_timeout_seconds: float = Field(
+        default=30.0, ge=5.0,
+        description="REST API request timeout in seconds",
+    )
+    connect_timeout_seconds: float = Field(
+        default=10.0, ge=1.0,
+        description="REST API connection timeout in seconds",
+    )
+    recv_window: int = Field(
+        default=5000, ge=1000,
+        description="Default receive window for signed requests (ms)",
+    )
+    heartbeat_seconds: float = Field(
+        default=30.0, ge=5.0,
+        description="WebSocket heartbeat interval in seconds",
+    )
+    max_retries: int = Field(
+        default=3, ge=1,
+        description="Maximum REST API request retries",
+    )
+    new_order_resp_type: str = Field(
+        default="ACK",
+        description="newOrderRespType parameter for Binance order placement",
+    )
+    rate_limiter_wait_seconds: float = Field(
+        default=1.0, ge=0.1,
+        description="Seconds to wait when rate-limited",
+    )
+    retry_after_fallback_seconds: float = Field(
+        default=5.0, ge=1.0,
+        description="Fallback retry-after seconds when header is missing",
+    )
+
+
+class OrderGatewayConfig(BaseModel):
+    """Order gateway confirmation and retry parameters."""
+
+    confirmation_timeout_seconds: float = Field(
+        default=30.0, ge=5.0,
+        description="Max seconds to wait for order confirmation",
+    )
+    max_retries: int = Field(
+        default=3, ge=0,
+        description="Maximum order placement retries",
+    )
+    completed_ids_maxlen: int = Field(
+        default=1000, ge=100,
+        description="Max completed order IDs to track (ring buffer)",
+    )
+
+
+class FillReconcilerConfig(BaseModel):
+    """Fill reconciler discrepancy tracking parameters."""
+
+    max_discrepancy_history: int = Field(
+        default=500, ge=10,
+        description="Max discrepancy records to keep in ring buffer",
+    )
+    stale_order_hours: int = Field(
+        default=24, ge=1,
+        description="Hours after which an unreconciled order is considered stale",
+    )
+    recent_discrepancies_default_count: int = Field(
+        default=20, ge=1,
+        description="Default count for get_recent_discrepancies()",
+    )
+
+
 class ExchangeConfig(BaseModel):
     """Exchange connection and rate limit configuration."""
 
@@ -152,12 +271,24 @@ class ExchangeConfig(BaseModel):
         default_factory=WebSocketConfig,
         description="WebSocket configuration",
     )
+    binance: BinanceConfig = Field(
+        default_factory=BinanceConfig,
+        description="Binance-specific connection parameters",
+    )
+    gateway: OrderGatewayConfig = Field(
+        default_factory=OrderGatewayConfig,
+        description="Order gateway retry and timeout parameters",
+    )
+    reconciler: FillReconcilerConfig = Field(
+        default_factory=FillReconcilerConfig,
+        description="Fill reconciler discrepancy tracking parameters",
+    )
 
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
         """Validate exchange name is supported."""
-        allowed = {"binance", "paper", "mock"}
+        allowed = {"binance", "mock"}
         if value.lower() not in allowed:
             raise ValueError(
                 f"exchange name must be one of {allowed}, got '{value}'"
@@ -169,16 +300,95 @@ class ExchangeConfig(BaseModel):
 # Risk Section
 # ============================================================================
 
+class DailyLossBreakerConfig(BaseModel):
+    """Daily loss circuit breaker configuration."""
+
+    max_loss_usd: float = Field(
+        default=500.0, ge=0.0, description="Max daily loss in USD before breaker triggers"
+    )
+
+
+class DrawdownBreakerConfig(BaseModel):
+    """Drawdown circuit breaker configuration."""
+
+    max_drawdown_pct: float = Field(
+        default=25.0, ge=0.0, le=100.0,
+        description="Max drawdown percentage before breaker triggers",
+    )
+
+
+class ConsecutiveLossesBreakerConfig(BaseModel):
+    """Consecutive losses circuit breaker configuration."""
+
+    max_consecutive: int = Field(
+        default=5, ge=1,
+        description="Max consecutive losing trades before breaker triggers",
+    )
+
+
+class LiquidationCascadeBreakerConfig(BaseModel):
+    """Liquidation cascade circuit breaker configuration."""
+
+    min_distance_to_liquidation_pct: float = Field(
+        default=0.05, ge=0.0, le=1.0,
+        description="Minimum distance to liquidation (decimal) before cascade risk",
+    )
+
+
+class FundingRateSpikeBreakerConfig(BaseModel):
+    """Funding rate spike circuit breaker configuration."""
+
+    funding_rate_spike_threshold: float = Field(
+        default=0.001, ge=0.0,
+        description="Funding rate spike threshold (decimal)",
+    )
+    max_consecutive_spikes: int = Field(
+        default=3, ge=1,
+        description="Max consecutive funding rate spikes before escalation",
+    )
+
+
+class VolatilityBreakerConfig(BaseModel):
+    """Volatility circuit breaker configuration."""
+
+    volatility_breaker_atr_pct: float = Field(
+        default=0.05, ge=0.0,
+        description="Volatility breaker ATR threshold (decimal, e.g. 0.05 = 5%)",
+    )
+
+
 class CircuitBreakerConfig(BaseModel):
     """Circuit breaker threshold configuration."""
+
+    # Nested per-breaker configs (used by CircuitBreakerManager at runtime)
+    daily_loss: DailyLossBreakerConfig = Field(
+        default_factory=DailyLossBreakerConfig,
+        description="Daily loss breaker settings",
+    )
+    drawdown: DrawdownBreakerConfig = Field(
+        default_factory=DrawdownBreakerConfig,
+        description="Drawdown breaker settings",
+    )
+    consecutive_losses: ConsecutiveLossesBreakerConfig = Field(
+        default_factory=ConsecutiveLossesBreakerConfig,
+        description="Consecutive losses breaker settings",
+    )
+    liquidation_cascade: LiquidationCascadeBreakerConfig = Field(
+        default_factory=LiquidationCascadeBreakerConfig,
+        description="Liquidation cascade breaker settings",
+    )
+    funding_rate_spike: FundingRateSpikeBreakerConfig = Field(
+        default_factory=FundingRateSpikeBreakerConfig,
+        description="Funding rate spike breaker settings",
+    )
+    volatility: VolatilityBreakerConfig = Field(
+        default_factory=VolatilityBreakerConfig,
+        description="Volatility breaker settings",
+    )
 
     drawdown_tiers: list[float] = Field(
         default=[5.0, 10.0, 15.0],
         description="Drawdown percentage tiers for escalating responses",
-    )
-    greek_limits: dict[str, float] = Field(
-        default_factory=lambda: {"delta": 15.0, "gamma": 5.0, "vega": 1000.0},
-        description="Hard Greek exposure limits",
     )
 
     @field_validator("drawdown_tiers")
@@ -196,40 +406,49 @@ class CircuitBreakerConfig(BaseModel):
         return value
 
 
-class StopLossConfig(BaseModel):
-    """Stop-loss configuration."""
+class PerPositionSLConfig(BaseModel):
+    """Per-position stop-loss configuration."""
 
-    enabled: bool = Field(default=True, description="Enable stop-loss")
-    portfolio_pct: float = Field(
-        default=15.0,
-        ge=0.0,
-        le=100.0,
-        description="Portfolio percentage to trigger stop-loss",
+    enabled: bool = Field(default=True, description="Enable per-position stop-loss")
+    type: Literal["fixed", "trailing"] = Field(default="fixed", description="Stop-loss type")
+    capital_pct: float = Field(default=30.0, ge=0.0, le=100.0, description="Stop-loss as percentage of trade capital")
+
+
+class PerPositionTPConfig(BaseModel):
+    """Per-position take-profit configuration."""
+
+    enabled: bool = Field(default=True, description="Enable per-position take-profit")
+    type: Literal["fixed"] = Field(default="fixed", description="Take-profit type")
+    capital_pct: float = Field(default=50.0, ge=0.0, le=100.0, description="Take-profit as percentage of trade capital")
+
+
+class KellyConfig(BaseModel):
+    """Kelly Criterion sizing parameters."""
+
+    fraction: float = Field(
+        default=0.25, ge=0.0, le=1.0,
+        description="Fractional Kelly multiplier (fraction of full-Kelly to use)",
     )
-
-
-class TakeProfitConfig(BaseModel):
-    """Take-profit configuration."""
-
-    enabled: bool = Field(default=True, description="Enable take-profit")
-    portfolio_pct: float = Field(
-        default=30.0,
-        ge=0.0,
-        le=100.0,
-        description="Portfolio percentage to trigger take-profit",
+    default_fraction: float = Field(
+        default=0.02, ge=0.0, le=1.0,
+        description="Default position fraction when no trade history is available",
     )
 
 
 class RiskConfig(BaseModel):
     """Risk management thresholds and limits."""
 
-    max_position_size: int = Field(
-        default=5,
-        ge=1,
-        description="Maximum contracts per single position",
+    max_positions: int = Field(
+        default=5, ge=1, le=100,
+        description="Maximum number of concurrent positions",
+    )
+    max_position_size: float = Field(
+        default=1000.0,
+        ge=1.0,
+        description="Maximum position size in USD",
     )
     max_portfolio_risk_pct: float = Field(
-        default=10.0,
+        default=20.0,
         ge=0.0,
         le=100.0,
         description="Max percentage of portfolio at risk per trade",
@@ -240,34 +459,26 @@ class RiskConfig(BaseModel):
         description="Max allowable daily loss in USD",
     )
     max_drawdown_pct: float = Field(
-        default=20.0,
+        default=25.0,
         ge=0.0,
         le=100.0,
         description="Max drawdown from peak portfolio value",
     )
-    max_delta_exposure: float = Field(
-        default=10.0,
-        description="Aggregate delta limit across all positions",
+    max_leverage: int = Field(
+        default=10, ge=1, le=125,
+        description="Max leverage enforced by the risk system",
     )
-    max_theta_decay: float = Field(
-        default=-100.0,
-        description="Maximum daily theta decay (negative value)",
+    min_distance_to_liquidation_pct: float = Field(
+        default=0.2, ge=0.0, le=1.0,
+        description="Minimum distance to liquidation (decimal) before blocking trades",
     )
-    max_vega_exposure: float = Field(
-        default=500.0,
-        description="Aggregate vega exposure limit",
+    max_funding_rate_cost: float = Field(
+        default=0.001, ge=0.0,
+        description="Maximum acceptable funding rate cost per position",
     )
-    iv_percentile_min: float = Field(
-        default=10.0,
-        ge=0.0,
-        le=100.0,
-        description="Minimum IV percentile for trade entry",
-    )
-    iv_percentile_max: float = Field(
-        default=90.0,
-        ge=0.0,
-        le=100.0,
-        description="Maximum IV percentile for trade entry",
+    max_position_concentration: float = Field(
+        default=0.4, ge=0.0, le=1.0,
+        description="Maximum position concentration as fraction of portfolio",
     )
     concentration_limit_pct: float = Field(
         default=30.0,
@@ -275,30 +486,42 @@ class RiskConfig(BaseModel):
         le=100.0,
         description="Max percentage of portfolio in a single underlying",
     )
+    max_funding_rate: float = Field(
+        default=0.001, ge=0.0, description="Max acceptable funding rate"
+    )
+    min_position_size_usd: float = Field(
+        default=10.0, ge=0.0,
+        description="Minimum position size in USD",
+    )
+    trade_capital_usd: int = Field(default=5, ge=1, le=100000, description="Capital per trade in USD (same as trading.trade_capital_usd)")
+    max_position_size_pct: float = Field(
+        default=0.10, ge=0.0, le=1.0,
+        description="Maximum position size as fraction of portfolio",
+    )
+    max_position_size_usd: float = Field(
+        default=10000.0, ge=1.0,
+        description="Absolute maximum position size in USD",
+    )
+    correlation_threshold_pct: float = Field(
+        default=60.0, ge=0.0, le=100.0,
+        description="Correlation threshold percentage — flags if any quote-asset group exceeds this % of portfolio",
+    )
+    kelly: KellyConfig = Field(
+        default_factory=KellyConfig,
+        description="Kelly Criterion sizing parameters",
+    )
     circuit_breakers: CircuitBreakerConfig = Field(
         default_factory=CircuitBreakerConfig,
         description="Circuit breaker thresholds",
     )
-    stop_loss: StopLossConfig = Field(
-        default_factory=StopLossConfig,
-        description="Stop-loss configuration",
+    per_position_sl: PerPositionSLConfig = Field(
+        default_factory=PerPositionSLConfig,
+        description="Per-position stop-loss configuration",
     )
-    take_profit: TakeProfitConfig = Field(
-        default_factory=TakeProfitConfig,
-        description="Take-profit configuration",
+    per_position_tp: PerPositionTPConfig = Field(
+        default_factory=PerPositionTPConfig,
+        description="Per-position take-profit configuration",
     )
-
-    @field_validator("iv_percentile_max")
-    @classmethod
-    def validate_iv_percentile_range(cls, value: float, info: Any) -> float:
-        """Ensure iv_percentile_max >= iv_percentile_min."""
-        data = info.data  # type: ignore[union-attr]
-        if "iv_percentile_min" in data and value < data["iv_percentile_min"]:
-            raise ValueError(
-                f"iv_percentile_max ({value}) must be >= "
-                f"iv_percentile_min ({data['iv_percentile_min']})"
-            )
-        return value
 
 
 # ============================================================================
@@ -313,27 +536,28 @@ class BufferSizesConfig(BaseModel):
         ge=100,
         description="Number of price ticks to buffer per symbol",
     )
-    greeks: int = Field(
-        default=500,
-        ge=50,
-        description="Number of Greek snapshots to buffer per symbol",
-    )
 
 
 class CacheTTLConfig(BaseModel):
     """Cache time-to-live values."""
 
-    option_chain: int = Field(
-        default=30,
+    order_book: int = Field(
+        default=5,
         ge=1,
         le=3600,
-        description="Option chain cache TTL in seconds",
+        description="Order book cache TTL in seconds",
     )
     underlying_price: int = Field(
         default=5,
         ge=1,
         le=60,
         description="Underlying price cache TTL in seconds",
+    )
+    funding_rate: int = Field(
+        default=10, ge=1, le=3600, description="Funding rate cache TTL in seconds"
+    )
+    mark_price: int = Field(
+        default=2, ge=1, le=60, description="Mark price cache TTL in seconds"
     )
 
 
@@ -345,6 +569,52 @@ class HistoricalConfig(BaseModel):
         ge=1,
         le=365,
         description="Max days of historical data to cache",
+    )
+
+
+class MarketDataEngineConfig(BaseModel):
+    """Market data engine lifecycle parameters."""
+
+    shutdown_timeout_seconds: float = Field(
+        default=10.0, ge=1.0,
+        description="Max seconds to wait for market data engine shutdown",
+    )
+    buffer_max_ticks_default: int = Field(
+        default=1000, ge=100,
+        description="Default max ticks per symbol for the engine",
+    )
+    cache_ttl_default: int = Field(
+        default=60, ge=1, le=3600,
+        description="Default cache TTL in seconds for the engine",
+    )
+
+
+class MarketDataWebSocketConfig(BaseModel):
+    """Market data WebSocket connection parameters."""
+
+    url: str = Field(
+        default="wss://fstream.binance.com/ws",
+        description="Market data WebSocket base URL",
+    )
+    backoff_base_seconds: float = Field(
+        default=1.0, ge=0.1,
+        description="Initial WebSocket reconnection backoff in seconds",
+    )
+    backoff_max_seconds: float = Field(
+        default=30.0, ge=1.0,
+        description="Maximum WebSocket reconnection backoff in seconds",
+    )
+    backoff_multiplier: float = Field(
+        default=2.0, ge=1.0,
+        description="WebSocket backoff multiplier per retry",
+    )
+    backoff_jitter_fraction: float = Field(
+        default=0.1, ge=0.0, le=1.0,
+        description="WebSocket backoff jitter fraction",
+    )
+    heartbeat_interval_seconds: float = Field(
+        default=30.0, ge=5.0,
+        description="WebSocket heartbeat interval in seconds",
     )
 
 
@@ -362,6 +632,14 @@ class MarketDataConfig(BaseModel):
     historical: HistoricalConfig = Field(
         default_factory=HistoricalConfig,
         description="Historical data configuration",
+    )
+    engine: MarketDataEngineConfig = Field(
+        default_factory=MarketDataEngineConfig,
+        description="Market data engine lifecycle parameters",
+    )
+    websocket: MarketDataWebSocketConfig = Field(
+        default_factory=MarketDataWebSocketConfig,
+        description="Market data WebSocket connection parameters",
     )
 
 
@@ -386,6 +664,27 @@ class BackupConfig(BaseModel):
     )
 
 
+class DatabasePoolConfig(BaseModel):
+    """Database connection pool and retry parameters."""
+
+    min_pool_size: int = Field(
+        default=1, ge=1, le=50,
+        description="Minimum database pool connections",
+    )
+    max_pool_size: int = Field(
+        default=5, ge=1, le=50,
+        description="Maximum database pool connections",
+    )
+    connect_retry_count: int = Field(
+        default=5, ge=1,
+        description="Maximum database connection retries",
+    )
+    command_timeout_seconds: int = Field(
+        default=60, ge=5,
+        description="Database command timeout in seconds",
+    )
+
+
 class PersistenceConfig(BaseModel):
     """Database persistence configuration."""
 
@@ -403,6 +702,10 @@ class PersistenceConfig(BaseModel):
         default_factory=BackupConfig,
         description="Backup configuration",
     )
+    database: DatabasePoolConfig = Field(
+        default_factory=DatabasePoolConfig,
+        description="Database connection pool configuration",
+    )
 
 
 # ============================================================================
@@ -414,7 +717,7 @@ class LogFileConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Enable file logging")
     path: str = Field(
-        default="${QUAD_LOG_DIR}/quad.log",
+        default="${QUAD_LOG_DIR:-./data}/quad.log",
         description="Log file path",
     )
     max_size_mb: int = Field(
@@ -476,38 +779,69 @@ class LoggingConfig(BaseModel):
 # Telegram Section
 # ============================================================================
 
+class TelegramJobIntervalsConfig(BaseModel):
+    """Job interval configuration for the Telegram bot."""
+
+    status_summary_seconds: int = Field(
+        default=3600, ge=60,
+        description="Interval in seconds for status summary job",
+    )
+    risk_alert_seconds: int = Field(
+        default=300, ge=30,
+        description="Interval in seconds for risk alert job",
+    )
+    funding_rate_countdown_seconds: int = Field(
+        default=1800, ge=60,
+        description="Interval in seconds for funding rate countdown job",
+    )
+    liquidation_warning_seconds: int = Field(
+        default=300, ge=30,
+        description="Interval in seconds for liquidation warning job",
+    )
+
+
+class TelegramDailyReportConfig(BaseModel):
+    """Daily report scheduling for the Telegram bot."""
+
+    hour: int = Field(
+        default=23, ge=0, le=23,
+        description="Hour (UTC) for daily report",
+    )
+    minute: int = Field(
+        default=0, ge=0, le=59,
+        description="Minute for daily report",
+    )
+
+
+class TelegramFundingCostReportConfig(BaseModel):
+    """Funding cost report scheduling for the Telegram bot."""
+
+    hour: int = Field(
+        default=22, ge=0, le=23,
+        description="Hour (UTC) for funding cost report",
+    )
+
+
 class TelegramConfig(BaseModel):
     """Telegram bot integration configuration."""
 
     enabled: bool = Field(default=True, description="Enable Telegram bot")
-    admin_ids: list[int] = Field(
-        default_factory=list,
-        description="Telegram user IDs authorized for admin commands",
-    )
     polling: bool = Field(
         default=True,
         description="Use long-polling (true) or webhook (false)",
     )
-
-    @field_validator("admin_ids", mode="before")
-    @classmethod
-    def coerce_admin_ids(cls, value: Any) -> list[int]:
-        """Coerce single admin ID or comma-separated string to list."""
-        if isinstance(value, str):
-            if not value.strip():
-                return []
-            return [int(x.strip()) for x in value.split(",") if x.strip()]
-        if isinstance(value, int):
-            return [value]
-        if isinstance(value, (list, tuple)):
-            result: list[int] = []
-            for item in value:
-                if isinstance(item, str):
-                    result.append(int(item.strip()))
-                else:
-                    result.append(int(item))
-            return result
-        return list(value) if value else []
+    job_intervals: TelegramJobIntervalsConfig = Field(
+        default_factory=TelegramJobIntervalsConfig,
+        description="Bot job interval configuration",
+    )
+    daily_report: TelegramDailyReportConfig = Field(
+        default_factory=TelegramDailyReportConfig,
+        description="Daily report scheduling",
+    )
+    funding_cost_report: TelegramFundingCostReportConfig = Field(
+        default_factory=TelegramFundingCostReportConfig,
+        description="Funding cost report scheduling",
+    )
 
 
 # ============================================================================
@@ -523,6 +857,14 @@ class HealthServerConfig(BaseModel):
         ge=1024,
         le=65535,
         description="Health server port",
+    )
+    bind_address: str = Field(
+        default="0.0.0.0",
+        description="Health server bind address",
+    )
+    version: str = Field(
+        default="0.1.0",
+        description="Application version string",
     )
 
 
@@ -549,144 +891,155 @@ class MonitoringConfig(BaseModel):
 # Strategy Section
 # ============================================================================
 
-class BaseStrategyParams(BaseModel):
-    """Base parameters shared across strategies."""
+class SwingTradingParams(BaseModel):
+    """Swing trading strategy parameters using RSI/MACD/volume filters."""
 
-    min_dte: int = Field(default=7, ge=1, le=365)
-    max_dte: int = Field(default=45, ge=1, le=365)
-
-
-class CoveredCallParams(BaseStrategyParams):
-    """Parameters for the covered call strategy."""
-
-    delta_target: float = Field(default=0.30, ge=0.0, le=1.0)
-    roll_when_dte_lt: int = Field(default=3, ge=1)
-    allocation_pct: float = Field(default=0.5, ge=0.0, le=1.0)
-    min_iv_rank: float = Field(
-        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
-    )
-    roll_when_delta_exceeds: float = Field(
-        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
-    )
-    roll_credit_min_pct: float = Field(
-        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
-    )
+    enabled: bool = False
+    rsi_period: int = Field(default=14, ge=1, le=50, description="RSI calculation period")
+    rsi_oversold: int = Field(default=30, ge=1, le=100, description="RSI oversold threshold")
+    rsi_overbought: int = Field(default=70, ge=1, le=100, description="RSI overbought threshold")
+    macd_fast: int = Field(default=12, ge=1, le=200, description="MACD fast EMA period")
+    macd_slow: int = Field(default=26, ge=1, le=200, description="MACD slow EMA period")
+    macd_signal: int = Field(default=9, ge=1, le=50, description="MACD signal line period")
+    volume_sma_period: int = Field(default=20, ge=1, le=200, description="Volume SMA period")
+    volume_multiplier: float = Field(default=1.5, ge=1.0, le=10.0, description="Volume multiplier for confirmation")
+    max_position_size_usd: float = Field(default=1000.0, ge=1.0, description="Max position size in USD")
+    trade_capital_usd: int = Field(default=5, ge=1, description="Capital per trade in USD")
+    leverage: int = Field(default=50, ge=1, le=125, description="Position leverage")
+    sl_capital_pct: float = Field(default=30.0, ge=0.0, le=100.0, description="Stop-loss as percentage of trade capital")
+    tp_capital_pct: float = Field(default=50.0, ge=0.0, le=100.0, description="Take-profit as percentage of trade capital")
+    confidence_default: float = Field(default=0.7, ge=0.0, le=1.0, description="Default confidence for signals")
+    confidence_high: float = Field(default=0.9, ge=0.0, le=1.0, description="High confidence for strong signals")
 
 
-class CashSecuredPutParams(BaseStrategyParams):
-    """Parameters for the cash-secured put strategy."""
+class TrendFollowingParams(BaseModel):
+    """Trend-following strategy parameters using EMA crossover + ADX filter."""
 
-    delta_target: float = Field(default=0.16, ge=0.0, le=1.0)
-    roll_when_dte_lt: int = Field(default=3, ge=1)
-    cash_reserve_pct: float = Field(default=0.3, ge=0.0, le=1.0)
-    min_iv_rank: float = Field(
-        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
-    )
-    roll_when_delta_exceeds: float = Field(
-        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
-    )
-    roll_credit_min_pct: float = Field(
-        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
-    )
-    wheel_enabled: bool = Field(
-        default=False, description="After assignment, auto-transition to Covered Call"
-    )
-    deep_itm_exit_pct: float = Field(
-        default=0.85, ge=0.5, le=1, description="Exit when underlying drops below this fraction of strike"
-    )
+    enabled: bool = False
+    fast_ema: int = Field(default=9, ge=1, le=200, description="Fast EMA period")
+    slow_ema: int = Field(default=21, ge=1, le=200, description="Slow EMA period")
+    adx_period: int = Field(default=14, ge=1, le=50, description="ADX calculation period")
+    adx_threshold: int = Field(default=25, ge=1, le=100, description="Minimum ADX for trend strength")
+    atr_period: int = Field(default=14, ge=1, le=50, description="ATR calculation period")
+    atr_multiplier_stop: float = Field(default=3.0, ge=0.5, le=10.0, description="ATR multiplier for trailing stop")
+    atr_default_pct: float = Field(default=0.02, ge=0.001, le=0.5, description="Default ATR as fraction of price")
+    max_position_size_usd: float = Field(default=1000.0, ge=1.0, description="Max position size in USD")
+    trade_capital_usd: int = Field(default=5, ge=1, description="Capital per trade in USD")
+    leverage: int = Field(default=50, ge=1, le=125, description="Position leverage")
+    sl_capital_pct: float = Field(default=30.0, ge=0.0, le=100.0, description="Stop-loss as percentage of trade capital")
+    tp_capital_pct: float = Field(default=50.0, ge=0.0, le=100.0, description="Take-profit as percentage of trade capital")
+    confidence_default: float = Field(default=0.7, ge=0.0, le=1.0, description="Default confidence for signals")
+    confidence_high: float = Field(default=0.9, ge=0.0, le=1.0, description="High confidence for strong signals")
 
 
-class IronCondorParams(BaseStrategyParams):
-    """Parameters for the iron condor strategy."""
+class GroqClientConfig(BaseModel):
+    """Groq LLM client configuration.
 
-    delta_short: float = Field(default=0.16, ge=0.0, le=1.0)
-    wing_width_pct: float = Field(default=10.0, ge=0.0, le=100.0)
-    min_dte: int = Field(default=14, ge=1, le=365)
-    max_dte: int = Field(default=45, ge=1, le=365)
-    min_iv_rank: float = Field(
-        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
-    )
-    roll_when_delta_exceeds: float = Field(
-        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
-    )
-    roll_credit_min_pct: float = Field(
-        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
-    )
-    force_exit_dte: int = Field(
-        default=21, ge=1, le=60, description="Force close position when DTE drops below this"
-    )
-    take_profit_pct: float = Field(
-        default=50, ge=1, le=100, description="Take profit when credit decays by this percentage"
-    )
+    Controls fallback model selection, request parameters, retry/backoff,
+    rate-limiter warning levels, and fallback action logic.
+    """
 
-
-class StraddleParams(BaseStrategyParams):
-    """Parameters for the straddle strategy."""
-
-    delta_target: float = Field(default=0.50, ge=0.0, le=1.0)
-    max_dte: int = Field(default=30, ge=1, le=365)
-    min_iv_percentile: float = Field(default=50.0, ge=0.0, le=100.0)
-
-
-class ShortStrangleParams(BaseStrategyParams):
-    """Parameters for the short strangle strategy."""
-
-    call_delta_target: float = Field(default=0.16, ge=0.0, le=1.0)
-    put_delta_target: float = Field(default=0.16, ge=0.0, le=1.0)
-    min_dte: int = Field(default=14, ge=1, le=365)
-    max_dte: int = Field(default=45, ge=1, le=365)
-    min_iv_percentile: float = Field(default=50.0, ge=0.0, le=100.0)
-    min_iv_rank: float = Field(
-        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
+    fallback_model: str = Field(
+        default="llama-3.1-8b-instant",
+        description="Fallback Groq model when primary is unavailable",
     )
-    roll_when_delta_exceeds: float = Field(
-        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
+    max_tokens_default: int = Field(
+        default=1024,
+        ge=64,
+        le=8192,
+        description="Default max tokens for Groq chat completions",
     )
-    roll_credit_min_pct: float = Field(
-        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
+    temperature_default: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=2.0,
+        description="Default temperature for Groq chat completions",
     )
-    force_exit_dte: int = Field(
-        default=21, ge=1, le=60, description="Force close position when DTE drops below this"
+    timeout_seconds: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=120.0,
+        description="Groq API request timeout in seconds",
     )
-    take_profit_pct: float = Field(
-        default=50, ge=1, le=100, description="Take profit when credit decays by this percentage"
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum Groq API request retries",
     )
-
-
-class VerticalSpreadParams(BaseStrategyParams):
-    """Parameters for the vertical spread strategy."""
-
-    delta_short: float = Field(default=0.20, ge=0.0, le=1.0)
-    delta_long: float = Field(default=0.20, ge=0.0, le=1.0)
-    wing_width_pct: float = Field(default=5.0, ge=0.0, le=100.0)
-    direction: str = Field(
-        default="neutral",
-        description="Spread direction: bullish, bearish, or neutral",
+    base_backoff_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        description="Base backoff in seconds for Groq API retry",
     )
-    min_iv_rank: float = Field(
-        default=30, ge=0, le=100, description="Minimum IV percentile rank for entry (skip if below)"
+    rate_limiter_window_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Rate limiter sliding window in seconds (default 24h)",
     )
-    roll_when_delta_exceeds: float = Field(
-        default=0.40, ge=0, le=1, description="Roll short leg when delta exceeds this threshold"
+    rate_limiter_warning_level_1: int = Field(
+        default=800,
+        ge=1,
+        description="First rate-limit warning level (number of requests)",
     )
-    roll_credit_min_pct: float = Field(
-        default=0.0, ge=0, description="Minimum net credit percentage for a roll (0 = accept any credit)"
+    rate_limiter_warning_level_2: int = Field(
+        default=900,
+        ge=1,
+        description="Second rate-limit warning level (number of requests)",
     )
-    force_exit_dte: int = Field(
-        default=21, ge=1, le=60, description="Force close position when DTE drops below this"
+    rate_limiter_warning_level_3: int = Field(
+        default=950,
+        ge=1,
+        description="Third rate-limit warning level (number of requests)",
+    )
+    valid_actions: list[str] = Field(
+        default_factory=lambda: ["ENTER", "EXIT", "HOLD"],
+        description="Valid AI trading actions",
+    )
+    fallback_action: str = Field(
+        default="HOLD",
+        description="Fallback trading action when AI decision fails",
     )
 
-    @field_validator("direction")
-    @classmethod
-    def validate_direction(cls, value: str) -> str:
-        """Validate direction is one of the supported values."""
-        allowed = {"bullish", "bearish", "neutral"}
-        lower = value.lower()
-        if lower not in allowed:
-            raise ValueError(
-                f"direction must be one of {allowed}, got '{value}'"
-            )
-        return lower
+
+class PromptBuilderConfig(BaseModel):
+    """AI prompt builder defaults for trading analysis prompts."""
+
+    order_book_depth: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Order book depth levels to include in prompts",
+    )
+    max_candles_compact: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Max candles for compact display in prompts",
+    )
+    system_risk_max_portfolio_pct: float = Field(
+        default=50.0,
+        ge=0.0,
+        le=100.0,
+        description="System prompt risk parameter: max portfolio at risk %",
+    )
+    system_max_hold_hours: int = Field(
+        default=8,
+        ge=1,
+        le=168,
+        description="System prompt risk parameter: max position hold hours",
+    )
+    system_stop_loss_pct: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        description="System prompt risk parameter: stop-loss %",
+    )
+    system_min_funding_rate_pct: float = Field(
+        default=11.0,
+        ge=0.0,
+        le=100.0,
+        description="System prompt risk parameter: funding rate threshold %",
+    )
 
 
 # ============================================================================
@@ -752,6 +1105,14 @@ class AiConfig(BaseModel):
     system_prompt_override: str | None = Field(
         default=None,
         description="Optional override for the AI system prompt",
+    )
+    groq: GroqClientConfig = Field(
+        default_factory=GroqClientConfig,
+        description="Groq LLM client configuration",
+    )
+    prompt: PromptBuilderConfig = Field(
+        default_factory=PromptBuilderConfig,
+        description="AI prompt builder configuration",
     )
 
 
@@ -857,6 +1218,36 @@ class RetrainConfig(BaseModel):
 
 
 # ============================================================================
+# Execution Section
+# ============================================================================
+
+
+class ExecutionConfig(BaseModel):
+    """Order execution engine configuration."""
+
+    reconcile_interval_seconds: int = Field(
+        default=60, ge=5,
+        description="Seconds between order reconciliation cycles",
+    )
+    twap_window_seconds: int = Field(
+        default=300, ge=10,
+        description="Default TWAP execution window in seconds",
+    )
+    default_order_type: str = Field(
+        default="LIMIT",
+        description="Default order type (LIMIT or MARKET)",
+    )
+    reduce_only: bool = Field(
+        default=False,
+        description="Default reduce-only flag for orders",
+    )
+    post_only: bool = Field(
+        default=False,
+        description="Default post-only flag for orders",
+    )
+
+
+# ============================================================================
 # Root Config Model
 # ============================================================================
 
@@ -867,6 +1258,10 @@ class QuadConfig(BaseModel):
     Use `validate_config()` for a convenience wrapper that returns error lists.
     """
 
+    execution: ExecutionConfig = Field(
+        default_factory=ExecutionConfig,
+        description="Execution engine configuration",
+    )
     trading: TradingConfig = Field(
         default_factory=TradingConfig,
         description="Trading behavior configuration",
@@ -913,12 +1308,8 @@ class QuadConfig(BaseModel):
     )
     strategy: dict[str, Any] = Field(
         default_factory=lambda: {
-            "covered_call": CoveredCallParams().model_dump(),
-            "cash_secured_put": CashSecuredPutParams().model_dump(),
-            "iron_condor": IronCondorParams().model_dump(),
-            "straddle": StraddleParams().model_dump(),
-            "strangle": ShortStrangleParams().model_dump(),
-            "vertical_spread": VerticalSpreadParams().model_dump(),
+            "swing_trading": SwingTradingParams().model_dump(),
+            "trend_following": TrendFollowingParams().model_dump(),
         },
         description="Strategy-specific parameters",
     )

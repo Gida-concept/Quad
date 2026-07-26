@@ -22,7 +22,7 @@ from quad.types.domain import (
     Position,
 )
 from quad.types.exchange import AccountUpdate
-from quad.types.market import GreekTick, OptionContract, OptionPriceTick
+from quad.types.market import FundingRate
 
 logger = structlog.get_logger(__name__)
 
@@ -38,8 +38,9 @@ class MockAdapter(ExchangeAdapter):
             account is created.
         positions: Pre-configured positions.  If ``None``, an empty list
             is used.
-        option_chain: Pre-configured option chains keyed by underlying.
-            If ``None``, empty lists are returned for all underlyings.
+        futures_data: Pre-configured futures data dict containing
+            funding_rates, mark_prices, etc.  If ``None``, defaults
+            are returned.
         exchange_info: Pre-configured exchange info response.  If
             ``None``, a minimal default is returned.
         server_time: Fixed server time value.  If ``None``, current
@@ -50,7 +51,7 @@ class MockAdapter(ExchangeAdapter):
         self,
         account: Account | None = None,
         positions: list[Position] | None = None,
-        option_chain: dict[str, list[OptionContract]] | None = None,
+        futures_data: dict[str, Any] | None = None,
         exchange_info: dict | None = None,
         server_time: int | None = None,
     ) -> None:
@@ -64,15 +65,14 @@ class MockAdapter(ExchangeAdapter):
             timestamp=0,
         )
         self._positions: list[Position] = positions or []
-        self._option_chain: dict[str, list[OptionContract]] = (
-            option_chain or {}
-        )
+        self._futures_data: dict[str, Any] = futures_data or {
+            "funding_rates": {},
+            "mark_prices": {},
+        }
         self._exchange_info: dict = exchange_info or {
             "timezone": "UTC",
             "serverTime": 0,
-            "optionContracts": [],
-            "optionAssets": [],
-            "optionSymbols": [],
+            "symbols": [],
             "rateLimits": [],
         }
         self._server_time: int = server_time or 0
@@ -115,21 +115,50 @@ class MockAdapter(ExchangeAdapter):
         return list(self._positions)
 
     # ------------------------------------------------------------------
-    # REST — Market Data
+    # REST — Futures Market Data
     # ------------------------------------------------------------------
 
-    async def get_option_chain(self, underlying: str) -> list[OptionContract]:
-        """Return the pre-configured option chain for the given underlying.
+    async def get_funding_rate(self, symbol: str) -> FundingRate:
+        """Return the pre-configured funding rate or a sensible default.
 
         Args:
-            underlying: The underlying asset symbol.
+            symbol: The trading pair symbol.
 
         Returns:
-            The pre-configured option contracts, or an empty list if no
-            chain was configured for this underlying.
+            A ``FundingRate`` with pre-configured or default values.
         """
-        self._log.debug("mock_get_option_chain", underlying=underlying)
-        return list(self._option_chain.get(underlying, []))
+        self._log.debug("mock_get_funding_rate", symbol=symbol)
+        fr_data = self._futures_data.get("funding_rates", {}).get(symbol)
+        if fr_data:
+            return FundingRate(
+                symbol=symbol,
+                funding_rate=Decimal(str(fr_data.get("funding_rate", "0.0001"))),
+                next_funding_time=fr_data.get("next_funding_time", 0),
+                mark_price=Decimal(str(fr_data.get("mark_price", "50000"))),
+                index_price=Decimal(str(fr_data.get("index_price", "50000"))),
+            )
+        return FundingRate(
+            symbol=symbol,
+            funding_rate=Decimal("0.0001"),
+            next_funding_time=0,
+            mark_price=Decimal("50000"),
+            index_price=Decimal("50000"),
+        )
+
+    async def get_mark_price(self, symbol: str) -> Decimal:
+        """Return the pre-configured mark price or a sensible default.
+
+        Args:
+            symbol: The trading pair symbol.
+
+        Returns:
+            Mark price as a ``Decimal``.
+        """
+        self._log.debug("mock_get_mark_price", symbol=symbol)
+        mp = self._futures_data.get("mark_prices", {}).get(symbol)
+        if mp is not None:
+            return Decimal(str(mp))
+        return Decimal("50000")
 
     # ------------------------------------------------------------------
     # REST — Order Management
@@ -155,7 +184,6 @@ class MockAdapter(ExchangeAdapter):
         if request.type.upper() == "MARKET":
             status = "FILLED"
         elif request.price is not None:
-            # Simulate LIMIT orders as immediately accepted
             status = "NEW"
 
         fills: list[dict] = []
@@ -273,39 +301,31 @@ class MockAdapter(ExchangeAdapter):
         return open_orders
 
     # ------------------------------------------------------------------
-    # WebSocket — Market Data Streams
+    # REST — Futures Configuration
     # ------------------------------------------------------------------
 
-    async def subscribe_option_prices(
-        self, symbols: list[str]
-    ) -> AsyncGenerator[OptionPriceTick, None]:
-        """Yield pre-configured price ticks from an empty generator.
+    async def set_leverage(self, symbol: str, leverage: int) -> dict:
+        """Simulate setting leverage for a symbol."""
+        self._log.debug("mock_set_leverage", symbol=symbol, leverage=leverage)
+        return {"symbol": symbol, "leverage": leverage, "success": True}
 
-        Subclasses can override the ``_price_ticks`` attribute or
-        monkey-patch it before calling this method to provide test data.
+    async def set_margin_mode(self, symbol: str, margin_type: str) -> dict:
+        """Simulate setting margin mode for a symbol."""
+        self._log.debug("mock_set_margin_mode", symbol=symbol, margin_type=margin_type)
+        return {"symbol": symbol, "marginType": margin_type.upper(), "success": True}
 
-        Yields:
-            Pre-configured ``OptionPriceTick`` objects, if any.
-        """
-        self._log.debug(
-            "mock_subscribe_option_prices", symbols=symbols
-        )
-        # Yield nothing in the base mock — test code can subclass.
-        # Use `async for` and `return` pattern for empty generator.
-        if False:  # pylint: disable=condition-evals-to-constant
-            yield  # type: ignore[unreachable]
+    async def set_position_mode(self, mode: str) -> dict:
+        """Simulate setting position mode."""
+        self._log.debug("mock_set_position_mode", mode=mode)
+        return {"dualSidePosition": str(mode.lower() == "hedge").lower(), "success": True}
 
-    async def subscribe_greeks(
-        self, symbols: list[str]
-    ) -> AsyncGenerator[GreekTick, None]:
-        """Yield pre-configured Greek ticks from an empty generator.
+    async def get_position_mode(self) -> str:
+        """Simulate getting position mode."""
+        return "one_way"
 
-        Yields:
-            Pre-configured ``GreekTick`` objects, if any.
-        """
-        self._log.debug("mock_subscribe_greeks", symbols=symbols)
-        if False:
-            yield  # type: ignore[unreachable]
+    # ------------------------------------------------------------------
+    # WebSocket — User Data Streams
+    # ------------------------------------------------------------------
 
     async def subscribe_account_updates(
         self,
@@ -352,11 +372,21 @@ class MockAdapter(ExchangeAdapter):
         """Override the mock positions for testing."""
         self._positions = positions
 
-    def set_option_chain(
-        self, underlying: str, contracts: list[OptionContract]
-    ) -> None:
-        """Set the option chain for a given underlying."""
-        self._option_chain[underlying] = contracts
+    def set_futures_data(self, data: dict[str, Any]) -> None:
+        """Override the mock futures data for testing."""
+        self._futures_data = data
+
+    def set_funding_rates(self, rates: dict[str, dict[str, Any]]) -> None:
+        """Set funding rate data for testing."""
+        if "funding_rates" not in self._futures_data:
+            self._futures_data["funding_rates"] = {}
+        self._futures_data["funding_rates"].update(rates)
+
+    def set_mark_prices(self, prices: dict[str, str | float]) -> None:
+        """Set mark price data for testing."""
+        if "mark_prices" not in self._futures_data:
+            self._futures_data["mark_prices"] = {}
+        self._futures_data["mark_prices"].update(prices)
 
     def set_exchange_info(self, info: dict) -> None:
         """Override the mock exchange info for testing."""

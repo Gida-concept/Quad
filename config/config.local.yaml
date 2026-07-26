@@ -3,15 +3,30 @@
 # Environment variables (QUAD_*) take priority over this file.
 # Runtime overrides via `quad config set` take highest priority.
 
-# Uncomment and adjust any values you want to override:
-#
-# trading:
-#   default_strategy: "iron_condor"
-#   max_positions: 15
-#
-# exchange:
-#   testnet: true
-#
-# risk:
-#   max_daily_loss_usd: 1000.0
-#   max_drawdown_pct: 15.0
+trading:
+  # Exchange-level leverage setting (50x)
+  leverage: 50
+  max_leverage: 50
+  # Default strategy
+  default_strategy: "trend_following"
+
+exchange:
+  name: "binance"
+  testnet: true
+
+risk:
+  # Risk-enforcement max leverage (blocks trades exceeding this)
+  max_leverage: 50
+  # Reduce the minimum position size from the 10 USD default to 5 USD
+  min_position_size_usd: 5
+  # Capital per trade
+  trade_capital_usd: 5
+  # Per-position TP/SL ratio 2:1
+  per_position_sl:
+    enabled: true
+    type: "fixed"
+    capital_pct: 30.0
+  per_position_tp:
+    enabled: true
+    type: "fixed"
+    capital_pct: 50.0

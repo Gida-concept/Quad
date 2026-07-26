@@ -49,9 +49,7 @@ class OrderTimeoutError(Exception):
 # Constants
 # ---------------------------------------------------------------------------
 
-_CONFIRMATION_TIMEOUT = 30
-_MAX_RETRIES = 3
-_COMPLETED_IDS_MAXLEN = 1000
+# (now configured via gateway config section)
 
 # ---------------------------------------------------------------------------
 # Gateway
@@ -87,10 +85,31 @@ class OrderGateway:
         self._log = structlog.get_logger(__name__)
         self._exchange = exchange_adapter
         self._config = config or {}
+        self._gateway_config = self._config.get("exchange", {}).get("gateway", {})
 
         self._active_orders: dict[str, Order] = {}
-        self._completed_ids: deque[str] = deque(maxlen=_COMPLETED_IDS_MAXLEN)
+        self._completed_ids: deque[str] = deque(maxlen=self._completed_ids_maxlen)
         self._pending_confirmations: dict[str, asyncio.Event] = {}
+
+    # ------------------------------------------------------------------
+    # Config-derived properties
+    # ------------------------------------------------------------------
+
+    @property
+    def _confirmation_timeout(self) -> float:
+        return float(self._gateway_config.get("confirmation_timeout_seconds", 30.0))
+
+    @property
+    def _max_retries(self) -> int:
+        return int(self._gateway_config.get("max_retries", 3))
+
+    @property
+    def _completed_ids_maxlen(self) -> int:
+        return int(self._gateway_config.get("completed_ids_maxlen", 1000))
+
+    @property
+    def _backoff_base(self) -> float:
+        return float(self._gateway_config.get("backoff_base_seconds", 2.0))
 
     # ------------------------------------------------------------------
     # Public API
@@ -149,7 +168,7 @@ class OrderGateway:
         last_error: Exception | None = None
         result: OrderResult | None = None
 
-        for attempt in range(1, _MAX_RETRIES + 1):
+        for attempt in range(1, self._max_retries + 1):
             try:
                 result = await self._exchange.place_order(request)
                 last_error = None
@@ -162,8 +181,8 @@ class OrderGateway:
                     error=str(exc),
                     client_order_id=client_order_id,
                 )
-                if attempt < _MAX_RETRIES:
-                    await asyncio.sleep(2 ** (attempt - 1))  # 1 s, 2 s, 4 s
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._backoff_base ** (attempt - 1))  # configurable backoff
             except Exception as exc:
                 # Non-transient error -- reject immediately
                 self._pending_confirmations.pop(client_order_id, None)
@@ -179,9 +198,9 @@ class OrderGateway:
         #    in a WebSocket-based system a separate handler would set it)
         event.set()
         try:
-            await asyncio.wait_for(event.wait(), timeout=_CONFIRMATION_TIMEOUT)
+            await asyncio.wait_for(event.wait(), timeout=self._confirmation_timeout)
         except asyncio.TimeoutError:
-            raise OrderTimeoutError(client_order_id, _CONFIRMATION_TIMEOUT)
+            raise OrderTimeoutError(client_order_id, int(self._confirmation_timeout))
         finally:
             self._pending_confirmations.pop(client_order_id, None)
 

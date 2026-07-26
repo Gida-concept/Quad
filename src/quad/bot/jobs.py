@@ -1,4 +1,4 @@
-"""Recurring bot jobs for Quad Telegram bot.
+"""Recurring bot jobs for Quad Futures Telegram bot.
 
 Jobs run on a schedule via the PTB job queue.  They only send messages
 if a ``notification_chat_id`` is configured.
@@ -47,6 +47,7 @@ class QuadBotJobs:
         # Subsystem references
         self._orchestrator = shared_state.get("orchestrator")
         self._risk_manager = shared_state.get("risk_manager")
+        self._market_data_engine = shared_state.get("market_data_engine")
         self._optimizer = shared_state.get("optimizer")
 
     # ------------------------------------------------------------------
@@ -295,3 +296,145 @@ class QuadBotJobs:
                 f"An unexpected error occurred:\n`{str(exc)[:300]}`"
             )
             await self._send_if_configured(context, msg)
+
+    async def job_funding_rate_countdown(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Check funding rates and alert if any exceed the max threshold.
+
+        Runs every 30 minutes.  Alerts if funding rate exceeds the configured
+        ``risk.max_funding_rate`` threshold.
+        """
+        if self._market_data_engine is None:
+            return
+
+        try:
+            max_rate = float(self._config.get("risk", {}).get("max_funding_rate", 0.001))
+            symbols = self._config.get("trading", {}).get("underlyings", ["BTCUSDT", "ETHUSDT"])
+
+            alerts: list[str] = []
+            for sym in symbols:
+                fr = await self._market_data_engine.get_funding_rate(sym)
+                if fr is None:
+                    continue
+
+                rate_pct = float(fr.funding_rate) * 100
+                if abs(float(fr.funding_rate)) > max_rate:
+                    now_ms = int(_time.time() * 1000)
+                    secs_remaining = max(0, (fr.next_funding_time - now_ms) // 1000)
+                    mins, secs = divmod(secs_remaining, 60)
+                    alerts.append(
+                        f"• `{sym}`: {rate_pct:+.5f}% (next funding in ~{mins}m {secs}s)"
+                    )
+
+            if not alerts:
+                return  # Silent — no alert needed
+
+            msg = "⚠️ *High Funding Alert*\n\n" + "\n".join(alerts)
+            sent = await self._send_if_configured(context, msg)
+            self._log.warning(
+                "job_funding_rate_alert",
+                sent=sent,
+                alerts=len(alerts),
+            )
+
+        except Exception as exc:
+            self._log.warning("job_funding_rate_alert_error", error=str(exc))
+
+    async def job_liquidation_warning(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Check all positions for proximity to liquidation.
+
+        Runs every 5 minutes.  Alerts if any position's distance to
+        liquidation is below the configured threshold.
+        """
+        if self._orchestrator is None:
+            return
+
+        try:
+            exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None)
+            if exchange_adapter is None:
+                return
+
+            min_distance = float(
+                self._config.get("trading", {}).get("min_distance_to_liquidation_pct", 0.2)
+            )
+
+            positions = await exchange_adapter.get_positions()
+            if not positions:
+                return
+
+            warnings: list[str] = []
+            for pos in positions:
+                mark = float(getattr(pos, "mark_price", getattr(pos, "current_price", 0)))
+                liq = float(getattr(pos, "liquidation_price", 0))
+                if mark <= 0 or liq <= 0:
+                    continue
+
+                distance = abs(mark - liq) / mark
+                if distance < min_distance:
+                    symbol = getattr(pos, "symbol", getattr(pos, "contract_symbol", "?"))
+                    raw_side = getattr(pos, "position_side", getattr(pos, "side", "?"))
+                    side = str(raw_side) if not isinstance(raw_side, str) else raw_side
+                    lev = int(getattr(pos, "leverage", 1))
+
+                    warnings.append(
+                        f"• `{symbol}` {side}: {distance:.1%} from liquidation\n"
+                        f"  Leverage: {lev}x | Liq: ${liq:,.2f} | Mark: ${mark:,.2f}"
+                    )
+
+            if not warnings:
+                return
+
+            msg = "🚨 *Liquidation Warning*\n\n" + "\n\n".join(warnings)
+            sent = await self._send_if_configured(context, msg)
+            self._log.warning(
+                "job_liquidation_warning",
+                sent=sent,
+                warnings=len(warnings),
+            )
+
+        except Exception as exc:
+            self._log.warning("job_liquidation_warning_error", error=str(exc))
+
+    async def job_funding_cost_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Send a daily report of cumulative funding costs for open positions.
+
+        Scheduled at 22:00 UTC (end of trading day).
+        """
+        if self._orchestrator is None:
+            return
+
+        try:
+            exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None)
+            if exchange_adapter is None:
+                return
+
+            positions = await exchange_adapter.get_positions()
+            if not positions:
+                return
+
+            total_cost = 0.0
+            lines: list[str] = []
+            for pos in positions:
+                funding_paid = float(getattr(pos, "funding_paid", 0))
+                symbol = getattr(pos, "symbol", getattr(pos, "contract_symbol", "?"))
+
+                if funding_paid != 0:
+                    cost_str = f"-${abs(funding_paid):.2f} paid" if funding_paid < 0 else f"+${funding_paid:.2f} received"
+                    lines.append(f"• `{symbol}`: {cost_str}")
+                    total_cost += funding_paid
+
+            if not lines:
+                return
+
+            total_emoji = "🔴" if total_cost < 0 else "🟢"
+            lines.append(f"\n*Total:* {total_emoji} ${total_cost:+,.2f}")
+
+            msg = "💰 *Daily Funding Cost Report*\n\n" + "\n".join(lines)
+            sent = await self._send_if_configured(context, msg)
+            self._log.info(
+                "job_funding_cost_report",
+                sent=sent,
+                total_cost=total_cost,
+            )
+
+        except Exception as exc:
+            self._log.warning("job_funding_cost_report_error", error=str(exc))

@@ -7,13 +7,11 @@ application configuration.
 from __future__ import annotations
 
 import os
-from decimal import Decimal
 
 import structlog
 
 from quad.exchange.base import ExchangeAdapter
-from quad.exchange.binance import BinanceOptionsAdapter
-from quad.exchange.paper import PaperTradingAdapter
+from quad.exchange.binance import BinanceFuturesAdapter
 from quad.exchange.mock import MockAdapter
 
 logger = structlog.get_logger(__name__)
@@ -33,24 +31,21 @@ def create_exchange(
 
     Args:
         config: Application configuration dictionary.  May be ``None``
-            (all defaults are used, which resolves to paper trading).
+            (all defaults are used, which resolves to binance testnet).
 
     Returns:
         An initialized ``ExchangeAdapter`` instance.
 
     Raises:
         ValueError: If the configured mode is not one of
-            ``binance``, ``paper``, or ``mock``.
+            ``binance`` or ``mock``.
 
     Examples::
 
-        # Paper trading (default)
-        adapter = create_exchange({"exchange.name": "paper"})
-
-        # Live Binance with API keys from env vars
+        # Binance (testnet or live)
         adapter = create_exchange({
             "exchange.name": "binance",
-            "exchange.testnet": False,
+            "exchange.testnet": True,
         })
 
         # Mock for testing
@@ -62,7 +57,7 @@ def create_exchange(
     mode = (
         cfg.get("exchange.mode")
         or _nested_get(cfg, "exchange", "name")
-        or cfg.get("exchange.name", "paper")
+        or cfg.get("exchange.name", "binance")
     )
 
     mode = str(mode).lower().strip()
@@ -83,19 +78,12 @@ def create_exchange(
         )
         rate_limit = cfg.get("exchange.rate_limit") or {}
 
-        return BinanceOptionsAdapter(
+        return BinanceFuturesAdapter(
             api_key=api_key,
             api_secret=api_secret,
             testnet=testnet,
             rate_limit=rate_limit,
-        )
-
-    if mode in ("paper", "paper_trading", "paper-trading"):
-        initial_balance = Decimal(
-            str(cfg.get("paper.initial_balance", 10000))
-        )
-        return PaperTradingAdapter(
-            initial_balance_usdt=initial_balance,
+            config=cfg,
         )
 
     if mode == "mock":
@@ -103,7 +91,7 @@ def create_exchange(
 
     msg = (
         f"Unknown exchange mode: '{mode}'. "
-        "Expected one of: binance, paper, mock."
+        "Expected one of: binance, mock."
     )
     raise ValueError(msg)
 

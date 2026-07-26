@@ -1,4 +1,4 @@
-"""Groq AI integration for Quad options trading bot.
+"""Groq AI integration for Quad futures trading bot.
 
 Provides AI-powered market analysis, strategy recommendations,
 and trading decisions using Groq's ultra-fast LLM inference
@@ -11,13 +11,13 @@ GroqClient
 MarketContext
     Aggregated market snapshot dataclass for AI decision-making.
 collect_market_context
-    Fetch all market data (candles, positions, account, option chains).
+    Fetch all market data (candles, positions, account, futures data).
 compute_indicators
     Compute technical indicators from candle data.
 build_trading_prompt
     Build structured system+user prompts for AI trading decisions.
 analyze_market
-    Analyze current market conditions from option chain data.
+    Analyze current market conditions from futures market data.
 recommend_strategy
     Suggest a strategy based on market conditions.
 """
