@@ -35,21 +35,6 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Default constants (fallback values when config is not provided)
-# Instance lookups on WebSocketManager read from config and fall back to
-# these defaults.
-# ---------------------------------------------------------------------------
-
-_WS_URL_FALLBACK = "wss://fstream.binance.com/ws"
-
-_WS_BASE_BACKOFF_S_FALLBACK = 1.0
-_WS_MAX_BACKOFF_S_FALLBACK = 30.0
-_WS_BACKOFF_MULTIPLIER_FALLBACK = 2.0
-_WS_JITTER_FRACTION_FALLBACK = 0.1
-
-_WS_HEARTBEAT_INTERVAL_S_FALLBACK = 30.0
-
 
 # ---------------------------------------------------------------------------
 # Subscription dataclass
@@ -125,14 +110,11 @@ class WebSocketManager:
         """
         self._exchange = exchange_adapter
         self._config = config or {}
-        self._market_data_config = self._config.get("market_data", {})
-        self._ws_config = self._market_data_config.get("websocket", {})
+        self._market_data_config = self._config["market_data"]
+        self._ws_config = self._market_data_config["websocket"]
 
         # WebSocket endpoint
-        self._ws_url = self._ws_config.get(
-            "ws_url",
-            self._config.get("ws_url", _WS_URL_FALLBACK),
-        )
+        self._ws_url = self._ws_config["url"]
 
         self._log = logger.bind(ws_url=self._ws_url)
 
@@ -395,17 +377,18 @@ class WebSocketManager:
         Reconnects automatically on failure with exponential backoff,
         unless the subscription has been removed.
         """
+        ws_backoff_cfg = self._ws_config["backoff"]
         ws_base_backoff = float(
-            self._ws_config.get("base_backoff_seconds", _WS_BASE_BACKOFF_S_FALLBACK)
+            ws_backoff_cfg["base_seconds"]
         )
         ws_max_backoff = float(
-            self._ws_config.get("max_backoff_seconds", _WS_MAX_BACKOFF_S_FALLBACK)
+            ws_backoff_cfg["max_seconds"]
         )
         ws_backoff_mult = float(
-            self._ws_config.get("backoff_multiplier", _WS_BACKOFF_MULTIPLIER_FALLBACK)
+            ws_backoff_cfg["multiplier"]
         )
         ws_jitter = float(
-            self._ws_config.get("jitter_fraction", _WS_JITTER_FRACTION_FALLBACK)
+            ws_backoff_cfg["jitter_fraction"]
         )
 
         backoff = ws_base_backoff
@@ -471,7 +454,7 @@ class WebSocketManager:
         async with session.ws_connect(
             self._ws_url,
             heartbeat=float(
-                self._ws_config.get("heartbeat_interval_seconds", _WS_HEARTBEAT_INTERVAL_S_FALLBACK)
+                self._ws_config["heartbeat_interval_seconds"]
             ),
         ) as ws:
             # Store the connection so we can close it later

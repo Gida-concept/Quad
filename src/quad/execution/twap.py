@@ -33,20 +33,6 @@ from quad.types.domain import OrderRequest
 from .gateway import OrderGateway, OrderRejectedError, OrderResult
 
 # ---------------------------------------------------------------------------
-# Default configuration
-# ---------------------------------------------------------------------------
-
-_DEFAULT_CONFIG: dict[str, Any] = {
-    "min_slices": 3,
-    "max_slices": 10,
-    "default_window_seconds": 300,
-    "slice_spacing_seconds": 30,
-    "jitter_seconds": 5,
-    "min_slice_quantity": Decimal("0.01"),
-    "fill_urgency_threshold": 0.8,
-}
-
-# ---------------------------------------------------------------------------
 # Slicer
 # ---------------------------------------------------------------------------
 
@@ -57,23 +43,23 @@ class TwapSlicer:
     Parameters
     ----------
     config:
-        Optional configuration dictionary.  Missing keys fall back to the
-        defaults documented in the module-level ``_DEFAULT_CONFIG`` dict.
+        Configuration dictionary.  Must contain keys expected by the slicer
+        (``min_slices``, ``max_slices``, ``default_window_seconds``,
+        ``jitter_seconds``, ``min_slice_quantity``,
+        ``fill_urgency_threshold``).  A ``KeyError`` is raised if any are
+        missing — no fallback defaults are applied.
     """
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         self._log = structlog.get_logger(__name__)
-        cfg: dict[str, Any] = dict(_DEFAULT_CONFIG)
-        if config:
-            cfg.update(config)
-        self._config = cfg
+        self._config = config
 
-        self._min_slices = int(cfg["min_slices"])
-        self._max_slices = int(cfg["max_slices"])
-        self._default_window = int(cfg["default_window_seconds"])
-        self._jitter_seconds = float(cfg["jitter_seconds"])
-        self._min_slice_qty: Decimal = cfg["min_slice_quantity"]
-        self._urgency_threshold = float(cfg["fill_urgency_threshold"])
+        self._min_slices = int(config["min_slices"])
+        self._max_slices = int(config["max_slices"])
+        self._default_window = int(config["default_window_seconds"])
+        self._jitter_seconds = float(config["jitter_seconds"])
+        self._min_slice_qty: Decimal = config["min_slice_quantity"]
+        self._urgency_threshold = float(config["fill_urgency_threshold"])
 
     # ------------------------------------------------------------------
     # Public API

@@ -110,18 +110,18 @@ def _format_pnl(pnl: Decimal) -> str:
 @app.command()
 def status(
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Show bot status overview."""
     config = _load_config(config_path)
-    mode = config.get("_mode", "binance")
-    dry_run = config.get("_dry_run", True)
-    exchange_name = config.get("exchange", {}).get("name", "binance")
-    testnet = config.get("exchange", {}).get("testnet", True)
-    leverage = config.get("trading", {}).get("leverage", 1)
-    margin_mode = config.get("trading", {}).get("margin_mode", "isolated")
-    position_mode = config.get("trading", {}).get("position_mode", "one_way")
+    mode = config["_mode"]
+    dry_run = config["_dry_run"]
+    exchange_name = config["exchange"]["name"]
+    testnet = config["exchange"]["testnet"]
+    leverage = config["trading"]["leverage"]
+    margin_mode = config["trading"]["margin_mode"]
+    position_mode = config["trading"]["position_mode"]
 
     print("=" * 50)
     print("  QUAD FUTURES TRADING BOT — STATUS")
@@ -141,12 +141,12 @@ def status(
 @app.command()
 def balance(
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Show account balance."""
     config = _load_config(config_path)
-    print(f"Account balance (from config mode: {config.get('_mode', 'binance')})")
+    print(f"Account balance (from config mode: {config['_mode']})")
     print()
     print("  Use the Telegram bot `/balance` command for live data,")
     print("  or connect the exchange adapter for REST queries.")
@@ -155,7 +155,7 @@ def balance(
 @app.command()
 def positions(
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """List open positions (from database if available)."""
@@ -170,7 +170,7 @@ def positions(
 @app.command()
 def orders(
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """List open orders (from database if available)."""
@@ -184,23 +184,23 @@ def orders(
 @app.command()
 def risk(
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Show risk status."""
     config = _load_config(config_path)
-    risk_config = config.get("risk", {})
+    risk_config = config["risk"]
 
     print("Risk Status")
     print("=" * 50)
-    print(f"  Max Positions:             {risk_config.get('max_positions', 5)}")
-    print(f"  Max Position Size:         {float(risk_config.get('max_position_size_pct', 0.1)):.0%}")
-    print(f"  Max Portfolio Risk:        {risk_config.get('max_portfolio_risk_pct', 20)}%")
-    print(f"  Max Daily Loss:            ${risk_config.get('max_daily_loss_usd', 500)}")
-    print(f"  Max Drawdown:              {risk_config.get('max_drawdown_pct', 25)}%")
-    print(f"  Min Liquidation Distance:  {float(risk_config.get('min_distance_to_liquidation_pct', 0.2)):.0%}")
-    print(f"  Max Funding Rate:          {float(risk_config.get('max_funding_rate', 0.001)):.4%}")
-    print(f"  Max Position Concentration: {risk_config.get('max_position_concentration', 0.4):.0%}")
+    print(f"  Max Positions:             {risk_config['max_positions']}")
+    print(f"  Max Position Size:         {float(risk_config['max_position_size_pct']):.0%}")
+    print(f"  Max Portfolio Risk:        {risk_config['max_portfolio_risk_pct']}%")
+    print(f"  Max Daily Loss:            ${risk_config['max_daily_loss_usd']}")
+    print(f"  Max Drawdown:              {risk_config['max_drawdown_pct']}%")
+    print(f"  Min Liquidation Distance:  {float(risk_config['min_distance_to_liquidation_pct']):.0%}")
+    print(f"  Max Funding Rate:          {float(risk_config['max_funding_rate']):.4%}")
+    print(f"  Max Position Concentration: {risk_config['max_position_concentration']:.0%}")
     print("=" * 50)
     print()
     print("  Use the Telegram bot `/risk` command for live risk status.")
@@ -211,12 +211,12 @@ def risk(
 def evaluate(
     strategy_name: str = typer.Argument(..., help="Strategy name to evaluate"),
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Evaluate a strategy and show recommended actions."""
     config = _load_config(config_path)
-    strategy_params = config.get("strategy", {}).get(strategy_name, {})
+    strategy_params = config["strategy"].get(strategy_name)
 
     from quad.strategy.base import StrategyRegistry
 
@@ -244,7 +244,7 @@ def execute(
     strategy_name: str = typer.Argument(..., help="Strategy name to execute"),
     dry_run: bool = typer.Option(True, "--dry-run", "-n", help="Dry run (no real orders)"),
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Execute strategy signals (with --no-dry-run for live)."""
@@ -272,7 +272,7 @@ def backtest(
     strategy_name: str = typer.Argument(..., help="Strategy to backtest"),
     days: int = typer.Option(30, "--days", "-d", help="Number of days to backtest"),
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Backtest a strategy against historical data."""
@@ -311,7 +311,7 @@ def backtest(
 @app.command(name="config")
 def config_view(
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Show current resolved configuration overview."""
@@ -338,12 +338,12 @@ def config_view(
 @app.command(name="db-info")
 def db_info(
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Show database statistics."""
     config = _load_config(config_path)
-    dsn = config.get("persistence", {}).get("dsn", "Not configured")
+    dsn = config["persistence"]["dsn"]
 
     print("Database Info")
     print("=" * 50)
@@ -356,7 +356,7 @@ def db_info(
 @app.command()
 def run(
     config_path: str = typer.Option(
-        "config/config.local.yaml", "--config", "-c", help="Path to config YAML"
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
     """Run the bot (start all subsystems)."""

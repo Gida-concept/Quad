@@ -252,12 +252,12 @@ class RiskManager:
     def _ensure_config(config: dict[str, Any]) -> dict[str, Any]:
         """Ensure the config dict has a ``risk`` section.
 
-        All default values come from ``config.default.yaml``, the Pydantic
+        All default values come from ``config.yaml``, the Pydantic
         schema defaults, and inline fallbacks in each risk subsystem.
         This method only guarantees the ``risk`` key exists as a dict so
         downstream code can safely call ``config.get("risk", {})``.
 
-        User overrides from ``config.local.yaml``, environment variables,
+        User overrides from environment variables
         and runtime overrides are already merged into *config* by
         ``ConfigManager`` before being passed here.
         """

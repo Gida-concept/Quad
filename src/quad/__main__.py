@@ -57,7 +57,7 @@ async def main() -> None:
 
     config_path = os.environ.get(
         "QUAD_CONFIG_PATH",
-        "config/config.local.yaml",
+        "config/config.yaml",
     )
 
     from quad.orchestrator import QuadOrchestrator

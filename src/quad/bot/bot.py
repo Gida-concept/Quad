@@ -79,7 +79,7 @@ class QuadBot:
     ) -> None:
         self._log = logger.bind()
         self._config = config
-        self._telegram_config = config.get("telegram", {})
+        self._telegram_config = config["telegram"]
 
         # Store component references for command handlers
         self._orchestrator = orchestrator
@@ -91,9 +91,9 @@ class QuadBot:
         self._optimizer = optimizer
 
         # Bot token and notification config
-        self._bot_token: str = self._telegram_config.get("bot_token", "")
+        self._bot_token: str = self._telegram_config["bot_token"]
         self._notification_chat_id: int | None = self._telegram_config.get(
-            "notification_chat_id", None
+            "notification_chat_id"
         )
 
         # Build shared state for command / job handlers
@@ -259,11 +259,11 @@ class QuadBot:
 
         import datetime as dt
 
-        self._job_intervals = self._telegram_config.get("job_intervals", {})
+        self._job_intervals = self._telegram_config["job_intervals"]
 
-        # Status summary: configurable interval (default 60 minutes)
-        status_interval = self._job_intervals.get("status_summary_seconds", 3600)
-        status_first = self._job_intervals.get("status_summary_first_seconds", 60)
+        # Status summary: configurable interval
+        status_interval = self._job_intervals["status_summary_seconds"]
+        status_first = self._job_intervals.get("status_summary_first_seconds")
         job_queue.run_repeating(
             self._jobs.job_status_summary,
             interval=status_interval,
@@ -271,9 +271,9 @@ class QuadBot:
             name="status_summary",
         )
 
-        # Risk alert check: configurable interval (default 5 minutes)
-        risk_alert_interval = self._job_intervals.get("risk_alert_seconds", 300)
-        risk_alert_first = self._job_intervals.get("risk_alert_first_seconds", 120)
+        # Risk alert check: configurable interval
+        risk_alert_interval = self._job_intervals["risk_alert_seconds"]
+        risk_alert_first = self._job_intervals.get("risk_alert_first_seconds")
         job_queue.run_repeating(
             self._jobs.job_risk_alert,
             interval=risk_alert_interval,
@@ -282,9 +282,9 @@ class QuadBot:
         )
 
         # Daily report: scheduled at configured time
-        daily_report_cfg = self._telegram_config.get("daily_report", {})
-        daily_hour = daily_report_cfg.get("hour", self._telegram_config.get("daily_report_hour", 23))
-        daily_minute = daily_report_cfg.get("minute", self._telegram_config.get("daily_report_minute", 0))
+        daily_report_cfg = self._telegram_config["daily_report"]
+        daily_hour = daily_report_cfg["hour"]
+        daily_minute = daily_report_cfg["minute"]
 
         now = dt.datetime.now(dt.timezone.utc)
         first_daily = now.replace(
@@ -305,11 +305,11 @@ class QuadBot:
         # Optimization cycle: configurable interval (default every 7 days)
         if self._optimizer is not None:
             interval_days = int(
-                self._config.get("retrain", {}).get("interval_days", 7)
+                self._config["retrain"]["interval_days"]
             )
             interval_s = interval_days * 86400
             first_s = int(
-                self._config.get("retrain", {}).get("initial_delay_hours", 1)
+                self._config["retrain"]["initial_delay_hours"]
             ) * 3600
 
             job_queue.run_repeating(
@@ -325,8 +325,8 @@ class QuadBot:
             )
 
         # Funding rate countdown: configurable interval (default 30 minutes)
-        funding_interval = self._job_intervals.get("funding_rate_countdown_seconds", 1800)
-        funding_first = self._job_intervals.get("funding_rate_countdown_first_seconds", 300)
+        funding_interval = self._job_intervals["funding_rate_countdown_seconds"]
+        funding_first = self._job_intervals.get("funding_rate_countdown_first_seconds")
         job_queue.run_repeating(
             self._jobs.job_funding_rate_countdown,
             interval=funding_interval,
@@ -335,8 +335,8 @@ class QuadBot:
         )
 
         # Liquidation warning: configurable interval (default 5 minutes)
-        liq_interval = self._job_intervals.get("liquidation_warning_seconds", 300)
-        liq_first = self._job_intervals.get("liquidation_warning_first_seconds", 180)
+        liq_interval = self._job_intervals["liquidation_warning_seconds"]
+        liq_first = self._job_intervals.get("liquidation_warning_first_seconds")
         job_queue.run_repeating(
             self._jobs.job_liquidation_warning,
             interval=liq_interval,
@@ -345,9 +345,9 @@ class QuadBot:
         )
 
         # Funding cost report: daily at configured time (default 22:00 UTC)
-        funding_cost_cfg = self._telegram_config.get("funding_cost_report", {})
-        funding_cost_hour = funding_cost_cfg.get("hour", 22)
-        funding_cost_minute = funding_cost_cfg.get("minute", 0)
+        funding_cost_cfg = self._telegram_config["funding_cost_report"]
+        funding_cost_hour = funding_cost_cfg["hour"]
+        funding_cost_minute = funding_cost_cfg["minute"]
         job_queue.run_daily(
             self._jobs.job_funding_cost_report,
             time=dt.time(hour=funding_cost_hour, minute=funding_cost_minute, tzinfo=dt.timezone.utc),

@@ -77,9 +77,7 @@ class GatePipeline:
     def __init__(self, config: dict[str, Any]) -> None:
         self._log = structlog.get_logger(__name__)
 
-        # Allow callers to pass either the full config or just the risk section
-        raw = config.get("risk", config)
-        self._cfg: dict[str, Any] = raw if isinstance(raw, dict) else config
+        self._cfg: dict[str, Any] = config["risk"]
 
         # Gate enable/disable flags -- all enabled by default
         self._enabled: dict[str, bool] = {g: True for g in ALL_GATES}
@@ -167,9 +165,7 @@ class GatePipeline:
         self, action: Action, context: StrategyContext
     ) -> RiskResult:
         """Gate: reject if number of open positions would exceed the limit."""
-        limit = int(
-            self._cfg.get("max_positions", 5)
-        )
+        limit = int(self._cfg["max_positions"])
         # Count futures positions with non-zero size
         open_count = len(
             [
@@ -207,13 +203,7 @@ class GatePipeline:
         self, action: Action, context: StrategyContext
     ) -> RiskResult:
         """Gate: reject if total notional exposure exceeds portfolio risk %."""
-        max_risk_pct = Decimal(
-            str(
-                self._cfg.get(
-                    "max_portfolio_risk_pct", 20
-                )
-            )
-        )
+        max_risk_pct = Decimal(str(self._cfg["max_portfolio_risk_pct"]))
         portfolio_value = (
             context.account.total_usdt if context.account else Decimal("0")
         )
@@ -263,11 +253,7 @@ class GatePipeline:
         self, action: Action, context: StrategyContext
     ) -> RiskResult:
         """Gate: reject if daily realised loss exceeds the configured limit."""
-        max_loss = Decimal(
-            str(
-                self._cfg.get("max_daily_loss_usd", 500)
-            )
-        )
+        max_loss = Decimal(str(self._cfg["max_daily_loss_usd"]))
         daily_pnl = (
             context.risk_status.daily_pnl
             if context.risk_status
@@ -297,11 +283,7 @@ class GatePipeline:
         self, action: Action, context: StrategyContext
     ) -> RiskResult:
         """Gate: reject if current drawdown exceeds the configured limit."""
-        max_dd_pct = Decimal(
-            str(
-                self._cfg.get("max_drawdown_pct", 25)
-            )
-        )
+        max_dd_pct = Decimal(str(self._cfg["max_drawdown_pct"]))
         current_dd = (
             context.risk_status.drawdown_percent
             if context.risk_status
@@ -341,13 +323,7 @@ class GatePipeline:
         If distance < min_distance_to_liquidation_pct, the position is
         considered at risk and no new trades are permitted.
         """
-        min_distance = Decimal(
-            str(
-                self._cfg.get(
-                    "min_distance_to_liquidation_pct", 0.2
-                )
-            )
-        )
+        min_distance = Decimal(str(self._cfg["min_distance_to_liquidation_pct"]))
 
         near_liquidation: list[dict[str, Any]] = []
         for pos in context.futures_positions or []:
@@ -400,14 +376,8 @@ class GatePipeline:
         (default 3 periods = 24 h). Reject if
         cost > max_funding_rate_cost * position_value.
         """
-        max_cost_ratio = Decimal(
-            str(
-                self._cfg.get(
-                    "max_funding_rate_cost", 0.001
-                )
-            )
-        )
-        funding_periods = int(self._cfg.get("funding_rate_periods", 3))
+        max_cost_ratio = Decimal(str(self._cfg["max_funding_rate_cost"]))
+        funding_periods = int(self._cfg["funding_rate_periods"])
 
         # Only check for entry actions
         if not _is_entry(action.type):
@@ -481,9 +451,7 @@ class GatePipeline:
         Computes total notional / wallet balance. For entry actions the
         proposed notional is included in the calculation.
         """
-        max_leverage = int(
-            self._cfg.get("max_leverage", 10)
-        )
+        max_leverage = int(self._cfg["max_leverage"])
         # Also respect account-level max leverage
         if context.account and context.account.max_leverage > 0:
             max_leverage = min(
@@ -547,13 +515,7 @@ class GatePipeline:
         Sums notional value per symbol and compares against
         max_position_concentration * portfolio_value.
         """
-        max_conc = Decimal(
-            str(
-                self._cfg.get(
-                    "max_position_concentration", 0.4
-                )
-            )
-        )
+        max_conc = Decimal(str(self._cfg["max_position_concentration"]))
         portfolio_value = (
             context.account.total_usdt if context.account else Decimal("0")
         )
@@ -618,11 +580,7 @@ class GatePipeline:
         characters of the symbol, e.g. ``USDT``) and flags if any group's
         total notional exceeds *correlation_threshold_pct* of the portfolio.
         """
-        threshold_pct = Decimal(
-            str(
-                self._cfg.get("correlation_threshold_pct", 60)
-            )
-        )
+        threshold_pct = Decimal(str(self._cfg["correlation_threshold_pct"]))
         portfolio_value = (
             context.account.total_usdt if context.account else Decimal("0")
         )

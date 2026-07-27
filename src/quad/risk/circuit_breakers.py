@@ -103,11 +103,10 @@ class CircuitBreakerManager:
         self._log = structlog.get_logger(__name__)
         self._lock = asyncio.Lock()
 
-        raw = config.get("risk", config)
-        self._cfg: dict[str, Any] = raw if isinstance(raw, dict) else config
+        self._cfg: dict[str, Any] = config["risk"]
 
         # Extract circuit_breakers sub-section
-        self._cb_cfg: dict[str, Any] = self._cfg.get("circuit_breakers", {})
+        self._cb_cfg: dict[str, Any] = self._cfg["circuit_breakers"]
 
         # Initialise breakers
         self._breakers: dict[str, _CircuitBreaker] = self._init_breakers()
@@ -293,9 +292,7 @@ class CircuitBreakerManager:
     def _check_daily_loss(self, daily_pnl: Decimal) -> None:
         """Tier 1: Trigger if daily PnL exceeds max loss. Auto-reset at UTC midnight."""
         breaker = self._breakers[DAILY_LOSS_BREAKER]
-        max_loss = self._cb_cfg.get("daily_loss", {}).get(
-            "max_loss_usd", 500
-        )
+        max_loss = self._cb_cfg["daily_loss"]["max_loss_usd"]
         max_loss_dec = Decimal(str(max_loss))
 
         now_utc_day = datetime.now(timezone.utc).timetuple().tm_yday
@@ -329,9 +326,7 @@ class CircuitBreakerManager:
     ) -> None:
         """Tier 2: Trigger if drawdown exceeds max. Auto-reset with hysteresis."""
         breaker = self._breakers[DRAWDOWN_BREAKER]
-        max_dd = self._cb_cfg.get("drawdown", {}).get(
-            "max_drawdown_pct", 25
-        )
+        max_dd = self._cb_cfg["drawdown"]["max_drawdown_pct"]
         max_dd_dec = Decimal(str(max_dd))
 
         # Update peak
@@ -365,9 +360,7 @@ class CircuitBreakerManager:
     def _check_consecutive_losses(self) -> None:
         """Tier 3: Trigger after N consecutive losing trades. Auto-reset on win."""
         breaker = self._breakers[CONSECUTIVE_LOSS_BREAKER]
-        max_consecutive = self._cb_cfg.get("consecutive_losses", {}).get(
-            "max_consecutive", 5
-        )
+        max_consecutive = self._cb_cfg["consecutive_losses"]["max_consecutive"]
 
         if breaker.active:
             # Auto-reset: check if streak has been broken
@@ -405,14 +398,8 @@ class CircuitBreakerManager:
         present (liquidated), the breaker triggers.
         """
         breaker = self._breakers[LIQUIDATION_CASCADE_BREAKER]
-        cascade_cfg = self._cb_cfg.get("liquidation_cascade", {})
-        min_distance = float(
-            str(
-                cascade_cfg.get(
-                    "min_distance_to_liquidation_pct", 0.05
-                )
-            )
-        )
+        cascade_cfg = self._cb_cfg["liquidation_cascade"]
+        min_distance = float(str(cascade_cfg["min_distance_to_liquidation_pct"]))
 
         # Collect current symbols that are near liquidation
         current_near: set[str] = set()
@@ -465,14 +452,8 @@ class CircuitBreakerManager:
         monitoring cycles show a spike, escalate (trigger the breaker).
         """
         breaker = self._breakers[FUNDING_RATE_SPIKE_BREAKER]
-        spike_cfg = self._cb_cfg.get("funding_rate_spike", {})
-        spike_threshold = float(
-            str(
-                spike_cfg.get(
-                    "funding_rate_spike_threshold", 0.001
-                )
-            )
-        )
+        spike_cfg = self._cb_cfg["funding_rate_spike"]
+        spike_threshold = float(str(spike_cfg["funding_rate_spike_threshold"]))
 
         funding_rates = context.funding_rates or {}
         current_spikes: set[str] = set()
@@ -492,9 +473,7 @@ class CircuitBreakerManager:
                 counts[sym] = 0
 
         # Check for escalation (3+ consecutive spikes)
-        max_consecutive_spikes = int(
-            spike_cfg.get("max_consecutive_spikes", 3)
-        )
+        max_consecutive_spikes = int(spike_cfg["max_consecutive_spikes"])
         escalating = [
             sym
             for sym, cnt in counts.items()
@@ -528,14 +507,8 @@ class CircuitBreakerManager:
         otherwise checks mark price change vs threshold.
         """
         breaker = self._breakers[VOLATILITY_BREAKER]
-        vol_cfg = self._cb_cfg.get("volatility", {})
-        atr_threshold = float(
-            str(
-                vol_cfg.get(
-                    "volatility_breaker_atr_pct", 0.05
-                )
-            )
-        )
+        vol_cfg = self._cb_cfg["volatility"]
+        atr_threshold = float(str(vol_cfg["volatility_breaker_atr_pct"]))
 
         # Use futures contract data for price change / volatility
         high_volatility_symbols: list[str] = []
@@ -596,43 +569,33 @@ class CircuitBreakerManager:
         """Create initial circuit breaker instances from config."""
         cb_cfg = self._cb_cfg
 
-        daily_loss_cfg = cb_cfg.get("daily_loss", {})
-        drawdown_cfg = cb_cfg.get("drawdown", {})
-        consec_cfg = cb_cfg.get("consecutive_losses", {})
-        cascade_cfg = cb_cfg.get("liquidation_cascade", {})
-        spike_cfg = cb_cfg.get("funding_rate_spike", {})
-        vol_cfg = cb_cfg.get("volatility", {})
+        daily_loss_cfg = cb_cfg["daily_loss"]
+        drawdown_cfg = cb_cfg["drawdown"]
+        consec_cfg = cb_cfg["consecutive_losses"]
+        cascade_cfg = cb_cfg["liquidation_cascade"]
+        spike_cfg = cb_cfg["funding_rate_spike"]
+        vol_cfg = cb_cfg["volatility"]
 
         return {
             DAILY_LOSS_BREAKER: _CircuitBreaker(
                 name=DAILY_LOSS_BREAKER,
                 tier=1,
                 auto_reset=True,
-                threshold=Decimal(
-                    str(
-                        daily_loss_cfg.get("max_loss_usd", 500)
-                    )
-                ),
+                threshold=Decimal(str(daily_loss_cfg["max_loss_usd"])),
                 hysteresis=Decimal("0"),
             ),
             DRAWDOWN_BREAKER: _CircuitBreaker(
                 name=DRAWDOWN_BREAKER,
                 tier=2,
                 auto_reset=True,
-                threshold=Decimal(
-                    str(
-                        drawdown_cfg.get("max_drawdown_pct", 25)
-                    )
-                ),
+                threshold=Decimal(str(drawdown_cfg["max_drawdown_pct"])),
                 hysteresis=Decimal("5"),  # 5% hysteresis for recovery
             ),
             CONSECUTIVE_LOSS_BREAKER: _CircuitBreaker(
                 name=CONSECUTIVE_LOSS_BREAKER,
                 tier=3,
                 auto_reset=True,
-                max_consecutive=consec_cfg.get(
-                    "max_consecutive", 5
-                ),
+                max_consecutive=consec_cfg["max_consecutive"],
             ),
             KILL_SWITCH: _CircuitBreaker(
                 name=KILL_SWITCH,
@@ -643,37 +606,19 @@ class CircuitBreakerManager:
                 name=LIQUIDATION_CASCADE_BREAKER,
                 tier=1,
                 auto_reset=True,
-                threshold=Decimal(
-                    str(
-                        cascade_cfg.get(
-                            "min_distance_to_liquidation_pct", 0.05
-                        )
-                    )
-                ),
+                threshold=Decimal(str(cascade_cfg["min_distance_to_liquidation_pct"])),
             ),
             FUNDING_RATE_SPIKE_BREAKER: _CircuitBreaker(
                 name=FUNDING_RATE_SPIKE_BREAKER,
                 tier=1,
                 auto_reset=True,
-                threshold=Decimal(
-                    str(
-                        spike_cfg.get(
-                            "funding_rate_spike_threshold", 0.001
-                        )
-                    )
-                ),
+                threshold=Decimal(str(spike_cfg["funding_rate_spike_threshold"])),
             ),
             VOLATILITY_BREAKER: _CircuitBreaker(
                 name=VOLATILITY_BREAKER,
                 tier=2,
                 auto_reset=True,
-                threshold=Decimal(
-                    str(
-                        vol_cfg.get(
-                            "volatility_breaker_atr_pct", 0.05
-                        )
-                    )
-                ),
+                threshold=Decimal(str(vol_cfg["volatility_breaker_atr_pct"])),
             ),
         }
 

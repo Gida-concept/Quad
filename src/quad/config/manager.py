@@ -1,12 +1,11 @@
 """Quad configuration manager.
 
-Provides 4-layer configuration merge:
-  1. config/config.default.yaml (shipped defaults)
-  2. config/config.local.yaml (user overrides, gitignored)
-  3. Environment variables (QUAD_* and BINANCE_*)
-  4. Runtime overrides (via set())
+Provides 3-layer configuration merge:
+  1. config/config.yaml (single source of truth)
+  2. Environment variables (QUAD_* and BINANCE_*)
+  3. Runtime overrides (via set())
 
-All layers merge with layer 4 being highest priority.
+All layers merge with higher-numbered layer being highest priority.
 Dot-notation key access: config.get("risk.max_position_size")
 Hot-reload support via on_change callbacks.
 
@@ -70,9 +69,8 @@ DEFAULT_CONFIG_DIRS: list[Path] = [
     Path.cwd() / "config",
 ]
 
-# Config file names
-DEFAULT_CONFIG_FILE = "config.default.yaml"
-LOCAL_CONFIG_FILE = "config.local.yaml"
+# Config file name (single source of truth)
+CONFIG_FILE = "config.yaml"
 
 
 # ============================================================================
@@ -83,13 +81,12 @@ class ConfigManager:
     """Configuration manager with layered merge, dot-notation access,
     hot-reload callbacks, and thread safety.
 
-    The resolved configuration is built from four layers (lower number =
+    The resolved configuration is built from three layers (lower number =
     lower priority):
 
-        1.  config/config.default.yaml (shipped defaults)
-        2.  config/config.local.yaml (user overrides, gitignored)
-        3.  Environment variables (QUAD_* and BINANCE_*)
-        4.  Runtime overrides (via set())
+        1.  config/config.yaml (single source of truth)
+        2.  Environment variables (QUAD_* and BINANCE_*)
+        3.  Runtime overrides (via set())
 
     Args:
         config_dir: Optional path to the configuration directory. If not
@@ -97,8 +94,8 @@ class ConfigManager:
             ``~/.quad/config/``, ``./config/``.
 
     Raises:
-        FileNotFoundError: If ``config.default.yaml`` cannot be found.
-        yaml.YAMLError: If the default config file is malformed.
+        FileNotFoundError: If ``config.yaml`` cannot be found.
+        yaml.YAMLError: If the config file is malformed.
     """
 
     def __init__(self, config_dir: str | Path | None = None) -> None:
@@ -113,13 +110,6 @@ class ConfigManager:
         # Load .env file from config directory or parent dirs
         self._load_env_file()
 
-        # Load layers (stored individually for debugging/diffing)
-        self._layers: dict[str, dict[str, Any]] = {
-            "defaults": {},
-            "local": {},
-            "env": {},
-        }
-
         # Build the resolved config
         self._config: dict[str, Any] = {}
         self._load_all_layers()
@@ -127,8 +117,7 @@ class ConfigManager:
         log = logger.bind(config_dir=str(self._config_dir))
         log.info(
             "config_loaded",
-            has_local=self._layers["local"] != {},
-            has_env_overrides=self._layers["env"] != {},
+            path=str(self._config_dir / CONFIG_FILE),
         )
 
     # ------------------------------------------------------------------
@@ -197,7 +186,7 @@ class ConfigManager:
         whose values changed during the reload.
 
         Raises:
-            yaml.YAMLError: If ``config.default.yaml`` is malformed.
+            yaml.YAMLError: If ``config.yaml`` is malformed.
         """
         old_config: dict[str, Any] = {}
 
@@ -258,7 +247,7 @@ class ConfigManager:
         Returns:
             The strategy name from ``trading.default_strategy``.
         """
-        return str(self.get("trading.default_strategy", "swing_trading"))
+        return str(self.get("trading.default_strategy", "trend_following"))
 
     # ------------------------------------------------------------------
     # Container protocol
@@ -303,8 +292,8 @@ class ConfigManager:
 
         for candidate in DEFAULT_CONFIG_DIRS:
             resolved = candidate.expanduser().resolve()
-            default_path = resolved / DEFAULT_CONFIG_FILE
-            if default_path.exists():
+            config_path = resolved / CONFIG_FILE
+            if config_path.exists():
                 logger.debug(
                     "config_dir_discovered",
                     path=str(resolved),
@@ -348,60 +337,30 @@ class ConfigManager:
             logger.info("dotenv_not_found")
 
     def _load_all_layers(self) -> None:
-        """Load and merge all four configuration layers.
+        """Load and merge all three configuration layers.
 
         Internal state updated:
-            - ``_layers["defaults"]``
-            - ``_layers["local"]``
-            - ``_layers["env"]``
             - ``_config`` (merged result)
         """
-        # Layer 1: Defaults
-        defaults_path = self._config_dir / DEFAULT_CONFIG_FILE
-        if not defaults_path.exists():
+        # Layer 1: Base config from config.yaml
+        config_path = self._config_dir / CONFIG_FILE
+        if not config_path.exists():
             raise FileNotFoundError(
-                f"Default configuration file not found: {defaults_path}. "
-                "Ensure config/config.default.yaml exists in the project "
+                f"Configuration file not found: {config_path}. "
+                "Ensure config/config.yaml exists in the project "
                 "or set QUAD_CONFIG_DIR."
             )
-        self._layers["defaults"] = _load_yaml(defaults_path)
-        self._layers["defaults"] = _recursive_expand_env_vars(
-            self._layers["defaults"]
-        )
+        merged = _load_yaml(config_path)
+        merged = _recursive_expand_env_vars(merged)
         logger.debug(
-            "layer_loaded",
-            layer="defaults",
-            path=str(defaults_path),
+            "config_loaded",
+            path=str(config_path),
         )
 
-        # Layer 2: Local overrides
-        local_path = self._config_dir / LOCAL_CONFIG_FILE
-        if local_path.exists():
-            self._layers["local"] = _load_yaml(local_path)
-            self._layers["local"] = _recursive_expand_env_vars(
-                self._layers["local"]
-            )
-            logger.debug(
-                "layer_loaded",
-                layer="local",
-                path=str(local_path),
-            )
-        else:
-            self._layers["local"] = {}
-            logger.debug(
-                "local_config_not_found",
-                path=str(local_path),
-            )
+        # Layer 2: Environment variables
+        merged = _apply_env_overrides(merged)
 
-        # Layer 3: Environment variables
-        self._layers["env"] = _apply_env_overrides({})
-
-        # Merge: defaults <- local <- env
-        merged: dict[str, Any] = copy.deepcopy(self._layers["defaults"])
-        merged = _deep_merge(merged, copy.deepcopy(self._layers["local"]))
-        merged = _deep_merge(merged, copy.deepcopy(self._layers["env"]))
-
-        # Layer 4: Re-apply runtime overrides on top
+        # Layer 3: Re-apply runtime overrides on top
         merged = _deep_merge(merged, copy.deepcopy(self._runtime_overrides))
 
         self._config = merged

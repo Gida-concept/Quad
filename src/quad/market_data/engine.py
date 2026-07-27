@@ -31,10 +31,6 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# Default grace period for component shutdowns (seconds) — used as fallback
-# when config does not provide a value.
-_DEFAULT_SHUTDOWN_TIMEOUT_S = 10.0
-
 
 class MarketDataEngine:
     """Central market data engine.
@@ -81,8 +77,8 @@ class MarketDataEngine:
         """
         self._exchange = exchange_adapter
         self._config = config or {}
-        self._market_data_config = self._config.get("market_data", {})
-        self._engine_config = self._market_data_config.get("engine", {})
+        self._market_data_config = self._config["market_data"]
+        self._engine_config = self._market_data_config["engine"]
         self._db_manager = db_manager
         self._log = logger.bind()
 
@@ -134,7 +130,7 @@ class MarketDataEngine:
 
         # Create sub-components
         self._buffer = PriceBuffer(
-            max_ticks_per_symbol=self._market_data_config.get("buffer_sizes", {}).get("ticks", 1000),
+            max_ticks_per_symbol=self._market_data_config["buffer_sizes"]["ticks"],
         )
         if self._db_manager is not None:
             self._historical = HistoricalDataProvider(
@@ -186,7 +182,7 @@ class MarketDataEngine:
         self._stop_event.set()
 
         timeout = float(
-            self._engine_config.get("shutdown_timeout_seconds", _DEFAULT_SHUTDOWN_TIMEOUT_S)
+            self._engine_config["shutdown_timeout_seconds"]
         )
 
         # Stop WebSocket manager

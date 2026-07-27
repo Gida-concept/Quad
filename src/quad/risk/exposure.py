@@ -31,8 +31,7 @@ class FuturesPositionTracker:
         self._log = structlog.get_logger(__name__)
         self._log.info("futures_position_tracker_init")
 
-        raw = config.get("risk", config)
-        self._cfg: dict[str, Any] = raw if isinstance(raw, dict) else config
+        self._cfg: dict[str, Any] = config["risk"]
 
         # Cached exposure data
         self._notional_exposure: dict[str, Decimal] = {}

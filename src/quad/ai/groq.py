@@ -63,16 +63,6 @@ _FALLBACK_MODEL = "llama-3.1-8b-instant"
 
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.3
-_DEFAULT_TIMEOUT = 30.0
-_MAX_RETRIES = 3
-_BASE_BACKOFF = 1.0  # seconds
-
-# Rate limiter constants
-_MAX_REQUESTS_PER_DAY = 950  # Leave headroom below the 1000 free-tier limit
-_RATE_LIMIT_WINDOW_S = 86400  # 24 hours
-_WARNING_LEVEL_1 = 800
-_WARNING_LEVEL_2 = 900
-_WARNING_LEVEL_3 = 950
 
 
 # ============================================================================
@@ -107,28 +97,28 @@ class GroqClient:
         config: dict[str, Any] | None = None,
     ) -> None:
         self._config = config or {}
-        self._ai_config = self._config.get("ai", {})
-        self._groq_config = self._ai_config.get("groq", {})
+        self._ai_config = self._config["ai"]
+        self._groq_config = self._ai_config["groq"]
 
         self._api_key = api_key or os.environ.get("GROQ_API_KEY", "")
         if not self._api_key:
             logger.warning("groq_api_key_missing")
 
         self._model = model or self._ai_config.get("model", _DEFAULT_MODEL)
-        self._timeout = timeout or self._groq_config.get("timeout_seconds", _DEFAULT_TIMEOUT)
-        self._max_retries = max_retries or self._groq_config.get("max_retries", _MAX_RETRIES)
+        self._timeout = timeout or self._groq_config.get("timeout_seconds")
+        self._max_retries = max_retries or self._groq_config.get("max_retries")
 
         # Rate limiter / backoff configuration
-        rate_limiter_cfg = self._groq_config.get("rate_limiter", {})
+        rate_limiter_cfg = self._groq_config["rate_limiter"]
         self._max_requests_per_day = (
             max_requests_per_day
-            or rate_limiter_cfg.get("max_requests_per_day", _MAX_REQUESTS_PER_DAY)
+            or rate_limiter_cfg.get("max_requests_per_day")
         )
-        self._rate_limit_window_s = rate_limiter_cfg.get("window_seconds", _RATE_LIMIT_WINDOW_S)
-        self._warning_level_1 = rate_limiter_cfg.get("warning_level_1", _WARNING_LEVEL_1)
-        self._warning_level_2 = rate_limiter_cfg.get("warning_level_2", _WARNING_LEVEL_2)
-        self._warning_level_3 = rate_limiter_cfg.get("warning_level_3", _WARNING_LEVEL_3)
-        self._base_backoff = self._groq_config.get("base_backoff_seconds", _BASE_BACKOFF)
+        self._rate_limit_window_s = rate_limiter_cfg.get("window_seconds")
+        self._warning_level_1 = rate_limiter_cfg.get("warning_level_1")
+        self._warning_level_2 = rate_limiter_cfg.get("warning_level_2")
+        self._warning_level_3 = rate_limiter_cfg.get("warning_level_3")
+        self._base_backoff = self._groq_config.get("base_backoff_seconds")
 
         self._log = logger.bind(model=self._model)
 
@@ -427,11 +417,11 @@ class GroqClient:
         """
         effective_temperature = (
             temperature if temperature is not None
-            else self._groq_config.get("decide_trades_temperature", 0.0)
+            else self._groq_config.get("decide_trades_temperature")
         )
         effective_max_tokens = (
             max_tokens if max_tokens is not None
-            else self._groq_config.get("decide_trades_max_tokens", 2048)
+            else self._groq_config.get("decide_trades_max_tokens")
         )
         raw = await self.chat(
             system=system_prompt,
@@ -502,9 +492,9 @@ class GroqClient:
                 decision[key] = "HOLD" if key == "action" else "Missing field"
 
         # Ensure action is one of the expected values
-        valid_actions = set(self._groq_config.get("valid_actions", ["ENTER", "EXIT", "HOLD"]))
-        default_action = self._groq_config.get("default_action", "HOLD")
-        fallback_action = self._groq_config.get("fallback_action", "HOLD")
+        valid_actions = set(self._groq_config.get("valid_actions"))
+        default_action = self._groq_config.get("default_action")
+        fallback_action = self._groq_config.get("fallback_action")
         action = decision.get("action", default_action)
         if action not in valid_actions:
             self._log.warning(

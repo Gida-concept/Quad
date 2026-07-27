@@ -38,10 +38,10 @@ class QuadBotJobs:
     def __init__(self, shared_state: dict[str, Any]) -> None:
         self._log = logger.bind()
         self._state = shared_state
-        self._config: dict[str, Any] = shared_state.get("config", {})
-        self._telegram_config: dict[str, Any] = shared_state.get("telegram_config", {})
+        self._config: dict[str, Any] = shared_state["config"]
+        self._telegram_config: dict[str, Any] = shared_state["telegram_config"]
         self._notification_chat_id: int | None = shared_state.get(
-            "notification_chat_id", None
+            "notification_chat_id"
         )
 
         # Subsystem references
@@ -307,8 +307,8 @@ class QuadBotJobs:
             return
 
         try:
-            max_rate = float(self._config.get("risk", {}).get("max_funding_rate", 0.001))
-            symbols = self._config.get("trading", {}).get("underlyings", ["BTCUSDT", "ETHUSDT"])
+            max_rate = float(self._config["risk"]["max_funding_rate"])
+            symbols = self._config["trading"]["underlyings"]
 
             alerts: list[str] = []
             for sym in symbols:
@@ -354,7 +354,7 @@ class QuadBotJobs:
                 return
 
             min_distance = float(
-                self._config.get("trading", {}).get("min_distance_to_liquidation_pct", 0.2)
+                self._config["risk"]["min_distance_to_liquidation_pct"]
             )
 
             positions = await exchange_adapter.get_positions()

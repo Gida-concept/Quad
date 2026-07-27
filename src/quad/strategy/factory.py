@@ -87,10 +87,13 @@ def create_default_strategies(
         Strategies that fail to instantiate are excluded.
     """
     strategies: dict[str, StrategyBase] = {}
-    strategy_configs = config.get("strategy", {})
+    strategy_configs = config["strategy"]
 
     for name in StrategyRegistry.list():
         params = strategy_configs.get(name, {})
+        if not params.get("enabled"):
+            logger.debug("strategy_disabled", name=name)
+            continue
         instance = get_strategy(name, params, config=config)
         if instance is not None:
             strategies[name] = instance

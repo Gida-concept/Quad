@@ -1,8 +1,7 @@
-# Quad — Default Configuration
+# Quad — Unified Configuration
 # ============================================================================
-# Copy this file to config.local.yaml and override values as needed.
-# config.local.yaml values take priority over these defaults.
-# Environment variables (QUAD_*) take priority over config.local.yaml.
+# This is the single source of truth for all configuration values.
+# Environment variables (QUAD_*) take priority over values in this file.
 # Runtime overrides via `quad config set` take highest priority.
 #
 # Environment variable substitution:
@@ -11,39 +10,36 @@
 # ============================================================================
 
 # ---------------------------------------------------------------------------
+# Internal (not user-configurable via YAML — set via env vars or code)
+# ---------------------------------------------------------------------------
+_mode: "binance"
+_dry_run: true
+
+# ---------------------------------------------------------------------------
 # Trading Settings
 # ---------------------------------------------------------------------------
 trading:
   # Default strategy to use when bot starts (must match a registered strategy)
-  default_strategy: "swing_trading"
+  default_strategy: "trend_following"
 
   # Maximum number of concurrent positions across all strategies
-  max_positions: 10
+  max_positions: 5
 
   # Seconds between trading analysis cycles (deterministic fallback)
-  max_cycle_interval: 60
+  max_cycle_interval: 3600
 
   # Seconds between AI-first trading analysis cycles (default 1 hour)
   # When AI is enabled, this overrides max_cycle_interval
   ai_cycle_interval: 3600
 
-  # Trading pairs (underlyings) to monitor for AI analysis
+  # Trading pairs (underlyings) to monitor
   underlyings:
     - "BTCUSDT"
-    - "ETHUSDT"
-    - "BNBUSDT"
-    - "SOLUSDT"
-
-  # When true, close all existing positions before opening a new ENTER trade
-  serial_trade_mode: false
 
   # Futures-specific settings
-  leverage: 1
+  leverage: 50
   margin_mode: "isolated"
   position_mode: "one_way"
-
-  # Indicator cache TTL (seconds) — how long to cache computed indicator values
-  indicator_cache_ttl_seconds: 60
 
 # ---------------------------------------------------------------------------
 # Exchange Connection Settings
@@ -53,7 +49,7 @@ exchange:
   name: "binance"
 
   # Use testnet environment (true) or production (false)
-  testnet: false
+  testnet: true
 
   # API credentials (typically set via .env or environment variables)
   # api_key: ""     # BINANCE_API_KEY
@@ -65,11 +61,6 @@ exchange:
     max_weight: 2000
     # Maximum orders per second (Binance default: 1200; leave ~300 headroom)
     max_orders: 900
-
-  # WebSocket configuration
-  websocket:
-    # Seconds between WebSocket keep-alive pings
-    ping_interval: 30
 
   # Binance-specific adapter parameters
   binance:
@@ -108,12 +99,15 @@ exchange:
     rate_limiter_wait_seconds: 1.0
     # Fallback retry-after when header missing (seconds)
     retry_after_fallback_seconds: 5.0
+    # Exponential retry backoff base (seconds)
+    retry_backoff_base: 2.0
 
   # Order gateway confirmation and retry parameters
   gateway:
     confirmation_timeout_seconds: 30.0
     max_retries: 3
     completed_ids_maxlen: 1000
+    backoff_base_seconds: 2.0
 
   # Fill reconciler discrepancy tracking parameters
   reconciler:
@@ -126,7 +120,7 @@ exchange:
 # ---------------------------------------------------------------------------
 risk:
   # Maximum number of concurrent positions
-  max_positions: 5
+  max_positions: 1
 
   # Maximum percentage of total portfolio value at risk in a single trade
   max_portfolio_risk_pct: 20.0
@@ -137,9 +131,8 @@ risk:
   # Maximum drawdown from peak portfolio value (percentage trigger)
   max_drawdown_pct: 25.0
 
-  # Maximum leverage enforcement limit (the risk system will block trades
-  # that would push effective leverage above this value)
-  max_leverage: 10
+  # Maximum leverage enforcement limit
+  max_leverage: 50
 
   # Minimum distance to liquidation (as a decimal fraction, e.g. 0.20 = 20%)
   min_distance_to_liquidation_pct: 0.2
@@ -150,14 +143,14 @@ risk:
   # Maximum position concentration as a fraction of portfolio (0.0 to 1.0)
   max_position_concentration: 0.4
 
-  # Maximum percentage of portfolio in a single underlying
-  concentration_limit_pct: 30.0
-
   # Maximum acceptable funding rate
   max_funding_rate: 0.001
 
-  # Minimum position size in USD (positions below this use the default fraction)
-  min_position_size_usd: 10
+  # Maximum position size in USD
+  max_position_size: 1000.0
+
+  # Minimum position size in USD
+  min_position_size_usd: 5
 
   # Maximum position size as a fraction of portfolio (0.0 to 1.0)
   max_position_size_pct: 0.10
@@ -165,17 +158,9 @@ risk:
   # Absolute maximum position size in USD
   max_position_size_usd: 10000
 
-  # Maximum position size in USD (schema field — kept for backward compatibility)
-  max_position_size: 1000.0
-
-  # Correlation threshold percentage — flags if any quote-asset group
-  # exceeds this % of portfolio value
-  correlation_threshold_pct: 60
-
   # Kelly Criterion sizing parameters
   kelly:
-    # Fractional Kelly multiplier (0.0 to 1.0) — the fraction of
-    # full-Kelly to use for conservative sizing
+    # Fractional Kelly multiplier (0.0 to 1.0)
     fraction: 0.25
     # Default position fraction when no trade history is available
     default_fraction: 0.02
@@ -183,12 +168,7 @@ risk:
   # Circuit breakers — automated risk controls
   circuit_breakers:
     # Drawdown percentage tiers that trigger escalating responses
-    # Tier 1: Warning / reduce exposure
-    # Tier 2: Stop entering new positions
-    # Tier 3: Full emergency shutdown
     drawdown_tiers: [5.0, 10.0, 15.0]
-
-    # Per-breaker configuration (used by CircuitBreakerManager at runtime)
 
     # Daily loss breaker
     daily_loss:
@@ -215,15 +195,11 @@ risk:
     volatility:
       volatility_breaker_atr_pct: 0.05
 
-  # Per-position stop-loss and take-profit (2:1 ratio)
+  # Per-position stop-loss
   per_position_sl:
     enabled: true
     type: "fixed"
     capital_pct: 30.0
-  per_position_tp:
-    enabled: true
-    type: "fixed"
-    capital_pct: 50.0
 
 # ---------------------------------------------------------------------------
 # Execution Engine Settings
@@ -240,6 +216,14 @@ execution:
   # Default post-only flag
   post_only: false
 
+  # TWAP slicer parameters
+  twap:
+    min_slices: 3
+    max_slices: 10
+    jitter_seconds: 5
+    min_slice_quantity: 0.01
+    fill_urgency_threshold: 0.8
+
 # ---------------------------------------------------------------------------
 # Market Data Settings
 # ---------------------------------------------------------------------------
@@ -253,12 +237,14 @@ market_data:
   cache_ttl:
     # How long order book data remains valid
     order_book: 5
-    # How long the underlying price remains valid before refresh
-    underlying_price: 5
     # How long funding rate data remains valid
     funding_rate: 10
     # How long mark price data remains valid
     mark_price: 2
+    # How long open interest data remains valid
+    open_interest: 3600
+    # Max order book snapshot depth to cache
+    order_book_limit: 20
 
   # Market data engine lifecycle parameters
   engine:
@@ -278,20 +264,12 @@ market_data:
     # Heartbeat interval (seconds)
     heartbeat_interval_seconds: 30.0
 
-  # Historical data access configuration
-  historical:
-    # Maximum days of historical data to cache
-    max_days: 90
-
 # ---------------------------------------------------------------------------
 # Persistence / Database Settings
 # ---------------------------------------------------------------------------
 persistence:
   # PostgreSQL connection DSN (supports ${VAR_NAME} substitution)
   dsn: "${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}"
-
-  # Interval between automatic database snapshots (seconds)
-  snapshot_interval: 60
 
   # Database connection pool configuration
   database:
@@ -304,43 +282,12 @@ persistence:
     # Command timeout (seconds)
     command_timeout_seconds: 60
 
-  # Database backup configuration
-  backup:
-    enabled: true
-    # Seconds between automatic backups
-    interval: 3600
-    # Maximum number of backup files to retain
-    max_count: 24
-
-# ---------------------------------------------------------------------------
-# Logging Settings
-# ---------------------------------------------------------------------------
-logging:
-  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-  level: "INFO"
-
-  # Log output format: json (structured) or console (human-readable)
-  format: "json"
-
-  # File logging configuration
-  file:
-    enabled: true
-    # Log file path (supports ${VAR_NAME} substitution)
-    path: "${QUAD_LOG_DIR}/quad.log"
-    # Maximum log file size in megabytes before rotation
-    max_size_mb: 100
-    # Number of rotated log files to retain
-    backup_count: 10
-
 # ---------------------------------------------------------------------------
 # Telegram Integration Settings
 # ---------------------------------------------------------------------------
 telegram:
   # Enable Telegram bot for notifications and commands
   enabled: true
-
-  # Use long-polling (true) or webhook (false) mode
-  polling: true
 
   # Scheduled job intervals (seconds)
   job_intervals:
@@ -361,6 +308,7 @@ telegram:
   # Funding cost report scheduling (UTC)
   funding_cost_report:
     hour: 22
+    minute: 0
 
 # ---------------------------------------------------------------------------
 # AI / Groq Integration Settings
@@ -370,26 +318,16 @@ ai:
   enabled: true
 
   # Groq model to use for chat completions
-  # Production: llama-3.3-70b-versatile (280 t/s, 131K context)
-  # Fast:       llama-3.1-8b-instant (560 t/s, 131K context)
   model: "llama-3.3-70b-versatile"
 
   # Request timeout in seconds
   timeout: 30
 
   # Sampling temperature for LLM responses (0.0 = deterministic)
-  # Trading decisions use 0.0 for predictable output
   temperature: 0.0
 
-  # Maximum daily Groq API requests (free tier = 1000/day)
-  # Set to 950 to leave headroom for manual queries via /analyze etc.
+  # Maximum daily Groq API requests
   max_requests_per_day: 950
-
-  # Whether to fall back to deterministic strategies when AI fails
-  fallback_on_error: true
-
-  # Whether to request structured JSON output
-  structured_output: true
 
   # Pairs and timeframes monitored by the AI analysis
   pairs:
@@ -403,18 +341,10 @@ ai:
     - "1h"
 
   # Number of candles to fetch per pair/timeframe for AI analysis
-  candle_count: 300
-
-  # Minimum open interest to consider a strike valid (avoids illiquid strikes)
-  min_open_interest: 50
+  candle_count: 150
 
   # Groq LLM client configuration
   groq:
-    # Fallback model when primary is unavailable
-    fallback_model: "llama-3.1-8b-instant"
-    # Request parameters
-    max_tokens_default: 1024
-    temperature_default: 0.3
     # API request timeout (seconds)
     timeout_seconds: 30.0
     # Retry/backoff
@@ -436,27 +366,19 @@ ai:
     # Default order book depth for prompts
     order_book_depth: 5
     # Max candles for compact display
-    max_candles_compact: 20
-    # System prompt risk parameters
-    system_risk_max_portfolio_pct: 50.0
-    system_max_hold_hours: 8
-    system_stop_loss_pct: 0.01
-    system_min_funding_rate_pct: 11.0
+    max_candles: 20
 
 # ---------------------------------------------------------------------------
 # TradingView Webhook Settings
 # ---------------------------------------------------------------------------
 tradingview_webhook:
-  # Enable webhook receiver endpoint (POST /webhook/tradingview)
+  # Enable webhook receiver endpoint
   enabled: false
 
   # Port override (defaults to health server port if not set)
   port: 9090
 
-  # Shared secret for authenticating webhook payloads.
-  # Set this to a random string and include "secret": "<value>" in your
-  # TradingView alert message JSON.  Requests without the correct secret
-  # are rejected with 403.
+  # Shared secret for authenticating webhook payloads
   secret: ""
 
 # ---------------------------------------------------------------------------
@@ -481,30 +403,10 @@ monitoring:
 # Strategy-Specific Parameters
 # ---------------------------------------------------------------------------
 strategy:
-  # --- Swing Trading ---
-  # RSI + MACD + volume confirmation swing trading strategy
-  swing_trading:
-    enabled: false
-    rsi_period: 14
-    rsi_oversold: 30
-    rsi_overbought: 70
-    macd_fast: 12
-    macd_slow: 26
-    macd_signal: 9
-    volume_sma_period: 20
-    volume_multiplier: 1.5
-    max_position_size_usd: 1000.0
-    trade_capital_usd: 5
-    leverage: 50
-    sl_capital_pct: 30.0
-    tp_capital_pct: 50.0
-    confidence_default: 0.7
-    confidence_high: 0.9
-
   # --- Trend Following ---
   # EMA crossover + ADX filter trend-following strategy
   trend_following:
-    enabled: false
+    enabled: true
     fast_ema: 9
     slow_ema: 21
     adx_period: 14
@@ -521,6 +423,15 @@ strategy:
     confidence_high: 0.9
 
 # ---------------------------------------------------------------------------
+# Backtesting Settings
+# ---------------------------------------------------------------------------
+backtesting:
+  starting_capital: 10000
+  commission_pct: 0.001
+  slippage_pct: 0.0005
+  max_trades_per_day: 10
+
+# ---------------------------------------------------------------------------
 # Strategy Auto-Optimization
 # ---------------------------------------------------------------------------
 retrain:
@@ -528,6 +439,8 @@ retrain:
   enabled: false
   # Days between optimisation runs
   interval_days: 7
+  # Hours to wait after bot startup before first optimisation run
+  initial_delay_hours: 1
   # Minimum trades in the period to produce recommendations
   min_trades_for_analysis: 10
   # How far back (days) to pull data for analysis
@@ -542,5 +455,3 @@ retrain:
   groq_temperature: 0.2
   # Max tokens for optimisation analysis calls
   groq_max_tokens: 2048
-  # Override the default optimisation system prompt (optional)
-  # analysis_prompt_override: ""

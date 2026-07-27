@@ -30,18 +30,6 @@ from .models import BacktestResult, EquityPoint
 
 logger = structlog.get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Default config
-# ---------------------------------------------------------------------------
-
-_DEFAULT_CONFIG: dict[str, Any] = {
-    "starting_capital": Decimal("10000"),
-    "commission_pct": Decimal("0.001"),  # 0.1% per trade
-    "slippage_pct": Decimal("0.0005"),  # 0.05% slippage per fill
-    "max_trades_per_day": 10,
-}
-
-
 # ============================================================================
 # BacktestEngine
 # ============================================================================
@@ -63,8 +51,10 @@ class BacktestEngine:
         Database manager for loading historical data.  If ``None``,
         the engine runs in stub mode.
     config:
-        Optional configuration overrides.  See ``_DEFAULT_CONFIG`` for
-        available keys.
+        Configuration dictionary.  Must contain keys expected by the engine
+        (``starting_capital``, ``commission_pct``, ``slippage_pct``,
+        ``max_trades_per_day``).  A ``KeyError`` is raised if any are
+        missing — no fallback defaults are applied.
     """
 
     def __init__(
@@ -81,16 +71,13 @@ class BacktestEngine:
         self._strategy = strategy
         self._db = db_manager
 
-        merged = dict(_DEFAULT_CONFIG)
-        if config:
-            merged.update(config)
-        self._config = merged
+        self._config = config
 
         # Simulation state
-        self._starting_capital: Decimal = self._config["starting_capital"]
-        self._commission_pct: Decimal = self._config["commission_pct"]
-        self._slippage_pct: Decimal = self._config["slippage_pct"]
-        self._max_trades_per_day: int = self._config["max_trades_per_day"]
+        self._starting_capital: Decimal = config["starting_capital"]
+        self._commission_pct: Decimal = config["commission_pct"]
+        self._slippage_pct: Decimal = config["slippage_pct"]
+        self._max_trades_per_day: int = config["max_trades_per_day"]
 
     # ------------------------------------------------------------------
     # Public API

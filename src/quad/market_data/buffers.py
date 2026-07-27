@@ -49,10 +49,10 @@ class PriceBuffer:
             ``max_ticks_per_symbol``, ``get_recent_count``, ``vwap_window``.
         """
         self._config = config or {}
-        self._buffer_config = self._config.get("buffers", {})
+        self._buffer_config = self._config["market_data"]["buffer_sizes"]
         if max_ticks_per_symbol is None:
             max_ticks_per_symbol = int(
-                self._buffer_config.get("max_ticks_per_symbol", 1000)
+                self._buffer_config.get("max_ticks_per_symbol") or 1000
             )
         if max_ticks_per_symbol < 1:
             raise ValueError("max_ticks_per_symbol must be >= 1")
@@ -92,7 +92,7 @@ class PriceBuffer:
         Returns fewer than *count* items if fewer are available.
         """
         if count is None:
-            count = int(self._buffer_config.get("get_recent_count", 10))
+            count = int(self._buffer_config.get("get_recent_count") or 10)
         async with self._lock:
             buf = self._buffers.get(symbol)
             if buf is None or len(buf) == 0:
@@ -128,7 +128,7 @@ class PriceBuffer:
         Returns ``None`` if fewer than *window* values are available.
         """
         if window is None:
-            window = int(self._buffer_config.get("vwap_window", 20))
+            window = int(self._buffer_config.get("vwap_window") or 20)
         async with self._lock:
             buf = self._buffers.get(symbol)
             if buf is None or len(buf) < window:
@@ -180,9 +180,9 @@ class FundingRateRingBuffer:
             ``funding_rate_maxlen``, ``funding_rate_get_recent_count``.
         """
         self._config = config or {}
-        self._buffer_config = self._config.get("buffers", {})
+        self._buffer_config = self._config["market_data"]["buffer_sizes"]
         if maxlen is None:
-            maxlen = int(self._buffer_config.get("funding_rate_maxlen", 100))
+            maxlen = int(self._buffer_config.get("funding_rate_maxlen") or 100)
         self._maxlen = maxlen
         self._buffers: dict[str, deque[FundingRate]] = {}
         self._lock = asyncio.Lock()
@@ -208,7 +208,7 @@ class FundingRateRingBuffer:
     ) -> list[FundingRate]:
         """Return the last *count* funding rates for *symbol* (newest first)."""
         if count is None:
-            count = int(self._buffer_config.get("funding_rate_get_recent_count", 10))
+            count = int(self._buffer_config.get("funding_rate_get_recent_count") or 10)
         async with self._lock:
             buf = self._buffers.get(symbol)
             if buf is None or len(buf) == 0:

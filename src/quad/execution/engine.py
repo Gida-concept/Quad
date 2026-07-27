@@ -63,7 +63,15 @@ class ExecutionEngine:
         self._config = config or {}
 
         self._gateway = OrderGateway(exchange_adapter, config=self._config)
-        self._twap = TwapSlicer(config=self._config)
+        # Build the twap sub-config: TwapSlicer expects flat keys from
+        # execution.twap.* plus a default_window_seconds key that maps
+        # to execution.twap_window_seconds.
+        exec_cfg = self._config["execution"]
+        twap_cfg = dict(exec_cfg["twap"])
+        twap_cfg["default_window_seconds"] = int(
+            exec_cfg["twap_window_seconds"]
+        )
+        self._twap = TwapSlicer(config=twap_cfg)
         self._reconciler = FillReconciler(
             exchange_adapter, db_manager=db_manager, config=self._config
         )
@@ -296,7 +304,7 @@ class ExecutionEngine:
         order_request = self._build_request(action)
 
         if window is None:
-            window = self._config.get("execution", {}).get("twap_window_seconds", 300)
+            window = self._config["execution"]["twap_window_seconds"]
 
         # 1. Risk check (skip if already checked upstream)
         if action.risk_checked:
@@ -433,9 +441,7 @@ class ExecutionEngine:
 
     async def _reconciliation_loop(self) -> None:
         """Background loop that periodically reconciles order state."""
-        interval = self._config.get("execution", {}).get(
-            "reconcile_interval_seconds", 60
-        )
+        interval = self._config["execution"]["reconcile_interval_seconds"]
 
         while not self._stop_event.is_set():
             try:
@@ -467,11 +473,11 @@ class ExecutionEngine:
         order_request = OrderRequest(
             symbol=action.contract or "",
             side=action.side or "",
-            type=action.order_type or self._config.get("execution", {}).get("default_order_type", "LIMIT"),
+            type=action.order_type or self._config["execution"]["default_order_type"],
             quantity=action.quantity,
             price=action.price,
-            reduce_only=self._config.get("execution", {}).get("reduce_only", False),
-            post_only=self._config.get("execution", {}).get("post_only", False),
+            reduce_only=self._config["execution"]["reduce_only"],
+            post_only=self._config["execution"]["post_only"],
         )
 
         # Handle TP/SL action types

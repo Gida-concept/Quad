@@ -53,30 +53,27 @@ def create_exchange(
     """
     cfg = config or {}
 
-    # Determine mode
-    mode = (
-        cfg.get("exchange.mode")
-        or _nested_get(cfg, "exchange", "name")
-        or cfg.get("exchange.name", "binance")
-    )
+    # Determine mode using nested lookup (flat dot-notation keys don't work with dict.get)
+    mode = _nested_get(cfg, "exchange", "name") or "binance"
 
     mode = str(mode).lower().strip()
     logger.info("create_exchange", mode=mode)
 
     if mode == "binance":
+        exchange_cfg = cfg["exchange"]
         api_key = (
-            cfg.get("exchange.api_key")
+            exchange_cfg.get("api_key")
             or os.environ.get("BINANCE_API_KEY", "")
         )
         api_secret = (
-            cfg.get("exchange.api_secret")
+            exchange_cfg.get("api_secret")
             or os.environ.get("BINANCE_API_SECRET", "")
         )
         testnet = _coerce_bool(
-            cfg.get("exchange.testnet")
+            exchange_cfg.get("testnet")
             or os.environ.get("BINANCE_TESTNET", False)
         )
-        rate_limit = cfg.get("exchange.rate_limit") or {}
+        rate_limit = exchange_cfg.get("rate_limit") or {}
 
         return BinanceFuturesAdapter(
             api_key=api_key,

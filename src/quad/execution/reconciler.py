@@ -61,7 +61,7 @@ class FillReconciler:
         self._log = structlog.get_logger(__name__)
         self._exchange = exchange_adapter
         self._db = db_manager
-        self._reconciler_config = config.get("exchange", {}).get("reconciler", {}) if config else {}
+        self._reconciler_config = config["exchange"]["reconciler"] if config else {}
         self._discrepancy_history: deque[dict[str, Any]] = deque(
             maxlen=self._max_discrepancy_history
         )
@@ -72,11 +72,11 @@ class FillReconciler:
 
     @property
     def _max_discrepancy_history(self) -> int:
-        return int(self._reconciler_config.get("max_discrepancy_history", 500))
+        return int(self._reconciler_config["max_discrepancy_history"])
 
     @property
     def _stale_order_hours(self) -> int:
-        return int(self._reconciler_config.get("stale_order_hours", 24))
+        return int(self._reconciler_config["stale_order_hours"])
 
     @property
     def _stale_order_ms(self) -> int:
@@ -362,7 +362,7 @@ class FillReconciler:
             The most recent ``count`` discrepancies.
         """
         if count is None:
-            count = int(self._reconciler_config.get("recent_discrepancies_default_count", 20))
+            count = int(self._reconciler_config["recent_discrepancies_default_count"])
         total = len(self._discrepancy_history)
         return list(self._discrepancy_history)[-min(count, total):]
 

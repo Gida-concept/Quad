@@ -54,10 +54,10 @@ class QuadBotCommands:
     def __init__(self, shared_state: dict[str, Any]) -> None:
         self._log = logger.bind()
         self._state = shared_state
-        self._config: dict[str, Any] = shared_state.get("config", {})
-        self._telegram_config: dict[str, Any] = shared_state.get("telegram_config", {})
+        self._config: dict[str, Any] = shared_state["config"]
+        self._telegram_config: dict[str, Any] = shared_state["telegram_config"]
         self._notification_chat_id: int | None = shared_state.get(
-            "notification_chat_id", None
+            "notification_chat_id"
         )
 
         # Subsystem references
@@ -443,7 +443,7 @@ class QuadBotCommands:
             else:
                 # Show all tracked symbols
                 config = self._config
-                symbols = config.get("trading", {}).get("underlyings", ["BTCUSDT", "ETHUSDT"])
+                symbols = config["trading"]["underlyings"]
                 lines = ["💰 *Funding Rates*\n"]
                 lines.append("```\n" f"{'Symbol':<12} {'Rate':>10} {'Countdown':>14} {'Mark Price':>12}")
                 lines.append("-" * 52)
@@ -544,9 +544,10 @@ class QuadBotCommands:
         self._log.info("cmd_leverage", user=update.effective_user.id)
 
         try:
-            trading_config = self._config.get("trading", {})
-            default_leverage = trading_config.get("leverage", 1)
-            max_leverage = trading_config.get("max_leverage", 20)
+            trading_config = self._config["trading"]
+            risk_config = self._config["risk"]
+            default_leverage = trading_config.get("leverage")
+            max_leverage = risk_config.get("max_leverage")
 
             if not context.args:
                 msg = (
@@ -605,8 +606,8 @@ class QuadBotCommands:
         self._log.info("cmd_position_mode", user=update.effective_user.id)
 
         try:
-            trading_config = self._config.get("trading", {})
-            current_mode = trading_config.get("position_mode", "one_way")
+            trading_config = self._config["trading"]
+            current_mode = trading_config.get("position_mode")
 
             if not context.args:
                 msg = (
@@ -650,8 +651,8 @@ class QuadBotCommands:
         self._log.info("cmd_liquidation_warnings", user=update.effective_user.id)
 
         try:
-            trading_config = self._config.get("trading", {})
-            min_distance = float(trading_config.get("min_distance_to_liquidation_pct", 0.2))
+            risk_config = self._config["risk"]
+            min_distance = float(risk_config.get("min_distance_to_liquidation_pct"))
 
             exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None) if self._orchestrator else None
             if exchange_adapter is None:
@@ -724,7 +725,7 @@ class QuadBotCommands:
 
         try:
             config = self._config
-            symbols = config.get("trading", {}).get("underlyings", ["BTCUSDT", "ETHUSDT"])
+            symbols = config["trading"]["underlyings"]
 
             positive_count = 0
             negative_count = 0
@@ -936,7 +937,7 @@ class QuadBotCommands:
             funding_info = ""
             if self._market_data_engine is not None:
                 try:
-                    symbols = self._config.get("trading", {}).get("underlyings", ["BTCUSDT", "ETHUSDT"])
+                    symbols = self._config["trading"]["underlyings"]
                     fr_lines = []
                     for sym in symbols:
                         fr = await self._market_data_engine.get_funding_rate(sym)
@@ -955,7 +956,7 @@ class QuadBotCommands:
                 if exchange_adapter is not None:
                     positions = await exchange_adapter.get_positions()
                     at_risk = 0
-                    min_distance_config = float(self._config.get("trading", {}).get("min_distance_to_liquidation_pct", 0.2))
+                    min_distance_config = float(self._config["risk"]["min_distance_to_liquidation_pct"])
                     for pos in (positions or []):
                         mark = float(getattr(pos, "mark_price", getattr(pos, "current_price", 0)))
                         liq = float(getattr(pos, "liquidation_price", 0))
@@ -1049,17 +1050,17 @@ class QuadBotCommands:
 
             # Fallback: show key settings
             config = self._config
-            mode = config.get("_mode", "binance")
-            dry_run = config.get("_dry_run", True)
-            exchange_name = config.get("exchange", {}).get("name", "binance")
-            testnet = config.get("exchange", {}).get("testnet", True)
-            default_strategy = config.get("trading", {}).get("default_strategy", "trend_following")
-            max_positions = config.get("risk", {},).get("max_positions", 5)
-            max_position_size = config.get("risk", {}).get("max_portfolio_risk_pct", 10.0)
-            daily_loss = config.get("risk", {}).get("max_daily_loss_usd", 500)
-            leverage = config.get("trading", {}).get("leverage", 1)
-            margin_mode = config.get("trading", {}).get("margin_mode", "isolated")
-            position_mode = config.get("trading", {}).get("position_mode", "one_way")
+            mode = config.get("_mode")
+            dry_run = config.get("_dry_run")
+            exchange_name = config["exchange"]["name"]
+            testnet = config["exchange"]["testnet"]
+            default_strategy = config["trading"]["default_strategy"]
+            max_positions = config["risk"]["max_positions"]
+            max_position_size = config["risk"]["max_portfolio_risk_pct"]
+            daily_loss = config["risk"]["max_daily_loss_usd"]
+            leverage = config["trading"]["leverage"]
+            margin_mode = config["trading"]["margin_mode"]
+            position_mode = config["trading"]["position_mode"]
 
             msg = (
                 "⚙️ *Current Settings*\n\n"
@@ -1206,11 +1207,8 @@ class QuadBotCommands:
             # Gather market data for configured underlyings
             from quad.ai import analyze_market
 
-            underlyings = ["BTCUSDT", "ETHUSDT"]
             config = self._config
-            configured = config.get("trading", {}).get("underlyings", None)
-            if configured:
-                underlyings = list(configured)
+            underlyings = list(config["trading"]["underlyings"])
 
             results: list[str] = []
             for underlying in underlyings:
@@ -1279,7 +1277,7 @@ class QuadBotCommands:
 
             # Get data for the first configured underlying
             config = self._config
-            underlyings = config.get("trading", {}).get("underlyings", ["BTCUSDT"])
+            underlyings = config["trading"]["underlyings"]
             underlying = list(underlyings)[0] if underlyings else "BTCUSDT"
 
             mark_price = await self._market_data_engine.get_mark_price(underlying)
@@ -1425,9 +1423,7 @@ class QuadBotCommands:
 
         try:
             # Use orchestrator's AI cycle infrastructure
-            underlyings = self._config.get("trading", {}).get(
-                "underlyings", ["BTCUSDT", "ETHUSDT"]
-            )
+            underlyings = self._config["trading"]["underlyings"]
 
             # Need the exchange adapter from orchestrator
             exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None)

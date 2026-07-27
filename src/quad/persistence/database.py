@@ -54,12 +54,12 @@ class DatabaseManager:
         self._min_pool_size = (
             min_pool_size
             if min_pool_size is not None
-            else int(self._db_config.get("persistence", {}).get("min_pool_size", 1))
+            else int(self._db_config["persistence"]["database"]["min_pool_size"])
         )
         self._max_pool_size = (
             max_pool_size
             if max_pool_size is not None
-            else int(self._db_config.get("persistence", {}).get("max_pool_size", 5))
+            else int(self._db_config["persistence"]["database"]["max_pool_size"])
         )
         self._pool: Optional[asyncpg.Pool] = None
         self._log = logger.bind(dsn=self._mask_dsn(dsn))
@@ -127,14 +127,15 @@ class DatabaseManager:
             ssl=bool(ssl),
         )
 
-        connect_retry_count = int(self._db_config.get("persistence", {}).get("connect_retry_count", 5))
+        connect_retry_count = int(self._db_config["persistence"]["database"]["connect_retry_count"])
+
         for attempt in range(1, connect_retry_count + 1):
             try:
                 self._pool = await asyncpg.create_pool(
                     dsn=self._dsn,
                     min_size=self._min_pool_size,
                     max_size=self._max_pool_size,
-                    command_timeout=int(self._db_config.get("persistence", {}).get("command_timeout", 60)),
+                    command_timeout=int(self._db_config["persistence"]["database"]["command_timeout_seconds"]),
                     ssl=ssl,
                 )
                 break
@@ -146,7 +147,7 @@ class DatabaseManager:
                         error=str(exc),
                     )
                     raise
-                backoff_base = float(self._db_config.get("persistence", {}).get("backoff_base_seconds", 2.0))
+                backoff_base = 2.0
                 sleep_secs = backoff_base ** (attempt - 1)  # exponential backoff
                 self._log.warning(
                     "connect_retry",

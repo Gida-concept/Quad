@@ -4,7 +4,7 @@ Computes optimal position size based on historical win rate, average
 win/loss ratio, a fractional Kelly multiplier, leverage adjustment,
 and absolute portfolio limits.
 
-All default values are sourced from ``config.default.yaml`` and the
+All default values are sourced from ``config.yaml`` and the
 Pydantic schema. This module only contains inline fallbacks as a
 last resort — they match the canonical defaults and are never used
 when the config system is properly set up.
@@ -47,34 +47,33 @@ class PositionSizer:
         self._log = structlog.get_logger(__name__)
         self._db = db_manager
 
-        raw = config.get("risk", config)
-        self._cfg: dict[str, Any] = raw if isinstance(raw, dict) else config
+        self._cfg: dict[str, Any] = config["risk"]
 
         # Sizing parameters — read from config dict with inline fallbacks
-        # that match config.default.yaml / schema.py defaults.
+        # that match config.yaml / schema.py defaults.
         self._kelly_multiplier = float(
-            self._cfg.get("kelly", {}).get("fraction", 0.25)
+            self._cfg["kelly"]["fraction"]
         )
         self._default_fraction = float(
-            self._cfg.get("kelly", {}).get("default_fraction", 0.02)
+            self._cfg["kelly"]["default_fraction"]
         )
         self._max_pos_pct = float(
-            self._cfg.get("max_position_size_pct", 0.10)
+            self._cfg["max_position_size_pct"]
         )
         self._max_pos_usd = Decimal(
-            str(self._cfg.get("max_position_size_usd", 10000))
+            str(self._cfg["max_position_size_usd"])
         )
         self._max_leverage = int(
-            self._cfg.get("max_leverage", 50)
+            self._cfg["max_leverage"]
         )
         self._min_pos_usd = Decimal(
-            str(self._cfg.get("min_position_size_usd", 5))
+            str(self._cfg["min_position_size_usd"])
         )
         self._trade_capital_usd = Decimal(
-            str(self._cfg.get("trade_capital_usd", 5))
+            str(self._cfg["trade_capital_usd"])
         )
         self._sl_enabled = bool(
-            self._cfg.get("per_position_sl", {}).get("enabled", True)
+            self._cfg["per_position_sl"]["enabled"]
         )
 
     # ------------------------------------------------------------------
@@ -335,8 +334,8 @@ class PositionSizer:
             Maximum position size in USD notional. ``Decimal("Infinity")``
             if per-position SL is disabled.
         """
-        risk_cfg = self._cfg.get("per_position_sl", {})
-        sl_enabled = risk_cfg.get("enabled", True)
+        risk_cfg = self._cfg["per_position_sl"]
+        sl_enabled = risk_cfg["enabled"]
         if not sl_enabled:
             return Decimal("Infinity")
 

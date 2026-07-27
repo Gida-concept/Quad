@@ -406,7 +406,7 @@ class StrategyBase(ABC):
         """Return the unique machine-readable name for this strategy.
 
         Returns:
-            Lowercase snake_case identifier, e.g. 'covered_call'.
+            Lowercase snake_case identifier, e.g. 'trend_following'.
         """
         ...
 
@@ -444,7 +444,7 @@ class StrategyRegistry:
         """Get a strategy class by its registered name.
 
         Args:
-            name: Strategy name (e.g. 'covered_call').
+            name: Strategy name (e.g. 'trend_following').
 
         Returns:
             The strategy class, or None if not found.

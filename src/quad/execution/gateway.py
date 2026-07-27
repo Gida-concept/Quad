@@ -85,7 +85,7 @@ class OrderGateway:
         self._log = structlog.get_logger(__name__)
         self._exchange = exchange_adapter
         self._config = config or {}
-        self._gateway_config = self._config.get("exchange", {}).get("gateway", {})
+        self._gateway_config = self._config["exchange"]["gateway"]
 
         self._active_orders: dict[str, Order] = {}
         self._completed_ids: deque[str] = deque(maxlen=self._completed_ids_maxlen)
@@ -97,19 +97,19 @@ class OrderGateway:
 
     @property
     def _confirmation_timeout(self) -> float:
-        return float(self._gateway_config.get("confirmation_timeout_seconds", 30.0))
+        return float(self._gateway_config["confirmation_timeout_seconds"])
 
     @property
     def _max_retries(self) -> int:
-        return int(self._gateway_config.get("max_retries", 3))
+        return int(self._gateway_config["max_retries"])
 
     @property
     def _completed_ids_maxlen(self) -> int:
-        return int(self._gateway_config.get("completed_ids_maxlen", 1000))
+        return int(self._gateway_config["completed_ids_maxlen"])
 
     @property
     def _backoff_base(self) -> float:
-        return float(self._gateway_config.get("backoff_base_seconds", 2.0))
+        return float(self._gateway_config["backoff_base_seconds"])
 
     # ------------------------------------------------------------------
     # Public API

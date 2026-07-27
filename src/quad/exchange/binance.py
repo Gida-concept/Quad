@@ -79,20 +79,6 @@ _WS_TESTNET_BASE_URL = "wss://stream.binancefuture.com"
 _HEADER_USED_WEIGHT = "X-MBX-USED-WEIGHT-"
 _HEADER_ORDER_COUNT = "X-MBX-ORDER-COUNT-"
 
-_RATE_LIMIT_WARN_THRESHOLD = 0.80
-_RATE_LIMIT_HARD_THRESHOLD = 0.95
-
-_WS_BASE_BACKOFF_S = 1.0
-_WS_MAX_BACKOFF_S = 30.0
-_WS_BACKOFF_MULTIPLIER = 2.0
-_WS_JITTER_FACTOR = 0.1
-_WS_MAX_RETRIES = 10
-
-_LISTEN_KEY_REFRESH_S = 55 * 60
-
-_REQUEST_TIMEOUT_S = 30
-_CONNECT_TIMEOUT_S = 10
-
 # ---------------------------------------------------------------------------
 # Custom Exceptions
 # ---------------------------------------------------------------------------
@@ -164,27 +150,27 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         )
         self._testnet: bool = testnet
         self._config = config or {}
-        self._exchange_config = self._config.get("exchange", {})
-        self._binance_config = self._exchange_config.get("binance", {})
+        self._exchange_config = self._config["exchange"]
+        self._binance_config = self._exchange_config["binance"]
         self._recv_window: int = (
             recv_window if recv_window is not None
-            else int(self._binance_config.get("recv_window", 5000))
+            else int(self._binance_config["recv_window"])
         )
 
         # Resolve base URLs
         self._rest_base: str = (
-            self._binance_config.get("testnet_base_url", _TESTNET_BASE_URL) if testnet
-            else self._binance_config.get("base_url", _BASE_URL)
+            self._binance_config["testnet_base_url"] if testnet
+            else self._binance_config["base_url"]
         )
         self._ws_base: str = (
-            self._binance_config.get("ws_testnet_base_url", _WS_TESTNET_BASE_URL) if testnet
-            else self._binance_config.get("ws_base_url", _WS_BASE_URL)
+            self._binance_config["ws_testnet_base_url"] if testnet
+            else self._binance_config["ws_base_url"]
         )
 
         # Rate-limit tracking
         rl = rate_limit or {}
-        self._max_weight: int = int(rl.get("max_weight", 2000))
-        self._max_orders: int = int(rl.get("max_orders", 900))
+        self._max_weight: int = int(rl.get("max_weight"))
+        self._max_orders: int = int(rl.get("max_orders"))
         self._used_weight: int = 0
         self._used_orders: int = 0
         self._rate_limit_paused: bool = False
@@ -229,8 +215,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
         # Create aiohttp session
         timeout = aiohttp.ClientTimeout(
-            total=int(self._binance_config.get("request_timeout_seconds", _REQUEST_TIMEOUT_S)),
-            connect=int(self._binance_config.get("connect_timeout_seconds", _CONNECT_TIMEOUT_S)),
+            total=int(self._binance_config["request_timeout_seconds"]),
+            connect=int(self._binance_config["connect_timeout_seconds"]),
         )
         self._session = aiohttp.ClientSession(
             timeout=timeout,
@@ -483,7 +469,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         if request.price_protect:
             params["priceProtect"] = "true"
 
-        params["newOrderRespType"] = self._binance_config.get("new_order_resp_type", "ACK")
+        params["newOrderRespType"] = self._binance_config["new_order_resp_type"]
 
         data = await self._request("POST", "/fapi/v1/order", data=params)
 
@@ -849,9 +835,9 @@ class BinanceFuturesAdapter(ExchangeAdapter):
     ) -> Any:
         """Execute a REST API request with retry and rate-limit handling."""
         if max_retries is None:
-            max_retries = int(self._binance_config.get("max_retries", 3))
+            max_retries = int(self._binance_config["max_retries"])
         retry_backoff_base = float(
-            self._binance_config.get("retry_backoff_base", 2.0)
+            self._binance_config["retry_backoff_base"]
         )
 
         if self._session is None or self._session.closed:
@@ -960,7 +946,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
     def _update_rate_limits(self, headers: Any) -> None:
         """Update rate-limit counters from response headers."""
         used_weight_str = headers.get(
-            self._binance_config.get("header_used_weight", _HEADER_USED_WEIGHT), ""
+            self._binance_config.get("header_used_weight"), ""
         )
         if used_weight_str:
             try:
@@ -969,7 +955,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                 pass
 
         order_count_str = headers.get(
-            self._binance_config.get("header_order_count", _HEADER_ORDER_COUNT), ""
+            self._binance_config.get("header_order_count"), ""
         )
         if order_count_str:
             try:
@@ -988,7 +974,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             else 0
         )
 
-        if weight_pct >= float(self._binance_config.get("rate_limit_warn_threshold", _RATE_LIMIT_WARN_THRESHOLD)):
+        if weight_pct >= float(self._binance_config.get("rate_limit_warn_threshold")):
             self._log.warning(
                 "rate_limit_approaching",
                 used_weight=self._used_weight,
@@ -996,7 +982,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                 pct=f"{weight_pct:.1%}",
             )
 
-        if order_pct >= float(self._binance_config.get("rate_limit_warn_threshold", _RATE_LIMIT_WARN_THRESHOLD)):
+        if order_pct >= float(self._binance_config.get("rate_limit_warn_threshold")):
             self._log.warning(
                 "order_limit_approaching",
                 used_orders=self._used_orders,
@@ -1010,7 +996,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         try:
             return float(raw)
         except (ValueError, TypeError):
-            return float(self._binance_config.get("retry_after_fallback_seconds", 5.0))
+            return float(self._binance_config.get("retry_after_fallback_seconds"))
 
     def _handle_rate_limit(self, retry_after: float) -> None:
         """Handle a 429 rate-limit response."""
@@ -1026,8 +1012,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
     async def _wait_if_rate_limited(self) -> None:
         """Wait if the rate-limit pause is active."""
         if not self._rate_limit_paused:
-            if self._used_weight >= self._max_weight * float(self._binance_config.get("rate_limit_hard_threshold", _RATE_LIMIT_HARD_THRESHOLD)):
-                wait = float(self._binance_config.get("rate_limiter_wait_seconds", 1.0))
+            if self._used_weight >= self._max_weight * float(self._binance_config.get("rate_limit_hard_threshold")):
+                wait = float(self._binance_config.get("rate_limiter_wait_seconds"))
                 self._log.warning(
                     "rate_limit_throttling",
                     used_weight=self._used_weight,
@@ -1090,7 +1076,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                 ws_url = f"{self._ws_base}/ws/{stream_name}"
                 async with self._session.ws_connect(
                     ws_url,
-                    heartbeat=float(self._binance_config.get("heartbeat_seconds", 30.0)),
+                    heartbeat=float(self._binance_config["heartbeat_seconds"]),
                     autoclose=False,
                 ) as ws:
                     self._ws_connections[stream_name] = ws
@@ -1124,7 +1110,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                     break
 
                 retries += 1
-                if retries > int(self._binance_config.get("ws_max_retries", _WS_MAX_RETRIES)):
+                if retries > int(self._binance_config.get("ws_max_retries")):
                     self._log.error(
                         "ws_max_retries_reached",
                         stream=stream_name,
@@ -1132,10 +1118,10 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                     )
                     break
 
-                ws_base_backoff = float(self._binance_config.get("ws_backoff_base_seconds", _WS_BASE_BACKOFF_S))
-                ws_backoff_mult = float(self._binance_config.get("ws_backoff_multiplier", _WS_BACKOFF_MULTIPLIER))
-                ws_max_backoff = float(self._binance_config.get("ws_backoff_max_seconds", _WS_MAX_BACKOFF_S))
-                ws_jitter = float(self._binance_config.get("ws_backoff_jitter_factor", _WS_JITTER_FACTOR))
+                ws_base_backoff = float(self._binance_config["ws_backoff_base_seconds"])
+                ws_backoff_mult = float(self._binance_config["ws_backoff_multiplier"])
+                ws_max_backoff = float(self._binance_config["ws_backoff_max_seconds"])
+                ws_jitter = float(self._binance_config["ws_backoff_jitter_factor"])
 
                 backoff = min(
                     ws_base_backoff
@@ -1343,7 +1329,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             ws_url = f"{self._ws_base}/ws/{self._listen_key}"
             ws = await self._session.ws_connect(
                 ws_url,
-                heartbeat=float(self._binance_config.get("heartbeat_seconds", 30.0)),
+                heartbeat=float(self._binance_config["heartbeat_seconds"]),
                 autoclose=False,
             )
             self._ws_connections["user_data"] = ws
@@ -1364,7 +1350,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         while not self._stop_event.is_set():
             try:
                 await asyncio.sleep(
-                    int(self._binance_config.get("listen_key_refresh_seconds", _LISTEN_KEY_REFRESH_S))
+                    int(self._binance_config["listen_key_refresh_seconds"])
                 )
                 await self._request(
                     "PUT",

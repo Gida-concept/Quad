@@ -25,7 +25,7 @@ logger = structlog.get_logger(__name__)
 
 _STRATEGY_CATALOG = """
 Available strategies:
-- swing_trading: EMA crossover + ADX filter. Best in trending markets with strong momentum (ADX > 25).
+- trend_following: EMA crossover + ADX filter. Best in trending markets with strong momentum (ADX > 25).
 """
 
 _STRATEGIST_SYSTEM = (

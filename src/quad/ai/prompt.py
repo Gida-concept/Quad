@@ -47,7 +47,7 @@ You MUST respond with valid JSON only. No markdown, no explanation outside the J
   "symbol": "BTCUSDT" or null,
   "quantity": 0.001-10 or null,
   "price": 0.0 or null (limit price),
-  "strategy": "swing_trading" | null,
+  "strategy": "trend_following" | null,
   "confidence": 0.0-1.0,
   "risk_checks": {
     "position_size_ok": true/false,
@@ -268,21 +268,20 @@ def build_trading_prompt(
     -------
     dict with keys ``"system"`` and ``"user"``.
     """
-    cfg = config or {}
-    ai_cfg = AiConfig.model_validate(cfg.get("ai", {}))
-    prompt_cfg = ai_cfg.model_dump().get("prompt", {}) if hasattr(ai_cfg, "model_dump") else cfg.get("ai", {}).get("prompt", {})
+    ai_cfg = AiConfig.model_validate(config.get("ai"))
+    prompt_cfg = ai_cfg.model_dump()["prompt"]
 
     # Build system prompt from template with config values
     system_prompt = ai_cfg.system_prompt_override or _SYSTEM_PROMPT_TEMPLATE.format(
-        max_liquidation_pct=prompt_cfg.get("max_liquidation_pct", 50),
-        funding_period_hours=prompt_cfg.get("funding_period_hours", 8),
-        funding_rate_example=prompt_cfg.get("funding_rate_example", 0.01),
-        funding_annual_example=prompt_cfg.get("funding_annual_example", 11),
+        max_liquidation_pct=prompt_cfg.get("max_liquidation_pct"),
+        funding_period_hours=prompt_cfg.get("funding_period_hours"),
+        funding_rate_example=prompt_cfg.get("funding_rate_example"),
+        funding_annual_example=prompt_cfg.get("funding_annual_example"),
     )
 
     # Order book depth and candle count from prompt config
-    order_book_depth = prompt_cfg.get("order_book_depth", 5)
-    max_candles = prompt_cfg.get("max_candles", 20)
+    order_book_depth = prompt_cfg.get("order_book_depth")
+    max_candles = prompt_cfg.get("max_candles")
 
     # Build user prompt sections
     sections: list[str] = [
@@ -328,15 +327,15 @@ def build_trading_prompt(
 
     # Risk context
     sections.append("## Risk Parameters")
-    risk_cfg = cfg.get("risk", {})
-    trading_cfg = cfg.get("trading", {})
-    sections.append(f"Max Position Size: {risk_cfg.get('max_position_size', prompt_cfg.get('risk_max_position_size', 5))} units")
-    sections.append(f"Max Portfolio Risk: {risk_cfg.get('max_portfolio_risk_pct', prompt_cfg.get('risk_max_portfolio_risk_pct', 10))}%")
-    sections.append(f"Max Daily Loss: ${risk_cfg.get('max_daily_loss_usd', prompt_cfg.get('risk_max_daily_loss_usd', 500)):,.2f}")
-    sections.append(f"Max Leverage: {trading_cfg.get('max_leverage', prompt_cfg.get('risk_max_leverage', 20))}x")
-    sections.append(f"Min Distance to Liquidation: {trading_cfg.get('min_distance_to_liquidation_pct', prompt_cfg.get('risk_min_distance_to_liquidation_pct', 0.2)) * 100:.0f}%")
-    sections.append(f"Max Funding Rate Cost: {trading_cfg.get('max_funding_rate_cost', prompt_cfg.get('risk_max_funding_rate_cost', 0.001)) * 100:.2f}%")
-    sections.append(f"Max Drawdown: {risk_cfg.get('max_drawdown_pct', prompt_cfg.get('risk_max_drawdown_pct', 20))}%")
+    risk_cfg = config.get("risk")
+    trading_cfg = config.get("trading")
+    sections.append(f"Max Position Size: {risk_cfg.get('max_position_size')} units")
+    sections.append(f"Max Portfolio Risk: {risk_cfg.get('max_portfolio_risk_pct')}%")
+    sections.append(f"Max Daily Loss: ${risk_cfg.get('max_daily_loss_usd'):,.2f}")
+    sections.append(f"Max Leverage: {trading_cfg.get('max_leverage')}x")
+    sections.append(f"Min Distance to Liquidation: {trading_cfg['min_distance_to_liquidation_pct'] * 100:.0f}%")
+    sections.append(f"Max Funding Rate Cost: {trading_cfg['max_funding_rate_cost'] * 100:.2f}%")
+    sections.append(f"Max Drawdown: {risk_cfg.get('max_drawdown_pct')}%")
     sections.append("")
 
     sections.append("## Decision Required")

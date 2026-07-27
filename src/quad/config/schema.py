@@ -7,13 +7,14 @@ monitoring, and strategy sections.
 Usage:
     from quad.config.schema import validate_config
 
-    with open("config/config.default.yaml") as f:
+    with open("config/config.yaml") as f:
         raw = yaml.safe_load(f)
     is_valid, errors = validate_config(raw)
 """
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -27,11 +28,11 @@ class TradingConfig(BaseModel):
     """Configuration for trading behavior and parameters."""
 
     default_strategy: str = Field(
-        default="swing_trading",
+        default="trend_following",
         description="Default strategy name for the bot",
     )
     max_positions: int = Field(
-        default=10,
+        default=5,
         ge=1,
         le=100,
         description="Maximum number of concurrent positions",
@@ -49,16 +50,6 @@ class TradingConfig(BaseModel):
     underlyings: list[str] = Field(
         default_factory=lambda: ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"],
         description="List of underlying assets the bot monitors",
-    )
-    indicator_cache_ttl_seconds: int = Field(
-        default=60,
-        ge=1,
-        le=3600,
-        description="TTL in seconds for cached indicator values",
-    )
-    serial_trade_mode: bool = Field(
-        default=False,
-        description="When True, close all existing positions before opening a new ENTER trade",
     )
     leverage: int = Field(default=1, ge=1, le=125)
     margin_mode: str = Field(default="isolated")
@@ -99,17 +90,6 @@ class RateLimitConfig(BaseModel):
         ge=10,
         le=1200,
         description="Maximum orders per second",
-    )
-
-
-class WebSocketConfig(BaseModel):
-    """WebSocket connection configuration."""
-
-    ping_interval: int = Field(
-        default=30,
-        ge=5,
-        le=300,
-        description="Seconds between WebSocket keep-alive pings",
     )
 
 
@@ -208,6 +188,10 @@ class BinanceConfig(BaseModel):
         default=5.0, ge=1.0,
         description="Fallback retry-after seconds when header is missing",
     )
+    retry_backoff_base: float = Field(
+        default=2.0, ge=0.1,
+        description="Exponential retry backoff base in seconds for REST API requests",
+    )
 
 
 class OrderGatewayConfig(BaseModel):
@@ -224,6 +208,10 @@ class OrderGatewayConfig(BaseModel):
     completed_ids_maxlen: int = Field(
         default=1000, ge=100,
         description="Max completed order IDs to track (ring buffer)",
+    )
+    backoff_base_seconds: float = Field(
+        default=2.0, ge=0.1,
+        description="Base exponential backoff in seconds for order retries",
     )
 
 
@@ -266,10 +254,6 @@ class ExchangeConfig(BaseModel):
     rate_limit: RateLimitConfig = Field(
         default_factory=RateLimitConfig,
         description="Rate limiting configuration",
-    )
-    websocket: WebSocketConfig = Field(
-        default_factory=WebSocketConfig,
-        description="WebSocket configuration",
     )
     binance: BinanceConfig = Field(
         default_factory=BinanceConfig,
@@ -472,6 +456,10 @@ class RiskConfig(BaseModel):
         default=0.2, ge=0.0, le=1.0,
         description="Minimum distance to liquidation (decimal) before blocking trades",
     )
+    funding_rate_periods: int = Field(
+        default=3, ge=1,
+        description="Number of funding periods (8h each) to use for projected cost checks",
+    )
     max_funding_rate_cost: float = Field(
         default=0.001, ge=0.0,
         description="Maximum acceptable funding rate cost per position",
@@ -479,12 +467,6 @@ class RiskConfig(BaseModel):
     max_position_concentration: float = Field(
         default=0.4, ge=0.0, le=1.0,
         description="Maximum position concentration as fraction of portfolio",
-    )
-    concentration_limit_pct: float = Field(
-        default=30.0,
-        ge=0.0,
-        le=100.0,
-        description="Max percentage of portfolio in a single underlying",
     )
     max_funding_rate: float = Field(
         default=0.001, ge=0.0, description="Max acceptable funding rate"
@@ -547,28 +529,19 @@ class CacheTTLConfig(BaseModel):
         le=3600,
         description="Order book cache TTL in seconds",
     )
-    underlying_price: int = Field(
-        default=5,
-        ge=1,
-        le=60,
-        description="Underlying price cache TTL in seconds",
-    )
     funding_rate: int = Field(
         default=10, ge=1, le=3600, description="Funding rate cache TTL in seconds"
     )
     mark_price: int = Field(
         default=2, ge=1, le=60, description="Mark price cache TTL in seconds"
     )
-
-
-class HistoricalConfig(BaseModel):
-    """Historical data access configuration."""
-
-    max_days: int = Field(
-        default=90,
-        ge=1,
-        le=365,
-        description="Max days of historical data to cache",
+    open_interest: int = Field(
+        default=3600, ge=60, le=86400,
+        description="Open interest cache TTL in seconds",
+    )
+    order_book_limit: int = Field(
+        default=20, ge=5, le=100,
+        description="Max order book snapshot depth to cache",
     )
 
 
@@ -579,13 +552,26 @@ class MarketDataEngineConfig(BaseModel):
         default=10.0, ge=1.0,
         description="Max seconds to wait for market data engine shutdown",
     )
-    buffer_max_ticks_default: int = Field(
-        default=1000, ge=100,
-        description="Default max ticks per symbol for the engine",
+
+
+class MarketDataBackoffConfig(BaseModel):
+    """WebSocket reconnection backoff parameters."""
+
+    base_seconds: float = Field(
+        default=1.0, ge=0.1,
+        description="Initial WebSocket reconnection backoff in seconds",
     )
-    cache_ttl_default: int = Field(
-        default=60, ge=1, le=3600,
-        description="Default cache TTL in seconds for the engine",
+    max_seconds: float = Field(
+        default=30.0, ge=1.0,
+        description="Maximum WebSocket reconnection backoff in seconds",
+    )
+    multiplier: float = Field(
+        default=2.0, ge=1.0,
+        description="WebSocket backoff multiplier per retry",
+    )
+    jitter_fraction: float = Field(
+        default=0.1, ge=0.0, le=1.0,
+        description="WebSocket backoff jitter fraction",
     )
 
 
@@ -596,21 +582,9 @@ class MarketDataWebSocketConfig(BaseModel):
         default="wss://fstream.binance.com/ws",
         description="Market data WebSocket base URL",
     )
-    backoff_base_seconds: float = Field(
-        default=1.0, ge=0.1,
-        description="Initial WebSocket reconnection backoff in seconds",
-    )
-    backoff_max_seconds: float = Field(
-        default=30.0, ge=1.0,
-        description="Maximum WebSocket reconnection backoff in seconds",
-    )
-    backoff_multiplier: float = Field(
-        default=2.0, ge=1.0,
-        description="WebSocket backoff multiplier per retry",
-    )
-    backoff_jitter_fraction: float = Field(
-        default=0.1, ge=0.0, le=1.0,
-        description="WebSocket backoff jitter fraction",
+    backoff: MarketDataBackoffConfig = Field(
+        default_factory=MarketDataBackoffConfig,
+        description="WebSocket reconnection backoff parameters",
     )
     heartbeat_interval_seconds: float = Field(
         default=30.0, ge=5.0,
@@ -629,10 +603,6 @@ class MarketDataConfig(BaseModel):
         default_factory=CacheTTLConfig,
         description="Cache TTL values in seconds",
     )
-    historical: HistoricalConfig = Field(
-        default_factory=HistoricalConfig,
-        description="Historical data configuration",
-    )
     engine: MarketDataEngineConfig = Field(
         default_factory=MarketDataEngineConfig,
         description="Market data engine lifecycle parameters",
@@ -646,23 +616,6 @@ class MarketDataConfig(BaseModel):
 # ============================================================================
 # Persistence Section
 # ============================================================================
-
-class BackupConfig(BaseModel):
-    """Database backup configuration."""
-
-    enabled: bool = Field(default=True, description="Enable automatic backups")
-    interval: int = Field(
-        default=3600,
-        ge=60,
-        description="Seconds between automatic backups",
-    )
-    max_count: int = Field(
-        default=24,
-        ge=1,
-        le=365,
-        description="Maximum number of backup files to retain",
-    )
-
 
 class DatabasePoolConfig(BaseModel):
     """Database connection pool and retry parameters."""
@@ -692,87 +645,10 @@ class PersistenceConfig(BaseModel):
         default="${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}",
         description="PostgreSQL connection DSN",
     )
-    snapshot_interval: int = Field(
-        default=60,
-        ge=5,
-        le=86400,
-        description="Seconds between database snapshots",
-    )
-    backup: BackupConfig = Field(
-        default_factory=BackupConfig,
-        description="Backup configuration",
-    )
     database: DatabasePoolConfig = Field(
         default_factory=DatabasePoolConfig,
         description="Database connection pool configuration",
     )
-
-
-# ============================================================================
-# Logging Section
-# ============================================================================
-
-class LogFileConfig(BaseModel):
-    """Log file output configuration."""
-
-    enabled: bool = Field(default=True, description="Enable file logging")
-    path: str = Field(
-        default="${QUAD_LOG_DIR:-./data}/quad.log",
-        description="Log file path",
-    )
-    max_size_mb: int = Field(
-        default=100,
-        ge=1,
-        le=1024,
-        description="Maximum log file size in MB before rotation",
-    )
-    backup_count: int = Field(
-        default=10,
-        ge=0,
-        le=100,
-        description="Number of rotated log files to retain",
-    )
-
-
-class LoggingConfig(BaseModel):
-    """Logging configuration."""
-
-    level: str = Field(
-        default="INFO",
-        description="Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL",
-    )
-    format: str = Field(
-        default="json",
-        description="Log output format: json or console",
-    )
-    file: LogFileConfig = Field(
-        default_factory=LogFileConfig,
-        description="File logging configuration",
-    )
-
-    @field_validator("level")
-    @classmethod
-    def validate_level(cls, value: str) -> str:
-        """Validate log level is a standard Python logging level."""
-        allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-        upper = value.upper()
-        if upper not in allowed:
-            raise ValueError(
-                f"log level must be one of {allowed}, got '{value}'"
-            )
-        return upper
-
-    @field_validator("format")
-    @classmethod
-    def validate_format(cls, value: str) -> str:
-        """Validate log format is supported."""
-        allowed = {"json", "console"}
-        lower = value.lower()
-        if lower not in allowed:
-            raise ValueError(
-                f"log format must be one of {allowed}, got '{value}'"
-            )
-        return lower
 
 
 # ============================================================================
@@ -799,6 +675,24 @@ class TelegramJobIntervalsConfig(BaseModel):
         description="Interval in seconds for liquidation warning job",
     )
 
+    # First-run delays — how long after bot startup before each job fires
+    status_summary_first_seconds: int = Field(
+        default=60, ge=0,
+        description="Seconds before first status summary job fires",
+    )
+    risk_alert_first_seconds: int = Field(
+        default=120, ge=0,
+        description="Seconds before first risk alert job fires",
+    )
+    funding_rate_countdown_first_seconds: int = Field(
+        default=300, ge=0,
+        description="Seconds before first funding rate countdown job fires",
+    )
+    liquidation_warning_first_seconds: int = Field(
+        default=180, ge=0,
+        description="Seconds before first liquidation warning job fires",
+    )
+
 
 class TelegramDailyReportConfig(BaseModel):
     """Daily report scheduling for the Telegram bot."""
@@ -820,16 +714,16 @@ class TelegramFundingCostReportConfig(BaseModel):
         default=22, ge=0, le=23,
         description="Hour (UTC) for funding cost report",
     )
+    minute: int = Field(
+        default=0, ge=0, le=59,
+        description="Minute for funding cost report",
+    )
 
 
 class TelegramConfig(BaseModel):
     """Telegram bot integration configuration."""
 
     enabled: bool = Field(default=True, description="Enable Telegram bot")
-    polling: bool = Field(
-        default=True,
-        description="Use long-polling (true) or webhook (false)",
-    )
     job_intervals: TelegramJobIntervalsConfig = Field(
         default_factory=TelegramJobIntervalsConfig,
         description="Bot job interval configuration",
@@ -891,27 +785,6 @@ class MonitoringConfig(BaseModel):
 # Strategy Section
 # ============================================================================
 
-class SwingTradingParams(BaseModel):
-    """Swing trading strategy parameters using RSI/MACD/volume filters."""
-
-    enabled: bool = False
-    rsi_period: int = Field(default=14, ge=1, le=50, description="RSI calculation period")
-    rsi_oversold: int = Field(default=30, ge=1, le=100, description="RSI oversold threshold")
-    rsi_overbought: int = Field(default=70, ge=1, le=100, description="RSI overbought threshold")
-    macd_fast: int = Field(default=12, ge=1, le=200, description="MACD fast EMA period")
-    macd_slow: int = Field(default=26, ge=1, le=200, description="MACD slow EMA period")
-    macd_signal: int = Field(default=9, ge=1, le=50, description="MACD signal line period")
-    volume_sma_period: int = Field(default=20, ge=1, le=200, description="Volume SMA period")
-    volume_multiplier: float = Field(default=1.5, ge=1.0, le=10.0, description="Volume multiplier for confirmation")
-    max_position_size_usd: float = Field(default=1000.0, ge=1.0, description="Max position size in USD")
-    trade_capital_usd: int = Field(default=5, ge=1, description="Capital per trade in USD")
-    leverage: int = Field(default=50, ge=1, le=125, description="Position leverage")
-    sl_capital_pct: float = Field(default=30.0, ge=0.0, le=100.0, description="Stop-loss as percentage of trade capital")
-    tp_capital_pct: float = Field(default=50.0, ge=0.0, le=100.0, description="Take-profit as percentage of trade capital")
-    confidence_default: float = Field(default=0.7, ge=0.0, le=1.0, description="Default confidence for signals")
-    confidence_high: float = Field(default=0.9, ge=0.0, le=1.0, description="High confidence for strong signals")
-
-
 class TrendFollowingParams(BaseModel):
     """Trend-following strategy parameters using EMA crossover + ADX filter."""
 
@@ -932,29 +805,38 @@ class TrendFollowingParams(BaseModel):
     confidence_high: float = Field(default=0.9, ge=0.0, le=1.0, description="High confidence for strong signals")
 
 
+class RateLimiterConfig(BaseModel):
+    """Rate limiter sliding window configuration for the Groq API."""
+
+    window_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Rate limiter sliding window in seconds (default 24h)",
+    )
+    warning_level_1: int = Field(
+        default=800,
+        ge=1,
+        description="First rate-limit warning level (number of requests)",
+    )
+    warning_level_2: int = Field(
+        default=900,
+        ge=1,
+        description="Second rate-limit warning level (number of requests)",
+    )
+    warning_level_3: int = Field(
+        default=950,
+        ge=1,
+        description="Third rate-limit warning level (number of requests)",
+    )
+
+
 class GroqClientConfig(BaseModel):
     """Groq LLM client configuration.
 
-    Controls fallback model selection, request parameters, retry/backoff,
-    rate-limiter warning levels, and fallback action logic.
+    Controls retry/backoff, rate-limiter warning levels, and fallback
+    action logic.
     """
 
-    fallback_model: str = Field(
-        default="llama-3.1-8b-instant",
-        description="Fallback Groq model when primary is unavailable",
-    )
-    max_tokens_default: int = Field(
-        default=1024,
-        ge=64,
-        le=8192,
-        description="Default max tokens for Groq chat completions",
-    )
-    temperature_default: float = Field(
-        default=0.3,
-        ge=0.0,
-        le=2.0,
-        description="Default temperature for Groq chat completions",
-    )
     timeout_seconds: float = Field(
         default=30.0,
         ge=5.0,
@@ -971,25 +853,9 @@ class GroqClientConfig(BaseModel):
         ge=0.1,
         description="Base backoff in seconds for Groq API retry",
     )
-    rate_limiter_window_seconds: int = Field(
-        default=86400,
-        ge=60,
-        description="Rate limiter sliding window in seconds (default 24h)",
-    )
-    rate_limiter_warning_level_1: int = Field(
-        default=800,
-        ge=1,
-        description="First rate-limit warning level (number of requests)",
-    )
-    rate_limiter_warning_level_2: int = Field(
-        default=900,
-        ge=1,
-        description="Second rate-limit warning level (number of requests)",
-    )
-    rate_limiter_warning_level_3: int = Field(
-        default=950,
-        ge=1,
-        description="Third rate-limit warning level (number of requests)",
+    rate_limiter: RateLimiterConfig = Field(
+        default_factory=RateLimiterConfig,
+        description="Groq API rate limiter configuration",
     )
     valid_actions: list[str] = Field(
         default_factory=lambda: ["ENTER", "EXIT", "HOLD"],
@@ -1010,35 +876,11 @@ class PromptBuilderConfig(BaseModel):
         le=50,
         description="Order book depth levels to include in prompts",
     )
-    max_candles_compact: int = Field(
+    max_candles: int = Field(
         default=20,
         ge=1,
         le=100,
         description="Max candles for compact display in prompts",
-    )
-    system_risk_max_portfolio_pct: float = Field(
-        default=50.0,
-        ge=0.0,
-        le=100.0,
-        description="System prompt risk parameter: max portfolio at risk %",
-    )
-    system_max_hold_hours: int = Field(
-        default=8,
-        ge=1,
-        le=168,
-        description="System prompt risk parameter: max position hold hours",
-    )
-    system_stop_loss_pct: float = Field(
-        default=0.01,
-        ge=0.0,
-        le=1.0,
-        description="System prompt risk parameter: stop-loss %",
-    )
-    system_min_funding_rate_pct: float = Field(
-        default=11.0,
-        ge=0.0,
-        le=100.0,
-        description="System prompt risk parameter: funding rate threshold %",
     )
 
 
@@ -1069,19 +911,23 @@ class AiConfig(BaseModel):
         le=2.0,
         description="LLM sampling temperature",
     )
+    max_tokens: int = Field(
+        default=2048,
+        ge=64,
+        le=8192,
+        description="Default max tokens for AI chat completions",
+    )
+    default_confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Default confidence value when AI decision does not provide one",
+    )
     max_requests_per_day: int = Field(
         default=950,
         ge=1,
         le=10000,
         description="Maximum LLM API requests per day",
-    )
-    fallback_on_error: bool = Field(
-        default=True,
-        description="Fall back to rule-based signals on LLM error",
-    )
-    structured_output: bool = Field(
-        default=True,
-        description="Request structured JSON output from the LLM",
     )
     pairs: list[str] = Field(
         default_factory=lambda: ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"],
@@ -1096,11 +942,6 @@ class AiConfig(BaseModel):
         ge=50,
         le=1000,
         description="Number of historical candles per analysis",
-    )
-    min_open_interest: int = Field(
-        default=50,
-        ge=0,
-        description="Minimum open interest (USD) for symbol inclusion",
     )
     system_prompt_override: str | None = Field(
         default=None,
@@ -1171,6 +1012,12 @@ class RetrainConfig(BaseModel):
         ge=1,
         le=90,
         description="Days between optimisation runs",
+    )
+    initial_delay_hours: int = Field(
+        default=1,
+        ge=0,
+        le=168,
+        description="Hours to wait after bot startup before first optimisation run",
     )
     min_trades_for_analysis: int = Field(
         default=10,
@@ -1245,6 +1092,42 @@ class ExecutionConfig(BaseModel):
         default=False,
         description="Default post-only flag for orders",
     )
+    twap: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "min_slices": 3,
+            "max_slices": 10,
+            "jitter_seconds": 5,
+            "min_slice_quantity": 0.01,
+            "fill_urgency_threshold": 0.8,
+        },
+        description="TWAP slicer parameters (min_slices, max_slices, etc.)",
+    )
+
+
+# ============================================================================
+# Backtesting Section
+# ============================================================================
+
+
+class BacktestConfig(BaseModel):
+    """Backtest engine simulation parameters."""
+
+    starting_capital: float = Field(
+        default=10000.0, ge=100.0,
+        description="Starting capital for backtest simulations in USD",
+    )
+    commission_pct: float = Field(
+        default=0.001, ge=0.0, le=0.1,
+        description="Commission as a fraction of trade value per side",
+    )
+    slippage_pct: float = Field(
+        default=0.0005, ge=0.0, le=0.1,
+        description="Slippage as a fraction of price per fill",
+    )
+    max_trades_per_day: int = Field(
+        default=10, ge=1, le=1000,
+        description="Maximum trades per day in simulation",
+    )
 
 
 # ============================================================================
@@ -1286,10 +1169,6 @@ class QuadConfig(BaseModel):
         default_factory=PersistenceConfig,
         description="Database persistence configuration",
     )
-    logging: LoggingConfig = Field(
-        default_factory=LoggingConfig,
-        description="Logging configuration",
-    )
     telegram: TelegramConfig = Field(
         default_factory=TelegramConfig,
         description="Telegram bot configuration",
@@ -1306,13 +1185,18 @@ class QuadConfig(BaseModel):
         default_factory=MonitoringConfig,
         description="Monitoring and health check configuration",
     )
+    backtesting: BacktestConfig = Field(
+        default_factory=BacktestConfig,
+        description="Backtest engine simulation parameters",
+    )
     strategy: dict[str, Any] = Field(
         default_factory=lambda: {
-            "swing_trading": SwingTradingParams().model_dump(),
             "trend_following": TrendFollowingParams().model_dump(),
         },
         description="Strategy-specific parameters",
     )
+
+    model_config = {"extra": "allow"}
 
 
 # ============================================================================
