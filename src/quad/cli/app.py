@@ -199,7 +199,7 @@ def risk(
     print(f"  Max Daily Loss:            ${risk_config['max_daily_loss_usd']}")
     print(f"  Max Drawdown:              {risk_config['max_drawdown_pct']}%")
     print(f"  Min Liquidation Distance:  {float(risk_config['min_distance_to_liquidation_pct']):.0%}")
-    print(f"  Max Funding Rate:          {float(risk_config['max_funding_rate']):.4%}")
+    print(f"  Max Funding Rate Cost:     {float(risk_config['max_funding_rate_cost']):.4%}")
     print(f"  Max Position Concentration: {risk_config['max_position_concentration']:.0%}")
     print("=" * 50)
     print()

@@ -1090,7 +1090,7 @@ class QuadBotCommands:
 
         Usage: /set <key> <value>
         Example: /set trading.leverage 5
-        Example: /set risk.max_funding_rate 0.001
+        Example: /set risk.max_funding_rate_cost 0.001
         Example: /set risk.max_drawdown_pct 15
         """
         self._log.info("cmd_set", user=update.effective_user.id, args=context.args)
@@ -1100,7 +1100,7 @@ class QuadBotCommands:
                 "Usage: `/set <config.key.path> <value>`\n\n"
                 "Examples:\n"
                 "`/set trading.leverage 5`\n"
-                "`/set risk.max_funding_rate 0.001`\n"
+                "`/set risk.max_funding_rate_cost 0.001`\n"
                 "`/set risk.max_drawdown_pct 15`\n"
                 "`/set trading.margin_mode isolated`\n"
                 "`/set trading.position_mode one_way`\n"

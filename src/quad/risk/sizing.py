@@ -69,9 +69,11 @@ class PositionSizer:
         self._min_pos_usd = Decimal(
             str(self._cfg["min_position_size_usd"])
         )
-        self._trade_capital_usd = Decimal(
-            str(self._cfg["trade_capital_usd"])
-        )
+        # Read trade_capital_usd from strategy section (single source of truth)
+        trade_capital = config.get("strategy", {}).get(
+            "trend_following", {}
+        ).get("trade_capital_usd", 5)
+        self._trade_capital_usd = Decimal(str(trade_capital))
         self._sl_enabled = bool(
             self._cfg["per_position_sl"]["enabled"]
         )

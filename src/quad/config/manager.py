@@ -40,15 +40,13 @@ logger = structlog.get_logger(__name__)
 # Environment variables that map directly to config keys.
 # These define the authoritative mapping for well-known env vars.
 ENV_VAR_MAP: dict[str, str] = {
-    "QUAD_LOG_LEVEL": "logging.level",
-    "QUAD_LOG_FORMAT": "logging.format",
-    "QUAD_LOG_FILE": "logging.file.path",
     "QUAD_HEALTH_PORT": "monitoring.health_server.port",
     "QUAD_MODE": "_mode",
     "QUAD_DRY_RUN": "_dry_run",
     "QUAD_DEFAULT_STRATEGY": "trading.default_strategy",
     "QUAD_MAX_CYCLE_INTERVAL": "trading.max_cycle_interval",
     "QUAD_DSN": "persistence.dsn",
+    "QUAD_CONFIG_DIR": "config_dir",
     "BINANCE_API_KEY": "exchange.api_key",
     "BINANCE_API_SECRET": "exchange.api_secret",
     "BINANCE_TESTNET": "exchange.testnet",
@@ -60,7 +58,6 @@ ENV_VAR_MAP: dict[str, str] = {
     "QUAD_TRADINGVIEW_WEBHOOK_ENABLED": "tradingview_webhook.enabled",
     "QUAD_TRADINGVIEW_WEBHOOK_PORT": "tradingview_webhook.port",
     "QUAD_TRADINGVIEW_WEBHOOK_SECRET": "tradingview_webhook.secret",
-    "QUAD_CONFIG_PATH": "_config_path",
 }
 
 # Default config directory search order

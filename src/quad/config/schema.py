@@ -31,12 +31,6 @@ class TradingConfig(BaseModel):
         default="trend_following",
         description="Default strategy name for the bot",
     )
-    max_positions: int = Field(
-        default=5,
-        ge=1,
-        le=100,
-        description="Maximum number of concurrent positions",
-    )
     max_cycle_interval: int = Field(
         default=60,
         ge=1,
@@ -286,19 +280,12 @@ class ExchangeConfig(BaseModel):
 
 class DailyLossBreakerConfig(BaseModel):
     """Daily loss circuit breaker configuration."""
-
-    max_loss_usd: float = Field(
-        default=500.0, ge=0.0, description="Max daily loss in USD before breaker triggers"
-    )
+    pass
 
 
 class DrawdownBreakerConfig(BaseModel):
     """Drawdown circuit breaker configuration."""
-
-    max_drawdown_pct: float = Field(
-        default=25.0, ge=0.0, le=100.0,
-        description="Max drawdown percentage before breaker triggers",
-    )
+    pass
 
 
 class ConsecutiveLossesBreakerConfig(BaseModel):
@@ -313,7 +300,7 @@ class ConsecutiveLossesBreakerConfig(BaseModel):
 class LiquidationCascadeBreakerConfig(BaseModel):
     """Liquidation cascade circuit breaker configuration."""
 
-    min_distance_to_liquidation_pct: float = Field(
+    min_cascade_distance_pct: float = Field(
         default=0.05, ge=0.0, le=1.0,
         description="Minimum distance to liquidation (decimal) before cascade risk",
     )
@@ -423,7 +410,7 @@ class RiskConfig(BaseModel):
     """Risk management thresholds and limits."""
 
     max_positions: int = Field(
-        default=5, ge=1, le=100,
+        default=1, ge=1, le=100,
         description="Maximum number of concurrent positions",
     )
     max_position_size: float = Field(
@@ -468,14 +455,10 @@ class RiskConfig(BaseModel):
         default=0.4, ge=0.0, le=1.0,
         description="Maximum position concentration as fraction of portfolio",
     )
-    max_funding_rate: float = Field(
-        default=0.001, ge=0.0, description="Max acceptable funding rate"
-    )
     min_position_size_usd: float = Field(
         default=10.0, ge=0.0,
         description="Minimum position size in USD",
     )
-    trade_capital_usd: int = Field(default=5, ge=1, le=100000, description="Capital per trade in USD (same as trading.trade_capital_usd)")
     max_position_size_pct: float = Field(
         default=0.10, ge=0.0, le=1.0,
         description="Maximum position size as fraction of portfolio",
@@ -796,10 +779,7 @@ class TrendFollowingParams(BaseModel):
     atr_period: int = Field(default=14, ge=1, le=50, description="ATR calculation period")
     atr_multiplier_stop: float = Field(default=3.0, ge=0.5, le=10.0, description="ATR multiplier for trailing stop")
     atr_default_pct: float = Field(default=0.02, ge=0.001, le=0.5, description="Default ATR as fraction of price")
-    max_position_size_usd: float = Field(default=1000.0, ge=1.0, description="Max position size in USD")
     trade_capital_usd: int = Field(default=5, ge=1, description="Capital per trade in USD")
-    leverage: int = Field(default=50, ge=1, le=125, description="Position leverage")
-    sl_capital_pct: float = Field(default=30.0, ge=0.0, le=100.0, description="Stop-loss as percentage of trade capital")
     tp_capital_pct: float = Field(default=50.0, ge=0.0, le=100.0, description="Take-profit as percentage of trade capital")
     confidence_default: float = Field(default=0.7, ge=0.0, le=1.0, description="Default confidence for signals")
     confidence_high: float = Field(default=0.9, ge=0.0, le=1.0, description="High confidence for strong signals")
@@ -891,6 +871,10 @@ class PromptBuilderConfig(BaseModel):
 class AiConfig(BaseModel):
     """AI-driven trading analysis and signal generation configuration."""
 
+    api_key: str | None = Field(
+        default=None,
+        description="Groq API key (overrides GROQ_API_KEY env var)",
+    )
     enabled: bool = Field(
         default=True,
         description="Enable AI-driven trading analysis",

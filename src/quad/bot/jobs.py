@@ -301,13 +301,13 @@ class QuadBotJobs:
         """Check funding rates and alert if any exceed the max threshold.
 
         Runs every 30 minutes.  Alerts if funding rate exceeds the configured
-        ``risk.max_funding_rate`` threshold.
+        ``risk.max_funding_rate_cost`` threshold.
         """
         if self._market_data_engine is None:
             return
 
         try:
-            max_rate = float(self._config["risk"]["max_funding_rate"])
+            max_rate = float(self._config["risk"]["max_funding_rate_cost"])
             symbols = self._config["trading"]["underlyings"]
 
             alerts: list[str] = []

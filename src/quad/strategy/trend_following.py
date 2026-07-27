@@ -46,10 +46,7 @@ class TrendFollowingStrategy(StrategyBase):
             ParamSpec(name="atr_period", type="int", default=14, description="ATR calculation period"),
             ParamSpec(name="atr_multiplier_stop", type="float", default=3.0, description="ATR multiplier for trailing stop"),
             ParamSpec(name="atr_default_pct", type="float", default=0.02, description="Default ATR as fraction of price"),
-            ParamSpec(name="max_position_size_usd", type="float", default=1000.0, description="Max position size in USD"),
             ParamSpec(name="trade_capital_usd", type="int", default=5, description="Capital per trade in USD"),
-            ParamSpec(name="leverage", type="int", default=50, description="Position leverage"),
-            ParamSpec(name="sl_capital_pct", type="float", default=30.0, description="Stop-loss as percentage of trade capital"),
             ParamSpec(name="tp_capital_pct", type="float", default=50.0, description="Take-profit as percentage of trade capital"),
             ParamSpec(name="confidence_default", type="float", default=0.7, description="Default confidence for signals"),
             ParamSpec(name="confidence_high", type="float", default=0.9, description="High confidence for strong signals"),
@@ -129,10 +126,11 @@ class TrendFollowingStrategy(StrategyBase):
         slow_ema = ema_data.get("slow", 0)
 
         trade_capital = int(self.get_param("trade_capital_usd", 5))
-        sl_pct = float(self.get_param("sl_capital_pct", 30.0))
+        sl_pct = float(self._config.get("risk", {}).get("per_position_sl", {}).get("capital_pct", 30.0))
         tp_pct = float(self.get_param("tp_capital_pct", 50.0))
-        leverage = int(self.get_param("leverage", 50))
-        max_pos_size = float(self.get_param("max_position_size_usd", 1000))
+        leverage = int(self._config.get("trading", {}).get("leverage", 50))
+        # Read absolute max position size from risk config (single source of truth)
+        max_pos_size = float(self._config.get("risk", {}).get("max_position_size_usd", 10000))
 
         # LONG: fast EMA > slow EMA + strong trend
         if fast_ema > slow_ema:

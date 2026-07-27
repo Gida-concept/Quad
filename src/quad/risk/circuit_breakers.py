@@ -292,7 +292,7 @@ class CircuitBreakerManager:
     def _check_daily_loss(self, daily_pnl: Decimal) -> None:
         """Tier 1: Trigger if daily PnL exceeds max loss. Auto-reset at UTC midnight."""
         breaker = self._breakers[DAILY_LOSS_BREAKER]
-        max_loss = self._cb_cfg["daily_loss"]["max_loss_usd"]
+        max_loss = self._cfg["max_daily_loss_usd"]
         max_loss_dec = Decimal(str(max_loss))
 
         now_utc_day = datetime.now(timezone.utc).timetuple().tm_yday
@@ -326,7 +326,7 @@ class CircuitBreakerManager:
     ) -> None:
         """Tier 2: Trigger if drawdown exceeds max. Auto-reset with hysteresis."""
         breaker = self._breakers[DRAWDOWN_BREAKER]
-        max_dd = self._cb_cfg["drawdown"]["max_drawdown_pct"]
+        max_dd = self._cfg["max_drawdown_pct"]
         max_dd_dec = Decimal(str(max_dd))
 
         # Update peak
@@ -399,7 +399,7 @@ class CircuitBreakerManager:
         """
         breaker = self._breakers[LIQUIDATION_CASCADE_BREAKER]
         cascade_cfg = self._cb_cfg["liquidation_cascade"]
-        min_distance = float(str(cascade_cfg["min_distance_to_liquidation_pct"]))
+        min_distance = float(str(cascade_cfg["min_cascade_distance_pct"]))
 
         # Collect current symbols that are near liquidation
         current_near: set[str] = set()
@@ -569,8 +569,6 @@ class CircuitBreakerManager:
         """Create initial circuit breaker instances from config."""
         cb_cfg = self._cb_cfg
 
-        daily_loss_cfg = cb_cfg["daily_loss"]
-        drawdown_cfg = cb_cfg["drawdown"]
         consec_cfg = cb_cfg["consecutive_losses"]
         cascade_cfg = cb_cfg["liquidation_cascade"]
         spike_cfg = cb_cfg["funding_rate_spike"]
@@ -581,14 +579,14 @@ class CircuitBreakerManager:
                 name=DAILY_LOSS_BREAKER,
                 tier=1,
                 auto_reset=True,
-                threshold=Decimal(str(daily_loss_cfg["max_loss_usd"])),
+                threshold=Decimal(str(self._cfg["max_daily_loss_usd"])),
                 hysteresis=Decimal("0"),
             ),
             DRAWDOWN_BREAKER: _CircuitBreaker(
                 name=DRAWDOWN_BREAKER,
                 tier=2,
                 auto_reset=True,
-                threshold=Decimal(str(drawdown_cfg["max_drawdown_pct"])),
+                threshold=Decimal(str(self._cfg["max_drawdown_pct"])),
                 hysteresis=Decimal("5"),  # 5% hysteresis for recovery
             ),
             CONSECUTIVE_LOSS_BREAKER: _CircuitBreaker(
@@ -606,7 +604,7 @@ class CircuitBreakerManager:
                 name=LIQUIDATION_CASCADE_BREAKER,
                 tier=1,
                 auto_reset=True,
-                threshold=Decimal(str(cascade_cfg["min_distance_to_liquidation_pct"])),
+                threshold=Decimal(str(cascade_cfg["min_cascade_distance_pct"])),
             ),
             FUNDING_RATE_SPIKE_BREAKER: _CircuitBreaker(
                 name=FUNDING_RATE_SPIKE_BREAKER,

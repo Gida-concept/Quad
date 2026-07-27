@@ -22,9 +22,6 @@ trading:
   # Default strategy to use when bot starts (must match a registered strategy)
   default_strategy: "trend_following"
 
-  # Maximum number of concurrent positions across all strategies
-  max_positions: 5
-
   # Seconds between trading analysis cycles (deterministic fallback)
   max_cycle_interval: 3600
 
@@ -71,34 +68,15 @@ exchange:
     ws_base_url: "wss://fstream.binance.com/ws"
     ws_testnet_base_url: "wss://stream.binancefuture.com/ws"
     # Rate limit header keys
-    header_used_weight: "X-MBX-USED-WEIGHT-"
-    header_order_count: "X-MBX-ORDER-COUNT-"
-    # Rate limit thresholds (fraction of max weight)
     rate_limit_warn_threshold: 0.80
     rate_limit_hard_threshold: 0.95
     # WebSocket reconnection backoff (flat keys)
-    ws_backoff_base_seconds: 1.0
-    ws_backoff_max_seconds: 30.0
-    ws_backoff_multiplier: 2.0
-    ws_backoff_jitter_factor: 0.1
     ws_max_retries: 10
     # Listen key refresh interval (seconds)
     listen_key_refresh_seconds: 3300
     # Request timeouts
     request_timeout_seconds: 30.0
     connect_timeout_seconds: 10.0
-    # Default signed-request receive window (ms)
-    recv_window: 5000
-    # WebSocket heartbeat
-    heartbeat_seconds: 30.0
-    # REST API max retries
-    max_retries: 3
-    # newOrderRespType parameter
-    new_order_resp_type: "ACK"
-    # Rate limiter throttle wait (seconds)
-    rate_limiter_wait_seconds: 1.0
-    # Fallback retry-after when header missing (seconds)
-    retry_after_fallback_seconds: 5.0
     # Exponential retry backoff base (seconds)
     retry_backoff_base: 2.0
 
@@ -143,9 +121,6 @@ risk:
   # Maximum position concentration as a fraction of portfolio (0.0 to 1.0)
   max_position_concentration: 0.4
 
-  # Maximum acceptable funding rate
-  max_funding_rate: 0.001
-
   # Maximum position size in USD
   max_position_size: 1000.0
 
@@ -170,21 +145,13 @@ risk:
     # Drawdown percentage tiers that trigger escalating responses
     drawdown_tiers: [5.0, 10.0, 15.0]
 
-    # Daily loss breaker
-    daily_loss:
-      max_loss_usd: 500
-
-    # Drawdown breaker
-    drawdown:
-      max_drawdown_pct: 25
-
     # Consecutive losses breaker
     consecutive_losses:
       max_consecutive: 5
 
     # Liquidation cascade breaker
     liquidation_cascade:
-      min_distance_to_liquidation_pct: 0.05
+      min_cascade_distance_pct: 0.05
 
     # Funding rate spike breaker
     funding_rate_spike:
@@ -317,18 +284,6 @@ ai:
   # Enable Groq AI analysis features
   enabled: true
 
-  # Groq model to use for chat completions
-  model: "llama-3.3-70b-versatile"
-
-  # Request timeout in seconds
-  timeout: 30
-
-  # Sampling temperature for LLM responses (0.0 = deterministic)
-  temperature: 0.0
-
-  # Maximum daily Groq API requests
-  max_requests_per_day: 950
-
   # Pairs and timeframes monitored by the AI analysis
   pairs:
     - "BTCUSDT"
@@ -372,11 +327,8 @@ ai:
 # TradingView Webhook Settings
 # ---------------------------------------------------------------------------
 tradingview_webhook:
-  # Enable webhook receiver endpoint
+  # Enable webhook receiver endpoint (port defaults to health server port)
   enabled: false
-
-  # Port override (defaults to health server port if not set)
-  port: 9090
 
   # Shared secret for authenticating webhook payloads
   secret: ""
@@ -387,7 +339,6 @@ tradingview_webhook:
 monitoring:
   # Built-in HTTP health check server
   health_server:
-    enabled: true
     # Port for the health check HTTP server
     port: 9090
     # Bind address
@@ -414,10 +365,7 @@ strategy:
     atr_period: 14
     atr_multiplier_stop: 3.0
     atr_default_pct: 0.02
-    max_position_size_usd: 1000.0
     trade_capital_usd: 5
-    leverage: 50
-    sl_capital_pct: 30.0
     tp_capital_pct: 50.0
     confidence_default: 0.7
     confidence_high: 0.9
