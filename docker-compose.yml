@@ -5,7 +5,6 @@
 # Environment variables are read from the host shell (or .env file).
 # =============================================================================
 
-version: "3.8"
 
 services:
   postgres:
@@ -16,8 +15,8 @@ services:
       POSTGRES_USER: quad
       POSTGRES_PASSWORD: quad
       POSTGRES_DB: quad
-    ports:
-      - "5432:5432"
+    # No host port mapping — internal docker network only (avoids conflicts with platform postgres)
+    # expose: - "5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
