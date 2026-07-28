@@ -503,9 +503,11 @@ class GroqClient:
                 decision[key] = "HOLD" if key == "action" else "Missing field"
 
         # Ensure action is one of the expected values
-        valid_actions = set(self._groq_config.get("valid_actions"))
-        default_action = self._groq_config.get("default_action")
-        fallback_action = self._groq_config.get("fallback_action")
+        # NOTE: explicit fallback defaults protect against missing config keys;
+        # Pydantic normally provides them but the raw dict may not always have them.
+        valid_actions = set(self._groq_config.get("valid_actions", ["ENTER", "EXIT", "HOLD"]))
+        default_action = self._groq_config.get("default_action", "HOLD")
+        fallback_action = self._groq_config.get("fallback_action", "HOLD")
         action = decision.get("action", default_action)
         if action not in valid_actions:
             self._log.warning(

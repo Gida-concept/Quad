@@ -11,9 +11,11 @@ QuadBot
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -157,10 +159,33 @@ class QuadBot:
         # Register jobs
         self._setup_jobs()
 
-        # Start polling
+        # Start polling with retry for "Conflict: terminated by other getUpdates request"
+        # Telegram Bot API only allows ONE long-polling getUpdates connection per token.
+        # When a Docker container restarts, the old connection may still be active
+        # on Telegram's server for a few seconds, causing this conflict.
+        # The retry with exponential backoff lets the old connection time out.
         await self._application.initialize()
         await self._application.start()
-        await self._application.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
+        max_polling_retries = 3
+        polling_retry_delay = 2.0
+
+        for polling_attempt in range(max_polling_retries):
+            try:
+                await self._application.updater.start_polling(  # type: ignore[union-attr]
+                    drop_pending_updates=True,
+                )
+                break
+            except TelegramError as exc:
+                if "Conflict" in str(exc) and polling_attempt < max_polling_retries - 1:
+                    wait = polling_retry_delay * (2**polling_attempt)
+                    self._log.warning(
+                        "polling_conflict_retrying",
+                        attempt=polling_attempt + 1,
+                        wait_s=wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise
 
         self._log.info("bot_started")
 

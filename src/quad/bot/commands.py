@@ -23,6 +23,21 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.warnings import PTBUserWarning
+
+# ---------------------------------------------------------------------------
+# Suppress benign PTBUserWarning about per_message=False with CallbackQueryHandler
+# in ConversationHandler. This warning is informational -- it tells you that
+# with per_message=False (the default), CallbackQueryHandler handlers won't be
+# tracked per-message. For our callback-only execute flow this is the correct
+# behavior, so the warning is harmless.
+# ---------------------------------------------------------------------------
+
+warnings.filterwarnings(
+    "ignore",
+    message="If 'per_message=False'",
+    category=PTBUserWarning,
+)
 
 # ---------------------------------------------------------------------------
 # Conversation states for /execute
@@ -1668,10 +1683,6 @@ class QuadBotCommands:
                 await query.answer()
                 await query.edit_message_text("✅ Execution cancelled.")
             return ConversationHandler.END
-
-        # Suppress the benign PTBUserWarning about per_message=False.
-        # This warning is harmless for our callback-only flow.
-        warnings.filterwarnings("ignore", message="If 'per_message=False'")
 
         return ConversationHandler(
             entry_points=[CommandHandler("execute", execute_start)],
