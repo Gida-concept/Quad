@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import os
 import time
 from collections import deque
@@ -63,6 +64,28 @@ _FALLBACK_MODEL = "llama-3.1-8b-instant"
 
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.3
+
+
+# ---------------------------------------------------------------------------
+# Safe JSON parsing for LLM responses
+# ---------------------------------------------------------------------------
+
+
+def safe_parse_ai_response(raw: str) -> str:
+    """Clean AI response text to extract valid JSON string.
+
+    Handles markdown code fences and partial / incomplete JSON wrapping
+    that the LLM occasionally returns (e.g. only ``"reasoning"`` without
+    the enclosing braces).
+
+    Returns a clean JSON string ready for ``json.loads``.
+    """
+    cleaned = re.sub(r"```json|```", "", raw).strip()
+    if not cleaned.startswith("{"):
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group()
+    return cleaned
 
 
 # ============================================================================
@@ -434,30 +457,12 @@ class GroqClient:
     def _parse_trading_decision(self, raw: str) -> dict[str, Any]:
         """Parse the LLM response into a structured trading decision dict.
 
-        Attempts to extract JSON from the response (handles markdown code
-        fences) and validates required top-level keys.
+        Uses ``safe_parse_ai_response`` to clean the raw text (handles
+        markdown code fences and partial / incomplete JSON wrapping), then
+        validates required top-level keys.
         """
-        text = raw.strip()
-
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            # Find the first { or [ to skip fence markers
-            first_brace = text.find("{")
-            last_brace = text.rfind("}")
-            if first_brace != -1 and last_brace != -1:
-                text = text[first_brace : last_brace + 1]
-            else:
-                # Try to find JSON after the fence
-                lines = text.split("\n")
-                cleaned: list[str] = []
-                for line in lines:
-                    stripped = line.strip()
-                    if stripped.startswith("```"):
-                        continue
-                    cleaned.append(line)
-                text = "\n".join(cleaned).strip()
-
         try:
+            text = safe_parse_ai_response(raw)
             decision: dict[str, Any] = json.loads(text)
             if not isinstance(decision, dict):
                 self._log.warning(

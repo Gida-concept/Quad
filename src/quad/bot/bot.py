@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 from telegram.error import TelegramError
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -146,9 +147,11 @@ class QuadBot:
         )
 
         # Build the application
+        request = HTTPXRequest(connect_timeout=10, read_timeout=30)
         app_builder: ApplicationBuilder = (
             Application.builder()
             .token(self._bot_token)
+            .request(request)
             .concurrent_updates(True)
         )
         self._application = app_builder.build()
