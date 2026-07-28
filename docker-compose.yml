@@ -48,7 +48,7 @@ services:
 
       # --- Telegram Bot (REQUIRED for Telegram commands) ---
       # These are required — fail fast with error message if missing
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
       - TELEGRAM_NOTIFICATION_CHAT_ID=${TELEGRAM_NOTIFICATION_CHAT_ID:-}
 
       # --- Timezone ---
