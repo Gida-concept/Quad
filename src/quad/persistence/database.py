@@ -27,6 +27,14 @@ logger = structlog.get_logger(__name__)
 
 _PARAM_RE = re.compile(r"\$(\d+)")
 
+# Regex to detect ALTER TABLE ... ADD COLUMN statements so we can check
+# whether the column already exists before running them (idempotent
+# migrations).  Group 1 = table name, Group 2 = column name.
+_ALTER_ADD_COL_RE = re.compile(
+    r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+(?:COLUMN\s+)?(\w+)\s+",
+    re.IGNORECASE,
+)
+
 
 def _rewrite_params(query: str, params: tuple) -> tuple[str, tuple | None]:
     """Convert PostgreSQL $N parameter style to SQLite ? style."""
@@ -364,6 +372,27 @@ class DatabaseManager:
                     if statements:
                         self._log.info("applying_migration", version=version)
                         for stmt in statements:
+                            # Idempotent ALTER TABLE: before adding a
+                            # column, check that it doesn't already exist.
+                            # This handles the case where initialize() has
+                            # already created the table with the column
+                            # included in the base DDL.
+                            m = _ALTER_ADD_COL_RE.match(stmt)
+                            if m:
+                                table_name, col_name = m.group(1), m.group(2)
+                                rows = await conn.fetch(
+                                    f"PRAGMA table_info({table_name})"
+                                )
+                                col_exists = any(
+                                    row[1] == col_name for row in rows
+                                )
+                                if col_exists:
+                                    self._log.debug(
+                                        "column_already_exists_skipping",
+                                        table=table_name,
+                                        column=col_name,
+                                    )
+                                    continue
                             await conn.execute(stmt)
 
                     # Record this version
