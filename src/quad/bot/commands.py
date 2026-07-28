@@ -1682,7 +1682,7 @@ class QuadBotCommands:
                 CallbackQueryHandler(execute_cancel, pattern=r"^exec_cancel$"),
                 CommandHandler("cancel", execute_cancel),
             ],
-            per_message=True,
+            per_chat=True,
         )
 
     # ------------------------------------------------------------------

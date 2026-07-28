@@ -224,7 +224,7 @@ async def collect_market_context(
         A snapshot dataclass with all collected data.
     """
     cfg = config or {}
-    ai_cfg = AiConfig.model_validate(cfg.get("ai"))
+    ai_cfg = AiConfig.model_validate(cfg.get("ai", {}))
 
     pairs: list[str] = list(ai_cfg.pairs)
     timeframes: list[str] = list(ai_cfg.timeframes)

@@ -460,6 +460,18 @@ class GroqClient:
 
         try:
             decision: dict[str, Any] = json.loads(text)
+            if not isinstance(decision, dict):
+                self._log.warning(
+                    "groq_decision_not_dict",
+                    type=type(decision).__name__,
+                    preview=str(decision)[:200],
+                )
+                return {
+                    "reasoning": f"LLM returned a {type(decision).__name__}, expected a JSON object",
+                    "action": "HOLD",
+                    "confidence": 0.0,
+                    "indicators": {},
+                }
         except json.JSONDecodeError as exc:
             self._log.error(
                 "groq_invalid_json",

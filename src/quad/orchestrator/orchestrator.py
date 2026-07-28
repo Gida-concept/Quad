@@ -626,7 +626,7 @@ class QuadOrchestrator:
     async def _init_groq_ai(self) -> None:
         """Initialise the Groq AI client (if API key is available)."""
         ai_cfg = AiConfig.model_validate(self._config_dict.get("ai"))
-        api_key = os.environ.get("GROQ_API_KEY") or self._config_dict["ai"].get("api_key")
+        api_key = os.environ.get("GROQ_API_KEY") or self._config_dict.get("ai", {}).get("api_key")
 
         if not api_key:
             self._log.info("groq_ai_disabled_no_key")
@@ -1352,7 +1352,7 @@ class QuadOrchestrator:
             ),
             reason=decision.get("reasoning", "AI trading decision"),
             # fallback matches AiConfig.default_confidence schema default
-            metadata={"ai_confidence": decision.get("confidence", self._config_dict["ai"]["default_confidence"])},
+            metadata={"ai_confidence": decision.get("confidence", self._config_dict.get("ai", {}).get("default_confidence", 0.8))},
         )
 
         # Risk check

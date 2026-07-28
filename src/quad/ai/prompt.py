@@ -268,7 +268,7 @@ def build_trading_prompt(
     -------
     dict with keys ``"system"`` and ``"user"``.
     """
-    ai_cfg = AiConfig.model_validate(config.get("ai"))
+    ai_cfg = AiConfig.model_validate(config.get("ai", {}))
     prompt_cfg = ai_cfg.model_dump()["prompt"]
 
     # Build system prompt from template with config values
@@ -327,14 +327,16 @@ def build_trading_prompt(
 
     # Risk context
     sections.append("## Risk Parameters")
-    risk_cfg = config.get("risk")
-    trading_cfg = config.get("trading")
+    risk_cfg = config.get("risk", {})
+    trading_cfg = config.get("trading", {})
     sections.append(f"Max Position Size: {risk_cfg.get('max_position_size')} units")
     sections.append(f"Max Portfolio Risk: {risk_cfg.get('max_portfolio_risk_pct')}%")
     sections.append(f"Max Daily Loss: ${risk_cfg.get('max_daily_loss_usd'):,.2f}")
     sections.append(f"Max Leverage: {trading_cfg.get('max_leverage')}x")
-    sections.append(f"Min Distance to Liquidation: {trading_cfg['min_distance_to_liquidation_pct'] * 100:.0f}%")
-    sections.append(f"Max Funding Rate Cost: {trading_cfg['max_funding_rate_cost'] * 100:.2f}%")
+    min_dist = trading_cfg.get('min_distance_to_liquidation_pct', 0.1)
+    sections.append(f"Min Distance to Liquidation: {min_dist * 100:.0f}%")
+    max_funding = trading_cfg.get('max_funding_rate_cost', 0.01)
+    sections.append(f"Max Funding Rate Cost: {max_funding * 100:.2f}%")
     sections.append(f"Max Drawdown: {risk_cfg.get('max_drawdown_pct')}%")
     sections.append("")
 

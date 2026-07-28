@@ -230,7 +230,11 @@ class Optimizer:
             if first != -1 and last != -1:
                 text = text[first : last + 1]
         try:
-            return json.loads(text)
+            result = json.loads(text)
+            if not isinstance(result, dict):
+                self._log.warning("optimization_result_not_dict", type=type(result).__name__)
+                return {"summary": {}, "recommendations": []}
+            return result
         except json.JSONDecodeError:
             self._log.warning("optimization_parse_failed", preview=raw[:300])
             return {"summary": {}, "recommendations": []}
