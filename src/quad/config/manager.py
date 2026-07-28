@@ -302,17 +302,30 @@ class ConfigManager:
     def _load_env_file(self) -> None:
         """Load .env file from the config directory or parent directories.
 
-        Uses ``dotenv.find_dotenv()`` to search upward from the config
-        directory, then ``dotenv.load_dotenv()`` to populate
-        ``os.environ``.
+        Searches for ``.env`` files (including ``.env.local`` for local
+        development overrides) using ``dotenv.find_dotenv()`` and explicit
+        path candidates.  Loaded into ``os.environ`` so that later
+        ``_apply_env_overrides()`` picks them up.
         """
-        env_path = find_dotenv(
-            filename=".env",
-            raise_error_if_not_found=False,
-            usecwd=False,
-        )
+        # First try .env.local (highest precedence for local development)
+        env_path: str | None = None
+        for candidate in (
+            self._config_dir / ".env.local",
+            self._config_dir.parent / ".env.local",
+            Path.cwd() / ".env.local",
+        ):
+            if candidate.exists():
+                env_path = str(candidate)
+                break
+
+        # Fall back to generic find_dotenv for .env
         if not env_path:
-            # Try specific paths
+            env_path = find_dotenv(
+                filename=".env",
+                raise_error_if_not_found=False,
+                usecwd=False,
+            )
+        if not env_path:
             for candidate in (
                 self._config_dir / ".env",
                 self._config_dir.parent / ".env",

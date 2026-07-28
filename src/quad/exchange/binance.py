@@ -198,6 +198,10 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         self._connected: bool = False
         self._stop_event: asyncio.Event = asyncio.Event()
 
+        # Server time offset (ms) — computed during connect() to compensate
+        # for container clock drift on shared hosting platforms.
+        self._time_offset: int = 0
+
     # ======================================================================
     # Lifecycle
     # ======================================================================
@@ -227,10 +231,12 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         try:
             await self._request("GET", "/fapi/v1/ping", signed=False)
             server_time = await self.get_server_time()
+            self._time_offset = server_time - int(time.time() * 1000)
             self._log.info(
                 "binance_futures_connected",
                 testnet=self._testnet,
                 server_time=server_time,
+                time_offset_ms=self._time_offset,
             )
         except Exception as exc:
             await self._safe_close_session()
@@ -808,12 +814,21 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         return headers
 
     def _sign_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Add authentication parameters and sign the request."""
-        params["timestamp"] = int(time.time() * 1000)
+        """Add authentication parameters and sign the request.
+
+        Binance HMAC verification uses the query string as-is. Both signing
+        and HTTP sending must use the *same* key ordering. aiohttp serialises
+        dict keys in insertion order, so we add parameters in that order and
+        sign over the same sequence without sorting.
+
+        Uses server time offset (computed during connect()) to compensate
+        for container clock drift on shared hosting platforms.
+        """
+        params["timestamp"] = int(time.time() * 1000) + self._time_offset
         params["recvWindow"] = self._recv_window
 
         query_string = "&".join(
-            f"{k}={v}" for k, v in sorted(params.items())
+            f"{k}={v}" for k, v in params.items()  # insertion order, NOT sorted
         )
 
         signature = hmac.new(
