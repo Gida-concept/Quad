@@ -647,6 +647,7 @@ class QuadOrchestrator:
             model=ai_cfg.model,
             timeout=ai_cfg.timeout,
             max_requests_per_day=ai_cfg.max_requests_per_day,
+            config=self._config_dict,
         )
 
         # Set AI cycle interval from config, defaulting to 1 hour

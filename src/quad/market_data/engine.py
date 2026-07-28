@@ -131,6 +131,7 @@ class MarketDataEngine:
         # Create sub-components
         self._buffer = PriceBuffer(
             max_ticks_per_symbol=self._market_data_config["buffer_sizes"]["ticks"],
+            config=self._config,
         )
         if self._db_manager is not None:
             self._historical = HistoricalDataProvider(
