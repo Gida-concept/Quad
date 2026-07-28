@@ -127,7 +127,7 @@ class DatabaseManager:
             ssl=bool(ssl),
         )
 
-        connect_retry_count = int(self._db_config["persistence"]["database"]["connect_retry_count"])
+        connect_retry_count = int(self._db_config.get("persistence", {}).get("database", {}).get("connect_retry_count", 5))
 
         for attempt in range(1, connect_retry_count + 1):
             try:
@@ -135,7 +135,7 @@ class DatabaseManager:
                     dsn=self._dsn,
                     min_size=self._min_pool_size,
                     max_size=self._max_pool_size,
-                    command_timeout=int(self._db_config["persistence"]["database"]["command_timeout_seconds"]),
+                    command_timeout=int(self._db_config.get("persistence", {}).get("database", {}).get("command_timeout_seconds", 60)),
                     ssl=ssl,
                 )
                 break

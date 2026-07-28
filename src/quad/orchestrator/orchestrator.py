@@ -374,6 +374,8 @@ class QuadOrchestrator:
 
         self._db_manager = DatabaseManager(
             dsn=str(dsn),
+            min_pool_size=1,
+            max_pool_size=5,
         )
         await self._db_manager.connect()
         await self._db_manager.initialize()
