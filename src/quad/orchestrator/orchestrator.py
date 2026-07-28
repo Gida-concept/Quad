@@ -1012,9 +1012,6 @@ class QuadOrchestrator:
                     self._metrics.set_gauge(
                         "active_strategies", float(len(self._active_strategies))
                     )
-                    self._metrics.set_gauge(
-                        "option_contracts_seen", float(len(all_chains))
-                    )
                     self._metrics.increment_counter("trading_cycles")
 
                     if ai_used:
