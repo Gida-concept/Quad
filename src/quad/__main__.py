@@ -20,9 +20,19 @@ def _configure_logging() -> None:
 
     Uses JSON format by default (configurable via ``QUAD_LOG_FORMAT``).
     Log level is set from ``QUAD_LOG_LEVEL`` (default ``INFO``).
+
+    On Windows, stdout/stderr are reconfigured to UTF-8 to work around
+    ConsoleRenderer emitting Unicode chars (box drawing, emoji) that
+    crash on cp1252.
     """
     log_level = os.environ.get("QUAD_LOG_LEVEL", "INFO").upper()
     log_format = os.environ.get("QUAD_LOG_FORMAT", "json").lower()
+
+    # Windows console encoding workaround
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
     processors = [
         structlog.stdlib.filter_by_level,

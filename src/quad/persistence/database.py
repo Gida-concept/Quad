@@ -1,45 +1,180 @@
 """Database manager for the Quad futures trading bot.
 
-Provides a production-grade async PostgreSQL wrapper built on asyncpg,
-with connection pooling, automatic migrations, backup stubs, and context
+Provides an async SQLite wrapper built on aiosqlite,
+with automatic migrations, backup stubs, and context
 manager support.
 """
 
 from __future__ import annotations
 
-import asyncio
+import re
 import time
-import urllib.parse
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-import asyncpg
+import aiosqlite
 import structlog
 
 from .models import ALL_MODELS, INDEX_DEFINITIONS, SCHEMA_MIGRATIONS, SCHEMA_VERSION, SCHEMA_VERSION_TABLE_DDL
 
 logger = structlog.get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# SQLite compatibility layer — translates asyncpg-style $N params to SQLite ?
+# ---------------------------------------------------------------------------
+
+_PARAM_RE = re.compile(r"\$(\d+)")
+
+
+def _rewrite_params(query: str, params: tuple) -> tuple[str, tuple | None]:
+    """Convert PostgreSQL $N parameter style to SQLite ? style."""
+    if not params:
+        return query, None
+    new_query = _PARAM_RE.sub("?", query)
+    return new_query, params
+
+
+class _SQLiteConnection:
+    """Wraps an aiosqlite connection to mimic asyncpg's Connection interface.
+
+    Provides fetch / fetchrow / fetchval / execute / transaction with
+    automatic $N to ? parameter translation so existing repository code
+    (written for PostgreSQL) works without changes.
+    """
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def fetch(self, query: str, *params: Any) -> list[Any]:
+        """Run a query and return all result rows (list of sqlite3.Row)."""
+        q, p = _rewrite_params(query, params)
+        cursor = await self._conn.execute(q, p or ())
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return rows
+
+    async def fetchrow(self, query: str, *params: Any) -> Any | None:
+        """Run a query and return the first result row, or None."""
+        q, p = _rewrite_params(query, params)
+        cursor = await self._conn.execute(q, p or ())
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row
+
+    async def fetchval(self, query: str, *params: Any) -> Any | None:
+        """Run a query and return the first column of the first row."""
+        q, p = _rewrite_params(query, params)
+        cursor = await self._conn.execute(q, p or ())
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row[0] if row else None
+
+    async def execute(self, query: str, *params: Any) -> str:
+        """Run a statement and return a status string (rowcount or "OK")."""
+        q, p = _rewrite_params(query, params)
+        cursor = await self._conn.execute(q, p or ())
+        rc = cursor.rowcount
+        await cursor.close()
+        return str(rc) if rc is not None and rc >= 0 else "OK"
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Context manager wrapping a BEGIN/COMMIT pair.
+
+        Rolls back on exception.
+        """
+        await self._conn.execute("BEGIN")
+        try:
+            yield
+            await self._conn.execute("COMMIT")
+        except Exception:
+            await self._conn.execute("ROLLBACK")
+            raise
+
+
+class _SQLitePool:
+    """Lightweight pool wrapper -- single aiosqlite connection.
+
+    SQLite does not benefit from multiple concurrent writers, so one
+    connection is sufficient.  acquire() returns a _SQLiteConnection
+    that proxies the underlying connection.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._conn: aiosqlite.Connection | None = None
+
+    def _ensure(self) -> aiosqlite.Connection:
+        """Open the connection if not already open (not async)."""
+        if self._conn is None:
+            self._conn = aiosqlite.connect(
+                self._db_path,
+                isolation_level=None,  # autocommit mode — explicit BEGIN/COMMIT
+            )
+        return self._conn
+
+    async def _init_connection(self) -> None:
+        """Await the connection (starts its background thread) and run PRAGMAs.
+
+        Must be called exactly once, before any execute() calls.
+        """
+        conn = self._ensure()
+        await conn  # start the background thread
+        if self._db_path != ":memory:":
+            await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA busy_timeout=5000")
+        await conn.execute("PRAGMA foreign_keys=ON")
+
+    @asynccontextmanager
+    async def acquire(self):
+        """Acquire a wrapped connection (context manager).
+
+        Initializes the connection on first call (starts the background
+        thread and runs PRAGMAs).  Subsequent calls reuse the same
+        underlying aiosqlite connection.
+        """
+        raw = self._ensure()
+        if not hasattr(self, "_inited"):
+            await self._init_connection()
+            self._inited = True  # type: ignore[attr-defined]
+        yield _SQLiteConnection(raw)
+
+    @property
+    def is_open(self) -> bool:
+        return self._conn is not None
+
+    async def close(self) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
+
+# ============================================================================
+# DatabaseManager
+# ============================================================================
+
 
 class DatabaseManager:
-    """Async PostgreSQL database manager with connection pooling and migrations.
+    """Async SQLite database manager with connection lifecycle and migrations.
 
     Typical usage::
 
-        async with DatabaseManager("postgresql://user:pass@host:5432/dbname") as db:
+        async with DatabaseManager("quad.db") as db:
             async with db.pool.acquire() as conn:
                 val = await conn.fetchval("SELECT 1")
 
     Parameters
     ----------
     dsn:
-        PostgreSQL connection string, e.g.
-        ``"postgresql://quad:quad@localhost:5432/quad"``.
+        SQLite database file path, e.g. ``"quad.db"`` or an absolute path.
+        Relative paths are resolved from the process working directory.
     min_pool_size:
-        Minimum number of connections in the pool (default 1).
+        Ignored for SQLite (single-connection pool); kept for API
+        compatibility with the orchestrator.
     max_pool_size:
-        Maximum number of connections in the pool (default 5).
+        Ignored for SQLite; kept for API compatibility.
     """
 
     def __init__(
@@ -51,18 +186,8 @@ class DatabaseManager:
     ) -> None:
         self._dsn = dsn
         self._db_config = config or {}
-        self._min_pool_size = (
-            min_pool_size
-            if min_pool_size is not None
-            else int(self._db_config["persistence"]["database"]["min_pool_size"])
-        )
-        self._max_pool_size = (
-            max_pool_size
-            if max_pool_size is not None
-            else int(self._db_config["persistence"]["database"]["max_pool_size"])
-        )
-        self._pool: Optional[asyncpg.Pool] = None
-        self._log = logger.bind(dsn=self._mask_dsn(dsn))
+        self._pool: _SQLitePool | None = None
+        self._log = logger.bind(dsn=self._dsn)
 
     # ------------------------------------------------------------------
     # Properties
@@ -70,12 +195,12 @@ class DatabaseManager:
 
     @property
     def dsn(self) -> str:
-        """Return the PostgreSQL DSN string."""
+        """Return the database path string."""
         return self._dsn
 
     @property
-    def pool(self) -> asyncpg.Pool:
-        """Return the connection pool.
+    def pool(self) -> _SQLitePool:
+        """Return the pool.
 
         Raises
         ------
@@ -92,76 +217,43 @@ class DatabaseManager:
     @property
     def is_connected(self) -> bool:
         """Return True if the pool is active."""
-        return self._pool is not None
+        return self._pool is not None and self._pool.is_open
 
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
 
     async def connect(self, ssl: str | bool | None = None) -> None:
-        """Create the asyncpg connection pool.
+        """Open the SQLite database and create the pool.
 
         Parameters
         ----------
         ssl:
-            SSL/TLS mode passed through to asyncpg.  Accepts the same types
-            asyncpg does (``True``, ``"require"``, ``"prefer"``, etc.).
-            If *None*, auto-detects ``sslmode=require`` from the DSN query
-            string and enables SSL when found.
+            Ignored for SQLite (local file). Accepted for API compatibility
+            with the orchestrator.
         """
         if self._pool is not None:
             self._log.warning("connect_already_open")
             return
 
-        # Auto-detect SSL from DSN query parameters
-        if ssl is None:
-            parsed = urllib.parse.urlparse(self._dsn)
-            qs = urllib.parse.parse_qs(parsed.query)
-            if qs.get("sslmode", [None])[0] == "require":
-                ssl = True
+        self._log.info("connecting_sqlite", path=self._dsn)
 
-        self._log.info(
-            "connecting",
-            min_size=self._min_pool_size,
-            max_size=self._max_pool_size,
-            ssl=bool(ssl),
-        )
+        # Resolve relative paths (:memory: is a special SQLite value)
+        db_path = self._dsn
+        if db_path != ":memory:" and not Path(db_path).is_absolute():
+            db_path = str(Path.cwd() / db_path)
 
-        connect_retry_count = int(self._db_config.get("persistence", {}).get("database", {}).get("connect_retry_count", 5))
+        self._pool = _SQLitePool(db_path)
+        # Test the connection immediately
+        async with self._pool.acquire() as conn:
+            val = await conn.fetchval("SELECT 1")
+            if val != 1:
+                raise RuntimeError(f"SQLite connection test failed for {db_path}")
 
-        for attempt in range(1, connect_retry_count + 1):
-            try:
-                self._pool = await asyncpg.create_pool(
-                    dsn=self._dsn,
-                    min_size=self._min_pool_size,
-                    max_size=self._max_pool_size,
-                    command_timeout=int(self._db_config.get("persistence", {}).get("database", {}).get("command_timeout_seconds", 60)),
-                    ssl=ssl,
-                )
-                break
-            except Exception as exc:
-                if attempt == connect_retry_count:
-                    self._log.error(
-                        "connect_retries_exhausted",
-                        max_attempts=connect_retry_count,
-                        error=str(exc),
-                    )
-                    raise
-                backoff_base = 2.0
-                sleep_secs = backoff_base ** (attempt - 1)  # exponential backoff
-                self._log.warning(
-                    "connect_retry",
-                    attempt=attempt,
-                    max_attempts=connect_retry_count,
-                    backoff_seconds=sleep_secs,
-                    error=str(exc),
-                )
-                await asyncio.sleep(sleep_secs)
-
-        self._log.info("connected", ssl=bool(ssl))
+        self._log.info("connected_sqlite", path=db_path)
 
     async def disconnect(self) -> None:
-        """Close the connection pool gracefully."""
+        """Close the database connection."""
         if self._pool is None:
             self._log.warning("disconnect_not_connected")
             return
@@ -172,11 +264,9 @@ class DatabaseManager:
         self._log.info("disconnected")
 
     async def is_healthy(self) -> bool:
-        """Check whether the database pool is responsive.
+        """Check whether the database is responsive.
 
-        Acquires a connection, runs ``SELECT 1``, and releases it.
-        Returns ``True`` if the query succeeds, ``False`` otherwise (no
-        exception is raised).
+        Runs ``SELECT 1`` and returns True on success.
         """
         if self._pool is None:
             self._log.warning("health_check_no_pool")
@@ -229,7 +319,11 @@ class DatabaseManager:
                         self._log.exception("index_create_failed", index=idx_ddl)
                         raise
 
-        self._log.info("initialized", tables=len(ALL_MODELS), indexes=len(INDEX_DEFINITIONS))
+        self._log.info(
+            "initialized",
+            tables=len(ALL_MODELS),
+            indexes=len(INDEX_DEFINITIONS),
+        )
 
     async def migrate(self) -> None:
         """Apply pending schema migrations.
@@ -252,7 +346,9 @@ class DatabaseManager:
 
             if current_version >= SCHEMA_VERSION:
                 self._log.info(
-                    "schema_up_to_date", current=current_version, target=SCHEMA_VERSION
+                    "schema_up_to_date",
+                    current=current_version,
+                    target=SCHEMA_VERSION,
                 )
                 return
 
@@ -267,7 +363,7 @@ class DatabaseManager:
 
                     # Record this version
                     await conn.execute(
-                        "INSERT INTO _schema_version (version) VALUES ($1)",
+                        "INSERT INTO _schema_version (version) VALUES (?)",
                         version,
                     )
 
@@ -286,66 +382,41 @@ class DatabaseManager:
 
         This is a convenience wrapper for callers that have a simple
         execute-and-forget pattern (e.g. logging an AI decision).
-
-        Returns the asyncpg command status tag (e.g. ``"INSERT 0 1"``).
         """
         async with self.pool.acquire() as conn:
             return await conn.execute(sql, *args)
 
     # ------------------------------------------------------------------
-    # Backup & snapshot (stubs for PostgreSQL)
+    # Backup & snapshot (stubs for SQLite)
     # ------------------------------------------------------------------
 
     async def backup(self, backup_dir: str | Path) -> None:
-        """Stub: PostgreSQL backup is a no-op that logs the intent.
+        """Stub: SQLite backup is a no-op that logs the intent.
 
-        Production backups should use pg_dump or a cloud-native solution
-        (e.g. Fly.io Postgres snapshots, ``pg_dump`` cron job, or
-        ``pgBackRest``).
-
-        Parameters
-        ----------
-        backup_dir:
-            Ignored; retained for API compatibility.
+        Production backups should use file-level copy or VACUUM INTO.
         """
         self._log.warning(
-            "pg_backup_not_implemented",
+            "sqlite_backup_not_implemented",
             message=(
-                "PostgreSQL backup is not implemented in-app. "
-                "Use pg_dump, Fly.io automatic backups, or a cloud-native "
-                "solution for production backups."
+                "SQLite backup is not implemented in-app. "
+                "Use VACUUM INTO, file-level copy, or a cron job "
+                "for production backups."
             ),
             backup_dir=str(backup_dir),
         )
 
     async def snapshot(self) -> None:
-        """Stub: PostgreSQL snapshot is a no-op that logs the intent.
+        """Stub: SQLite snapshot is a no-op that logs the intent.
 
-        For point-in-time snapshots, use PostgreSQL native ``pg_dump``
-        or cloud provider snapshot features.
+        For point-in-time snapshots, use VACUUM INTO or file-level copy.
         """
         self._log.warning(
-            "pg_snapshot_not_implemented",
+            "sqlite_snapshot_not_implemented",
             message=(
-                "PostgreSQL snapshot is not implemented in-app. "
-                "Use pg_dump or cloud provider snapshots."
+                "SQLite snapshot is not implemented in-app. "
+                "Use VACUUM INTO or file-level copy."
             ),
         )
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _mask_dsn(dsn: str) -> str:
-        """Mask the password in a DSN for logging purposes."""
-        if "@" in dsn:
-            # postgresql://user:password@host:port/db -> postgresql://user:***@host:port/db
-            before_at, after_at = dsn.split("@", 1)
-            if ":" in before_at:
-                scheme_user = before_at.split(":", 1)[0]
-                return f"{scheme_user}:****@{after_at}"
-        return dsn
 
     # ------------------------------------------------------------------
     # Context manager

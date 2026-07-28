@@ -1,6 +1,6 @@
 """Database models for the Quad futures trading bot.
 
-This module defines all 12 table schemas as dataclasses with PostgreSQL DDL
+This module defines all 12 table schemas as dataclasses with SQLite DDL
 generation and row serialization/deserialization. All Decimal values are stored
 as TEXT to preserve precision losslessly. Timestamps are Unix epoch milliseconds
 stored as BIGINT.
@@ -41,8 +41,19 @@ def _col_names(cls: type) -> list[str]:
 
 
 def _to_row(instance: Any) -> tuple:
-    """Serialize a dataclass instance to a tuple for INSERT."""
-    return tuple(getattr(instance, f.name) for f in fields(instance.__class__))
+    """Serialize a dataclass instance to a tuple for INSERT.
+
+    Converts ``id=0`` to ``None`` so SQLite ``INTEGER PRIMARY KEY
+    AUTOINCREMENT`` auto-generates the next id (PostgreSQL's SERIAL
+    ignores explicit zero; SQLite stores it literally).
+    """
+    vals = []
+    for f in fields(instance.__class__):
+        v = getattr(instance, f.name)
+        if f.name == "id" and v == 0:
+            v = None
+        vals.append(v)
+    return tuple(vals)
 
 
 def _from_row(cls: type, row: tuple) -> Any:
@@ -71,7 +82,7 @@ class AccountModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS accounts (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     exchange TEXT NOT NULL,
     balances_json TEXT NOT NULL DEFAULT '{}',
     total_usdt TEXT NOT NULL DEFAULT '0',
@@ -120,7 +131,7 @@ class PositionModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS positions (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy TEXT NOT NULL,
     symbol TEXT NOT NULL,
     side TEXT NOT NULL,
@@ -180,7 +191,7 @@ class OrderModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS orders (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     client_order_id TEXT NOT NULL UNIQUE,
     position_id INTEGER,
     symbol TEXT NOT NULL,
@@ -232,7 +243,7 @@ class TradeModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS trades (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     position_id INTEGER,
     order_id INTEGER,
     symbol TEXT NOT NULL,
@@ -285,7 +296,7 @@ class OptionContractModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS option_contracts (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL UNIQUE,
     underlying TEXT NOT NULL,
     strike TEXT NOT NULL DEFAULT '0',
@@ -335,7 +346,7 @@ class DecisionModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS decisions (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp BIGINT NOT NULL,
     strategy TEXT NOT NULL,
     action TEXT NOT NULL,
@@ -373,7 +384,7 @@ class StrategyStateModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS strategy_state (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_name TEXT NOT NULL UNIQUE,
     enabled INTEGER NOT NULL DEFAULT 1,
     params_json TEXT NOT NULL DEFAULT '{}',
@@ -409,7 +420,7 @@ class SessionModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS sessions (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     start_time BIGINT NOT NULL,
     end_time BIGINT,
     mode TEXT NOT NULL DEFAULT 'binance',
@@ -455,7 +466,7 @@ class PerformanceSnapshotModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS performance_snapshots (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp BIGINT NOT NULL,
     portfolio_value TEXT NOT NULL DEFAULT '0',
     drawdown TEXT NOT NULL DEFAULT '0',
@@ -491,7 +502,7 @@ class CircuitBreakerEventModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS circuit_breaker_events (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp BIGINT NOT NULL,
     breaker_name TEXT NOT NULL,
     tier INTEGER NOT NULL DEFAULT 1,
@@ -535,7 +546,7 @@ class ConfigChangeModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS config_changes (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp BIGINT NOT NULL,
     key TEXT NOT NULL,
     old_value TEXT NOT NULL DEFAULT '',
@@ -571,7 +582,7 @@ class ErrorLogModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS error_logs (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp BIGINT NOT NULL,
     level TEXT NOT NULL DEFAULT 'ERROR',
     event TEXT NOT NULL DEFAULT '',
@@ -613,7 +624,7 @@ class OptimizationRunModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS optimization_runs (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_at BIGINT NOT NULL,
     trigger TEXT NOT NULL DEFAULT 'scheduled',
     decisions_analyzed INTEGER NOT NULL DEFAULT 0,
@@ -669,7 +680,7 @@ class OptimizationRecommendationModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS optimization_recommendations (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER NOT NULL,
     recommendation_type TEXT NOT NULL,
     target_area TEXT NOT NULL,
@@ -720,7 +731,7 @@ class FundingPaymentModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS funding_payments (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
     position_id INTEGER REFERENCES positions(id),
     amount TEXT NOT NULL DEFAULT '0',
@@ -757,7 +768,7 @@ class LiquidationEventModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS liquidation_events (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
     position_id INTEGER REFERENCES positions(id),
     amount TEXT NOT NULL DEFAULT '0',
@@ -794,7 +805,7 @@ class FundingRateRecordModel:
     @classmethod
     def create_table_ddl(cls) -> str:
         return """CREATE TABLE IF NOT EXISTS funding_rate_records (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
     rate TEXT NOT NULL DEFAULT '0',
     time BIGINT NOT NULL,
@@ -847,11 +858,11 @@ INDEX_DEFINITIONS: list[str] = [
 # ---------------------------------------------------------------------------
 
 SCHEMA_VERSION_TABLE_DDL: str = """CREATE TABLE IF NOT EXISTS _schema_version (
-    id SERIAL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     version INTEGER NOT NULL,
-    applied_at TIMESTAMPTZ DEFAULT NOW()
+    applied_at TEXT DEFAULT (datetime('now'))
 )"""
-"""DDL for the schema version tracking table (PostgreSQL syntax)."""
+"""DDL for the schema version tracking table (SQLite syntax)."""
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ _Production-Grade USD-M Futures Trading Bot for Binance_
 
 Quad is a production-grade, open-source USD-M futures trading bot purpose-built for Binance Futures. It is a **single-process Python 3.12+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, futures strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
 
-Unlike the previous Quadrant project (Node.js/Python dual-runtime, Binance Futures, PostgreSQL), Quad is:
+Unlike the previous Quadrant project (Node.js/Python dual-runtime, Binance Futures), Quad is:
 
 - **Python-only** -- One language, one process, one deployment
 - **Futures-native** -- Built from the ground up for USD-M perpetual and delivery futures
@@ -78,7 +78,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 └──────────────────┘  └──────────────────┘  └──────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      PERSISTENCE (PostgreSQL)                           │
+│                        PERSISTENCE (SQLite)                             │
 │    accounts, positions, orders, trades, decisions, contracts, stats   │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -101,7 +101,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 - **Leverage-Adjusted Position Sizing** -- Position sizing adapted for futures with min position size checks, leverage-aware notional, and margin utilization tracking
 - **Backtesting Engine** -- Test strategies against historical data before risking capital
 - **Telegram + CLI Interface** -- Primary control via Telegram bot (python-telegram-bot v20+), with Typer CLI for secondary debugging
-- **PostgreSQL Persistence** -- 16-table schema with asyncpg connection pool for concurrent reads/writes
+- **SQLite Persistence** -- 16-table schema with aiosqlite for zero-config operation
 - **Docker Deployable** -- Single-container deployment with health checks and Prometheus metrics
 - **Hot-Reload Configuration** -- Risk and strategy parameters update without restart
 - **Structured Logging** -- JSON-formatted logs for easy parsing and analysis
@@ -116,7 +116,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 | Telegram Bot | python-telegram-bot v20+ | Primary user interface via Telegram |
 | CLI Framework | Typer | Secondary command-line interface for debugging |
 | Exchange API | Binance USD-M Futures (REST + WebSocket) | Market data, account, order execution |
-| Persistence | PostgreSQL + asyncpg | Connection pool, no local server file |
+| Persistence | SQLite + aiosqlite | Single file, zero config |
 | Configuration | PyYAML + python-dotenv | Layered config with hot-reload |
 | Logging | structlog | Structured JSON logging |
 | Async HTTP | aiohttp / httpx | REST API calls to Binance |
@@ -245,7 +245,7 @@ quad/
 │   ├── risk/                 # Risk manager, gates, circuit breakers
 │   ├── execution/            # Order gateway, TWAP
 │   ├── market_data/          # WebSocket streaming, data cache
-│   ├── persistence/          # PostgreSQL database, repositories, models
+│   ├── persistence/          # SQLite database, repositories, models
 │   ├── monitoring/           # Health server, metrics
 │   ├── backtesting/          # Backtest engine
 │   └── types/                # Shared type definitions
@@ -284,7 +284,7 @@ __main__.py  -->  QuadOrchestrator()  -->  orchestrator.run_forever()
    | Order | Subsystem | What happens |
    |-------|-----------|-------------|
    | 1 | ConfigManager | Loads `config.default.yaml`, overlays `config.local.yaml`, overlays env vars. Resolves `${VAR}` substitutions. |
-   | 2 | DatabaseManager | Connects to PostgreSQL, creates pool, runs DDL and migrations. |
+   | 2 | DatabaseManager | Connects to SQLite, runs DDL and migrations. |
    | 3 | ExchangeAdapter | Created via factory (`binance`/`paper`/`mock` based on mode). Connects and authenticates. |
    | 4 | MarketDataEngine | Starts WebSocket subscriptions, initialises price buffers, funding rate cache, order book cache, and mark price cache. |
    | 5 | RiskManager | Initialises 9 pre-trade gates, 7 circuit breakers, leverage-adjusted position sizer. |
@@ -374,7 +374,7 @@ Telegram User --- /command --- Telegram Servers
 
 
 
-### Data Flow: WebSocket to PostgreSQL
+### Data Flow: WebSocket to SQLite
 
 ```
 Binance USD-M Futures API
@@ -422,7 +422,7 @@ Binance USD-M Futures API
    |              futures_contracts, sessions, performance_snapshots,
    |              circuit_breaker_events, config_changes, error_logs,
    |              funding_payments, liquidation_events, funding_rate_records
-   +-- PostgreSQL connection pool (asyncpg)
+   +-- SQLite (aiosqlite)
    +-- Automatic backups (hourly, max 24)
    +-- Automatic snapshots (60s)
 ```
@@ -495,7 +495,7 @@ The webhook receiver:
 2. **Pluggable architecture** -- Exchange adapters and strategy plugins enable extensibility without core changes.
 3. **Deterministic strategies** -- Futures trading uses defined logic, not ML models. Strategies are code, not black boxes.
 4. **Backtesting-first** -- Every strategy can be backtested against historical data before going live.
-5. **Self-hosted and simple** -- PostgreSQL database, single Python process, no external dependencies beyond the exchange and a PostgreSQL server.
+5. **Self-hosted and simple** -- SQLite file-backed database, single Python process, no external database server required.
 
 ---
 

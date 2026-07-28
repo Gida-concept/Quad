@@ -629,8 +629,8 @@ class PersistenceConfig(BaseModel):
     """Database persistence configuration."""
 
     dsn: str = Field(
-        default="${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}",
-        description="PostgreSQL connection DSN",
+        default="quad.db",
+        description="SQLite database file path (relative or absolute)",
     )
     database: DatabasePoolConfig = Field(
         default_factory=DatabasePoolConfig,

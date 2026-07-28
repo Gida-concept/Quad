@@ -25,7 +25,7 @@ import structlog
 import yaml
 from dotenv import find_dotenv, load_dotenv
 
-from .schema import validate_config
+from .schema import QuadConfig
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -359,13 +359,12 @@ class ConfigManager:
         # Layer 3: Re-apply runtime overrides on top
         merged = _deep_merge(merged, copy.deepcopy(self._runtime_overrides))
 
-        self._config = merged
-
-        # Validate config after merge
-        is_valid, errors = validate_config(self._config)
-        if not is_valid:
-            for error in errors:
-                logger.warning("config_validation_warning", error=error)
+        # Apply Pydantic schema defaults to the merged config.
+        # This ensures all subsystem-required keys (exchange.binance,
+        # monitoring.health_server, market_data.buffer_sizes, etc.) exist
+        # with their default values even when the YAML is minimal.
+        validated = QuadConfig.model_validate(merged)
+        self._config = validated.model_dump()
 
     def _fire_callbacks(
         self, key: str, old_value: Any, new_value: Any

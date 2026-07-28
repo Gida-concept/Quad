@@ -2,7 +2,7 @@
 
 Provides a generic ``BaseRepository[T]`` with CRUD operations and
 domain-specific repositories for each entity type. Uses asyncpg with
-PostgreSQL ``$N`` parameter style.
+SQLite ``?`` parameter style (via automatic $N to ? conversion).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ T = TypeVar("T")
 
 
 class BaseRepository(Generic[T]):
-    """Generic PostgreSQL repository providing CRUD operations.
+    """Generic repository providing CRUD operations (SQLite).
 
     Parameters
     ----------
@@ -69,7 +69,7 @@ class BaseRepository(Generic[T]):
     # ------------------------------------------------------------------
 
     def _placeholder_clause(self, names: list[str], start: int = 1) -> str:
-        """Return a SET clause with PostgreSQL ``$N`` placeholders.
+        """Return a SET clause with positional placeholders.
 
         Example: ``"col1 = $1, col2 = $2"``
         """
@@ -82,7 +82,7 @@ class BaseRepository(Generic[T]):
         return ", ".join(self._columns)
 
     def _param_placeholders(self, start: int = 1) -> str:
-        """Return a comma-separated list of PostgreSQL ``$N`` placeholders."""
+        """Return a comma-separated list of positional placeholders."""
         return ", ".join(f"${start + i}" for i in range(len(self._columns)))
 
     @staticmethod
@@ -281,7 +281,7 @@ class AccountRepository(BaseRepository[AccountModel]):
     async def upsert_account(self, account: AccountModel) -> int:
         """Insert or update an account record (by primary key id).
 
-        Uses ``INSERT ... ON CONFLICT DO UPDATE`` for PostgreSQL.
+        Uses ``INSERT ... ON CONFLICT DO UPDATE`` (SQLite compatible).
 
         Returns the row id.
         """

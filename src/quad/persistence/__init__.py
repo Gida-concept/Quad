@@ -1,7 +1,7 @@
 """Persistence layer for the Quad futures trading bot.
 
 This module provides the database manager, repository classes, and model
-definitions for PostgreSQL-based persistence (via asyncpg).
+definitions for SQLite-based persistence (via aiosqlite).
 """
 
 from .database import DatabaseManager

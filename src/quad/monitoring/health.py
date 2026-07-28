@@ -54,11 +54,12 @@ class HealthServer:
         config: dict[str, Any] | None = None,
     ) -> None:
         self._config = config or {}
-        self._monitoring_config = self._config["monitoring"]
+        self._monitoring_config = self._config.get("monitoring", {})
 
         self._port = (
             port
-            or self._monitoring_config["health_server"]["port"]
+            or self._monitoring_config.get("health_server", {}).get("port")
+            or 9090
         )
         self._components: dict[str, Any] = dict(components or {})
         self._metrics: Any = metrics_collector
@@ -112,6 +113,7 @@ class HealthServer:
 
         app = web.Application()
         app.router.add_get("/health", self._handle_health)
+        app.router.add_get("/", self._handle_health)
         app.router.add_get("/readiness", self._handle_readiness)
         app.router.add_get("/liveness", self._handle_liveness)
         app.router.add_get("/metrics", self._handle_metrics)
@@ -125,7 +127,7 @@ class HealthServer:
         await self._runner.setup()
         self._site = web.TCPSite(
             self._runner,
-            self._monitoring_config["health_server"]["bind_address"],
+            self._monitoring_config.get("health_server", {}).get("bind_address", "0.0.0.0"),
             self._port,
         )
         await self._site.start()
@@ -175,7 +177,7 @@ class HealthServer:
             {
                 "status": "ok",
                 "uptime": round(uptime, 2),
-                "version": self._monitoring_config["health_server"]["version"],
+                "version": self._monitoring_config.get("health_server", {}).get("version", "0.1.0"),
                 "timestamp": int(_time.time() * 1000),
             }
         )
