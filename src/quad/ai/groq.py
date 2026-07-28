@@ -406,12 +406,11 @@ class GroqClient:
         dict
             Parsed JSON decision dict with keys: reasoning, action,
             contract, side, quantity, order_type, limit_price, strategy,
-            confidence, risk_checks.
+            confidence, risk_checks.  On parse failure returns a safe
+            HOLD dict with an explanatory reasoning field.
 
         Raises
         ------
-        ValueError
-            If the LLM response is not valid JSON or missing required keys.
         RuntimeError
             If the API key is missing or rate limit is exceeded.
         """

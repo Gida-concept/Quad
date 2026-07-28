@@ -1668,6 +1668,10 @@ class QuadBotCommands:
                 await query.edit_message_text("✅ Execution cancelled.")
             return ConversationHandler.END
 
+        # NOTE: per_message=False (the default) means CallbackQueryHandler
+        # won't be re-triaged on every new text message — only callback
+        # queries trigger state transitions.  The benign PTBUserWarning
+        # about this is harmless for our bot-driven flow.
         return ConversationHandler(
             entry_points=[CommandHandler("execute", execute_start)],
             states={
@@ -1682,7 +1686,6 @@ class QuadBotCommands:
                 CallbackQueryHandler(execute_cancel, pattern=r"^exec_cancel$"),
                 CommandHandler("cancel", execute_cancel),
             ],
-            per_chat=True,
         )
 
     # ------------------------------------------------------------------
