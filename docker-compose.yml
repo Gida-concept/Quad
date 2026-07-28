@@ -54,14 +54,11 @@ services:
 
       # --- Operation Mode ---
       # Override with "live" when real trading is desired
-      - QUAD_MODE=${QUAD_MODE:-paper}
+      - QUAD_MODE=${QUAD_MODE:-binance}
       - QUAD_DRY_RUN=${QUAD_DRY_RUN:-true}
       - QUAD_LOG_LEVEL=${QUAD_LOG_LEVEL:-INFO}
       - QUAD_LOG_FORMAT=${QUAD_LOG_FORMAT:-json}
-      - QUAD_LOG_FILE=/app/logs/quad.log
-      - QUAD_DEFAULT_STRATEGY=${QUAD_DEFAULT_STRATEGY:-cash_secured_put}
-      - QUAD_MAX_CYCLE_INTERVAL=${QUAD_MAX_CYCLE_INTERVAL:-60}
-      - QUAD_DATA_DIR=/app/data
+      - QUAD_DEFAULT_STRATEGY=${QUAD_DEFAULT_STRATEGY:-trend_following}
       - QUAD_CONFIG_DIR=/app/config
       - QUAD_HEALTH_PORT=${QUAD_HEALTH_PORT:-9090}
 
