@@ -27,8 +27,8 @@ services:
       - quad_logs:/app/logs
 
     environment:
-      # --- Database ---
-      - DATABASE_URL=postgresql://postgres:5wr!8%2FDeS4XsUcz@db.lpooaxsyydtmsgbkqqjr.supabase.co:5432/postgres
+      # --- Database (set DATABASE_URL in the platform's environment variables) ---
+      - DATABASE_URL=${DATABASE_URL}
 
       # --- Operation Mode ---
       # Override with "live" when real trading is desired
