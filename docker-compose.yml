@@ -8,25 +8,6 @@
 version: "3.8"
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: quad-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: quad
-      POSTGRES_PASSWORD: quad
-      POSTGRES_DB: quad
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U quad -d quad"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
   quad:
     build:
       context: .
@@ -34,9 +15,6 @@ services:
     image: quad:latest
     container_name: quad-bot
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
 
     # Health check / metrics port (internal: configurable via QUAD_HEALTH_PORT)
     ports:
@@ -50,7 +28,7 @@ services:
 
     environment:
       # --- Database ---
-      - DATABASE_URL=postgresql://quad:quad@postgres:5432/quad
+      - DATABASE_URL=postgresql://postgres:5wr!8%2FDeS4XsUcz@db.lpooaxsyydtmsgbkqqjr.supabase.co:5432/postgres
 
       # --- Operation Mode ---
       # Override with "live" when real trading is desired
@@ -93,5 +71,4 @@ services:
     init: true
 
 volumes:
-  postgres_data:
   quad_logs:
