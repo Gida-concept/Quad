@@ -36,7 +36,7 @@ execution:
   reconcile_interval_seconds: 60
 
 persistence:
-  dsn: "${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}"
+  dsn: "postgresql://postgres:5wr!8%2FDeS4XsUcz@db.lpooaxsyydtmsgbkqqjr.supabase.co:5432/postgres"
 
 telegram:
   enabled: true
