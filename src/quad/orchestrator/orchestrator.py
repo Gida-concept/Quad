@@ -920,7 +920,7 @@ class QuadOrchestrator:
                 # ----------------------------------------------------------
                 # 2. Force-close all positions for fresh analysis each cycle
                 # ----------------------------------------------------------
-                if self._ai_enabled and self._groq_client is not None:
+                if self._config_dict.get("trading", {}).get("serial_trade_mode", True):
                     await self._close_all_positions()
 
                 # ----------------------------------------------------------

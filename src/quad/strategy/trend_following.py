@@ -127,7 +127,7 @@ class TrendFollowingStrategy(StrategyBase):
 
         trade_capital = int(self.get_param("trade_capital_usd", 5))
         sl_pct = float(self._config.get("risk", {}).get("per_position_sl", {}).get("capital_pct", 30.0))
-        tp_pct = float(self.get_param("tp_capital_pct", 50.0))
+        tp_pct = float(self._config.get("risk", {}).get("per_position_tp", {}).get("capital_pct", 50.0))
         leverage = int(self._config.get("trading", {}).get("leverage", 50))
         # Read absolute max position size from risk config (single source of truth)
         max_pos_size = float(self._config.get("risk", {}).get("max_position_size_usd", 10000))

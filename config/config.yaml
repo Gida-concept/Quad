@@ -1,405 +1,75 @@
-# Quad — Unified Configuration
-# ============================================================================
-# This is the single source of truth for all configuration values.
-# Environment variables (QUAD_*) take priority over values in this file.
-# Runtime overrides via `quad config set` take highest priority.
-#
-# Environment variable substitution:
-#   Values containing ${VAR_NAME} will have the environment variable expanded
-#   at load time. E.g., ${QUAD_DATA_DIR}/quad.db expands to ~/.quad/data/quad.db.
-# ============================================================================
-
-# ---------------------------------------------------------------------------
-# Internal (not user-configurable via YAML — set via env vars or code)
-# ---------------------------------------------------------------------------
+# Quad — Minimal Configuration for BTCUSDT Futures Bot
 _mode: "binance"
 _dry_run: true
 
-# ---------------------------------------------------------------------------
-# Trading Settings
-# ---------------------------------------------------------------------------
 trading:
-  # Default strategy to use when bot starts (must match a registered strategy)
+  serial_trade_mode: true
   default_strategy: "trend_following"
-
-  # Seconds between trading analysis cycles (deterministic fallback)
-  max_cycle_interval: 3600
-
-  # Seconds between AI-first trading analysis cycles (default 1 hour)
-  # When AI is enabled, this overrides max_cycle_interval
   ai_cycle_interval: 3600
-
-  # Trading pairs (underlyings) to monitor
   underlyings:
     - "BTCUSDT"
-
-  # Futures-specific settings
+    - "ETHUSDT"
+    - "SOLUSDT"
+    - "BNBUSDT"
+    - "DOGEUSDT"
   leverage: 50
   margin_mode: "isolated"
   position_mode: "one_way"
 
-# ---------------------------------------------------------------------------
-# Exchange Connection Settings
-# ---------------------------------------------------------------------------
 exchange:
-  # Exchange name (must be a registered adapter: binance, mock)
   name: "binance"
-
-  # Use testnet environment (true) or production (false)
   testnet: true
 
-  # API credentials (typically set via .env or environment variables)
-  # api_key: ""     # BINANCE_API_KEY
-  # api_secret: ""  # BINANCE_API_SECRET
-
-  # Rate limiting configuration
-  rate_limit:
-    # Maximum weight per request window (Binance default: 2400; leave ~400 headroom)
-    max_weight: 2000
-    # Maximum orders per second (Binance default: 1200; leave ~300 headroom)
-    max_orders: 900
-
-  # Binance-specific adapter parameters
-  binance:
-    # REST API base URLs (futures)
-    base_url: "https://fapi.binance.com"
-    testnet_base_url: "https://testnet.binancefuture.com"
-    # WebSocket base URLs (futures)
-    ws_base_url: "wss://fstream.binance.com/ws"
-    ws_testnet_base_url: "wss://stream.binancefuture.com/ws"
-    # Rate limit header keys
-    rate_limit_warn_threshold: 0.80
-    rate_limit_hard_threshold: 0.95
-    # WebSocket reconnection backoff (flat keys)
-    ws_max_retries: 10
-    # Listen key refresh interval (seconds)
-    listen_key_refresh_seconds: 3300
-    # Request timeouts
-    request_timeout_seconds: 30.0
-    connect_timeout_seconds: 10.0
-    # Exponential retry backoff base (seconds)
-    retry_backoff_base: 2.0
-
-  # Order gateway confirmation and retry parameters
-  gateway:
-    confirmation_timeout_seconds: 30.0
-    max_retries: 3
-    completed_ids_maxlen: 1000
-    backoff_base_seconds: 2.0
-
-  # Fill reconciler discrepancy tracking parameters
-  reconciler:
-    max_discrepancy_history: 500
-    stale_order_hours: 24
-    recent_discrepancies_default_count: 20
-
-# ---------------------------------------------------------------------------
-# Risk Management Settings
-# ---------------------------------------------------------------------------
 risk:
-  # Maximum number of concurrent positions
   max_positions: 1
-
-  # Maximum percentage of total portfolio value at risk in a single trade
-  max_portfolio_risk_pct: 20.0
-
-  # Maximum allowable daily loss in USD (across all positions)
-  max_daily_loss_usd: 500.0
-
-  # Maximum drawdown from peak portfolio value (percentage trigger)
-  max_drawdown_pct: 25.0
-
-  # Maximum leverage enforcement limit
   max_leverage: 50
-
-  # Minimum distance to liquidation (as a decimal fraction, e.g. 0.20 = 20%)
-  min_distance_to_liquidation_pct: 0.2
-
-  # Maximum acceptable funding rate cost per position (decimal fraction)
-  max_funding_rate_cost: 0.001
-
-  # Maximum position concentration as a fraction of portfolio (0.0 to 1.0)
-  max_position_concentration: 0.4
-
-  # Maximum position size in USD
-  max_position_size: 1000.0
-
-  # Minimum position size in USD
-  min_position_size_usd: 5
-
-  # Maximum position size as a fraction of portfolio (0.0 to 1.0)
-  max_position_size_pct: 0.10
-
-  # Absolute maximum position size in USD
-  max_position_size_usd: 10000
-
-  # Kelly Criterion sizing parameters
-  kelly:
-    # Fractional Kelly multiplier (0.0 to 1.0)
-    fraction: 0.25
-    # Default position fraction when no trade history is available
-    default_fraction: 0.02
-
-  # Circuit breakers — automated risk controls
-  circuit_breakers:
-    # Drawdown percentage tiers that trigger escalating responses
-    drawdown_tiers: [5.0, 10.0, 15.0]
-
-    # Consecutive losses breaker
-    consecutive_losses:
-      max_consecutive: 5
-
-    # Liquidation cascade breaker
-    liquidation_cascade:
-      min_cascade_distance_pct: 0.05
-
-    # Funding rate spike breaker
-    funding_rate_spike:
-      funding_rate_spike_threshold: 0.001
-      max_consecutive_spikes: 3
-
-    # Volatility breaker
-    volatility:
-      volatility_breaker_atr_pct: 0.05
-
-  # Per-position stop-loss
   per_position_sl:
     enabled: true
     type: "fixed"
     capital_pct: 30.0
+  per_position_tp:
+    enabled: true
+    type: "fixed"
+    capital_pct: 50.0
 
-# ---------------------------------------------------------------------------
-# Execution Engine Settings
-# ---------------------------------------------------------------------------
 execution:
-  # Seconds between order reconciliation cycles
   reconcile_interval_seconds: 60
-  # Default TWAP execution window (seconds)
-  twap_window_seconds: 300
-  # Default order type (LIMIT or MARKET)
-  default_order_type: "LIMIT"
-  # Default reduce-only flag
-  reduce_only: false
-  # Default post-only flag
-  post_only: false
 
-  # TWAP slicer parameters
-  twap:
-    min_slices: 3
-    max_slices: 10
-    jitter_seconds: 5
-    min_slice_quantity: 0.01
-    fill_urgency_threshold: 0.8
-
-# ---------------------------------------------------------------------------
-# Market Data Settings
-# ---------------------------------------------------------------------------
-market_data:
-  # In-memory ring buffer sizes for real-time data
-  buffer_sizes:
-    # Number of price ticks to keep per symbol
-    ticks: 1000
-
-  # Cache TTL values (in seconds)
-  cache_ttl:
-    # How long order book data remains valid
-    order_book: 5
-    # How long funding rate data remains valid
-    funding_rate: 10
-    # How long mark price data remains valid
-    mark_price: 2
-    # How long open interest data remains valid
-    open_interest: 3600
-    # Max order book snapshot depth to cache
-    order_book_limit: 20
-
-  # Market data engine lifecycle parameters
-  engine:
-    # Max seconds to wait for engine shutdown
-    shutdown_timeout_seconds: 10.0
-
-  # Market data WebSocket connection parameters
-  websocket:
-    # WebSocket base URL (Binance Futures stream)
-    url: "wss://fstream.binance.com/ws"
-    # Reconnection backoff parameters
-    backoff:
-      base_seconds: 1.0
-      max_seconds: 30.0
-      multiplier: 2.0
-      jitter_fraction: 0.1
-    # Heartbeat interval (seconds)
-    heartbeat_interval_seconds: 30.0
-
-# ---------------------------------------------------------------------------
-# Persistence / Database Settings
-# ---------------------------------------------------------------------------
 persistence:
-  # PostgreSQL connection DSN (supports ${VAR_NAME} substitution)
   dsn: "${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}"
 
-  # Database connection pool configuration
-  database:
-    # Minimum pool connections
-    min_pool_size: 1
-    # Maximum pool connections
-    max_pool_size: 5
-    # Maximum connection retries
-    connect_retry_count: 5
-    # Command timeout (seconds)
-    command_timeout_seconds: 60
-
-# ---------------------------------------------------------------------------
-# Telegram Integration Settings
-# ---------------------------------------------------------------------------
 telegram:
-  # Enable Telegram bot for notifications and commands
   enabled: true
-
-  # Scheduled job intervals (seconds)
   job_intervals:
-    # Status summary — how often to send hourly position/PnL summary
     status_summary_seconds: 3600
-    # Risk alert — check circuit breakers
     risk_alert_seconds: 300
-    # Funding rate countdown — check funding rates
-    funding_rate_countdown_seconds: 1800
-    # Liquidation warning — check distance to liquidation
-    liquidation_warning_seconds: 300
 
-  # Daily report scheduling (UTC)
-  daily_report:
-    hour: 23
-    minute: 0
-
-  # Funding cost report scheduling (UTC)
-  funding_cost_report:
-    hour: 22
-    minute: 0
-
-# ---------------------------------------------------------------------------
-# AI / Groq Integration Settings
-# ---------------------------------------------------------------------------
 ai:
-  # Enable Groq AI analysis features
   enabled: true
-
-  # Pairs and timeframes monitored by the AI analysis
   pairs:
     - "BTCUSDT"
     - "ETHUSDT"
-    - "BNBUSDT"
     - "SOLUSDT"
-
+    - "BNBUSDT"
+    - "DOGEUSDT"
   timeframes:
-    - "15m"
     - "1h"
-
-  # Number of candles to fetch per pair/timeframe for AI analysis
   candle_count: 150
 
-  # Groq LLM client configuration
-  groq:
-    # API request timeout (seconds)
-    timeout_seconds: 30.0
-    # Retry/backoff
-    max_retries: 3
-    base_backoff_seconds: 1.0
-    # Rate limiter (sliding window, default 24h)
-    rate_limiter:
-      window_seconds: 86400
-      warning_level_1: 800
-      warning_level_2: 900
-      warning_level_3: 950
-    # Valid trading actions for AI decisions
-    valid_actions: ["ENTER", "EXIT", "HOLD"]
-    # Fallback action when decision fails
-    fallback_action: "HOLD"
-
-  # Prompt builder configuration
-  prompt:
-    # Default order book depth for prompts
-    order_book_depth: 5
-    # Max candles for compact display
-    max_candles: 20
-
-# ---------------------------------------------------------------------------
-# TradingView Webhook Settings
-# ---------------------------------------------------------------------------
-tradingview_webhook:
-  # Enable webhook receiver endpoint (port defaults to health server port)
-  enabled: false
-
-  # Shared secret for authenticating webhook payloads
-  secret: ""
-
-# ---------------------------------------------------------------------------
-# Monitoring / Health Check Settings
-# ---------------------------------------------------------------------------
 monitoring:
-  # Built-in HTTP health check server
   health_server:
-    # Port for the health check HTTP server
     port: 9090
-    # Bind address
     bind_address: "0.0.0.0"
-    # Application version string
     version: "0.1.0"
 
-  # Prometheus metrics endpoint
-  metrics:
-    enabled: true
-
-# ---------------------------------------------------------------------------
-# Strategy-Specific Parameters
-# ---------------------------------------------------------------------------
 strategy:
-  # --- Trend Following ---
-  # EMA crossover + ADX filter trend-following strategy
   trend_following:
     enabled: true
     fast_ema: 9
     slow_ema: 21
-    adx_period: 14
     adx_threshold: 25
-    atr_period: 14
-    atr_multiplier_stop: 3.0
-    atr_default_pct: 0.02
     trade_capital_usd: 5
-    tp_capital_pct: 50.0
-    confidence_default: 0.7
-    confidence_high: 0.9
 
-# ---------------------------------------------------------------------------
-# Backtesting Settings
-# ---------------------------------------------------------------------------
-backtesting:
-  starting_capital: 10000
-  commission_pct: 0.001
-  slippage_pct: 0.0005
-  max_trades_per_day: 10
-
-# ---------------------------------------------------------------------------
-# Strategy Auto-Optimization
-# ---------------------------------------------------------------------------
 retrain:
-  # Enable the optimisation cycle
-  enabled: false
-  # Days between optimisation runs
+  enabled: true
   interval_days: 7
-  # Hours to wait after bot startup before first optimisation run
-  initial_delay_hours: 1
-  # Minimum trades in the period to produce recommendations
-  min_trades_for_analysis: 10
-  # How far back (days) to pull data for analysis
-  max_history_days: 90
-  # Minimum confidence score to auto-apply a recommendation
-  confidence_threshold: 0.7
-  # Apply high-confidence recommendations without manual approval
-  auto_apply: false
-  # Cap on recommendations per cycle
-  max_recommendations_per_cycle: 5
-  # Temperature for optimisation analysis calls
-  groq_temperature: 0.2
-  # Max tokens for optimisation analysis calls
-  groq_max_tokens: 2048

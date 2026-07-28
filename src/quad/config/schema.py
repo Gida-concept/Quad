@@ -31,6 +31,10 @@ class TradingConfig(BaseModel):
         default="trend_following",
         description="Default strategy name for the bot",
     )
+    serial_trade_mode: bool = Field(
+        default=True,
+        description="Enable serial trade mode (force-close before each ENTER)",
+    )
     max_cycle_interval: int = Field(
         default=60,
         ge=1,
@@ -42,7 +46,7 @@ class TradingConfig(BaseModel):
         description="Seconds between AI-driven analysis cycles (default 1 hour)",
     )
     underlyings: list[str] = Field(
-        default_factory=lambda: ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"],
+        default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"],
         description="List of underlying assets the bot monitors",
     )
     leverage: int = Field(default=1, ge=1, le=125)
