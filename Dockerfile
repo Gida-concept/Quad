@@ -39,11 +39,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder stage
-COPY --from=builder /root/.local /root/.local
+# Note: Runtime runs as non-root user "quad", so copy into system site-packages
+# (not /root/.local which user "quad" cannot read)
+COPY --from=builder /root/.local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /root/.local/bin /usr/local/bin
 
 # Ensure installed scripts are in PATH
-ENV PATH=/root/.local/bin:$PATH \
-    PYTHONUNBUFFERED=1 \
+ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 # Copy application source and configuration
@@ -63,6 +65,9 @@ RUN mkdir -p /app/data /app/logs && chown -R quad:quad /app/data /app/logs
 
 # Switch to non-root user
 USER quad
+
+# Expose health check / metrics port
+EXPOSE 9090
 
 # Volumes for persistent data
 VOLUME ["/app/data", "/app/config", "/app/logs"]
