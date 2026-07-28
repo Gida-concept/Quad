@@ -960,13 +960,11 @@ class QuadOrchestrator:
                 # ----------------------------------------------------------
                 # 4. Build strategy context (futures-only; no option chains)
                 # ----------------------------------------------------------
-                all_chains: list[Any] = []  # futures-only bot, no options
 
                 context = StrategyContext(
                     account=account,
                     positions=positions,
                     orders=open_orders,
-                    option_chain=all_chains,
                     config=self._config_dict,
                 )
 
@@ -1099,7 +1097,6 @@ class QuadOrchestrator:
             "market_context_collected",
             pairs=len(context.candles),
             positions=len(context.positions),
-            chains=len(context.option_chains),
             errors=len(context.errors),
         )
 
@@ -1530,12 +1527,10 @@ class QuadOrchestrator:
             except Exception:
                 pass
 
-            # Futures-only bot; no option chains
             return StrategyContext(
                 account=account,
                 positions=positions,
                 orders=open_orders,
-                option_chain=[],
                 config=self._config_dict,
             )
         except Exception as exc:
