@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim
+FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
@@ -80,3 +80,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # Default command: run the quad module entry point
 # Override with `quad` CLI by passing: ["quad", "start"]
 CMD ["python", "-m", "quad"]
+
+# ---------------------------------------------------------------------------
+# Stage 3: Production alias (used by Dokploy / third-party deploy tools)
+# ---------------------------------------------------------------------------
+FROM runtime AS production
