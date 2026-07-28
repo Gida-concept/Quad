@@ -309,7 +309,7 @@ class QuadOrchestrator:
         self._config_dict = self._config_manager.to_dict()
         self._mode = self._config_manager.get_mode()
         self._cycle_interval = int(
-            self._config_manager.get("trading.max_cycle_interval")
+            self._config_manager.get("trading.ai_cycle_interval")
         )
 
         # Merge Telegram env vars into config dict if not already present

@@ -44,7 +44,6 @@ ENV_VAR_MAP: dict[str, str] = {
     "QUAD_MODE": "_mode",
     "QUAD_DRY_RUN": "_dry_run",
     "QUAD_DEFAULT_STRATEGY": "trading.default_strategy",
-    "QUAD_MAX_CYCLE_INTERVAL": "trading.max_cycle_interval",
     "QUAD_DSN": "persistence.dsn",
     "QUAD_CONFIG_DIR": "config_dir",
     "BINANCE_API_KEY": "exchange.api_key",
