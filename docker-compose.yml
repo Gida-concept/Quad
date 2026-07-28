@@ -45,8 +45,8 @@ services:
     volumes:
       # Read-only config mount — local overrides, secrets
       - ./config:/app/config:ro
-      # Log output directory
-      - ./logs:/app/logs
+      # Log output directory (named volume — no host path needed)
+      - quad_logs:/app/logs
 
     environment:
       # --- Database ---
@@ -94,3 +94,4 @@ services:
 
 volumes:
   postgres_data:
+  quad_logs:
