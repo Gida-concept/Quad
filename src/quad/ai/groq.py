@@ -74,17 +74,68 @@ _DEFAULT_TEMPERATURE = 0.3
 def safe_parse_ai_response(raw: str) -> str:
     """Clean AI response text to extract valid JSON string.
 
-    Handles markdown code fences and partial / incomplete JSON wrapping
-    that the LLM occasionally returns (e.g. only ``"reasoning"`` without
-    the enclosing braces).
+    Handles:
+    - Markdown code fences (`` ```json `` / `` ``` ``)
+    - Standalone ``"reasoning"`` or ``"thinking"`` fields that appear as a
+      separate JSON object before the actual trading decision
+    - Multiple consecutive JSON objects (the reasoning block + the decision)
+    - Partial / incomplete JSON wrapping
+    - Text before / after the JSON payload
+
+    The function finds ALL complete JSON objects in the response by tracking
+    brace depth (correctly handling strings with ``{``/``}`` and escape
+    sequences), and returns the **last** one — reasoning blocks typically
+    come first, and the actual trading decision is the last valid JSON object.
 
     Returns a clean JSON string ready for ``json.loads``.
     """
+    # Strip code fences
     cleaned = re.sub(r"```json|```", "", raw).strip()
+    if not cleaned:
+        return "{}"
+
+    # Find all complete JSON objects by tracking brace depth.
+    # Properly handles strings with {, }, or escape sequences inside them.
+    json_objects: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+
+    for i, ch in enumerate(cleaned):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                json_objects.append(cleaned[start : i + 1])
+                start = -1
+
+    if json_objects:
+        # Return the LAST complete JSON object (the actual trading decision),
+        # because models often prepend a reasoning/thinking block as a
+        # separate JSON object before the decision payload.
+        return json_objects[-1]
+
+    # Fallback: try to find a JSON object anywhere in the remaining text
     if not cleaned.startswith("{"):
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if match:
-            cleaned = match.group()
+            return match.group()
+
     return cleaned
 
 

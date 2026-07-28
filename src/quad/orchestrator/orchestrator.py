@@ -516,7 +516,12 @@ class QuadOrchestrator:
             self._optimizer = None
 
     async def _init_telegram_bot(self) -> None:
-        """Initialise the Telegram bot (if enabled and configured)."""
+        """Initialise the Telegram bot (if enabled and configured).
+
+        Failure to start the Telegram bot is non-fatal: the subsystem logs
+        a warning and sets ``self._bot = None`` so the rest of the
+        orchestrator continues running without the Telegram interface.
+        """
         telegram_cfg = self._config_dict["telegram"]
         if not telegram_cfg.get("bot_token"):
             self._log.info("telegram_bot_disabled_no_token")
@@ -531,29 +536,41 @@ class QuadOrchestrator:
         # Lazy import to avoid PTB import errors when token is missing
         from quad.bot.bot import QuadBot
 
-        self._bot = QuadBot(
-            config=self._config_dict,
-            orchestrator=self,
-            risk_manager=self._risk_manager,
-            execution_engine=self._execution_engine,
-            market_data_engine=self._market_data,
-            db_manager=self._db_manager,
-            groq_client=self._groq_client,
-            optimizer=self._optimizer,
-        )
-        await self._bot.start()
+        try:
+            self._bot = QuadBot(
+                config=self._config_dict,
+                orchestrator=self,
+                risk_manager=self._risk_manager,
+                execution_engine=self._execution_engine,
+                market_data_engine=self._market_data,
+                db_manager=self._db_manager,
+                groq_client=self._groq_client,
+                optimizer=self._optimizer,
+            )
+            await self._bot.start()
 
-        # Capture the PTB Bot instance for trade notifications
-        if self._bot is not None and self._bot.application is not None:
-            self._telegram_bot = self._bot.application.bot
-        self._telegram_chat_id = int(
-            telegram_cfg.get("notification_chat_id") or 0
-        )
+            # Capture the PTB Bot instance for trade notifications
+            if self._bot is not None and self._bot.application is not None:
+                self._telegram_bot = self._bot.application.bot
+            self._telegram_chat_id = int(
+                telegram_cfg.get("notification_chat_id") or 0
+            )
 
-        self._log.info(
-            "telegram_bot_initialized",
-            chat_id=self._telegram_chat_id,
-        )
+            self._log.info(
+                "telegram_bot_initialized",
+                chat_id=self._telegram_chat_id,
+            )
+        except Exception as exc:
+            self._log.warning(
+                "telegram_bot_start_failed",
+                error=str(exc),
+                msg=(
+                    "Telegram bot could not start. "
+                    "The system will continue running without "
+                    "the Telegram interface."
+                ),
+            )
+            self._bot = None
 
     async def _init_health_server(self) -> None:
         """Initialise the health check HTTP server."""

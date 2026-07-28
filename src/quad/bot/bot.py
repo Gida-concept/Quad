@@ -17,7 +17,7 @@ from typing import Any
 
 import structlog
 from telegram import Update
-from telegram.error import TelegramError
+from telegram.error import Conflict, TelegramError
 from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
@@ -172,28 +172,85 @@ class QuadBot:
         # The retry with exponential backoff lets the old connection time out.
         await self._application.initialize()
         await self._application.start()
+
+        # Startup probe: check if another instance is already polling this bot token.
+        # A Conflict here means another process is polling — we log a warning
+        # and wait a few seconds before our own polling attempt.
+        try:
+            await self._application.bot.get_updates(
+                offset=-1,
+                timeout=1,
+                read_timeout=2,
+            )
+        except Conflict:
+            self._log.warning(
+                "polling_conflict_detected_on_probe",
+                msg=(
+                    "Another Telegram bot instance appears to be polling "
+                    "this bot token. Waiting 5 seconds before attempting "
+                    "to start polling."
+                ),
+            )
+            await asyncio.sleep(5)
+        except TelegramError:
+            # Non-conflict Telegram errors during the probe are non-fatal;
+            # they may indicate a brief network hiccup — proceed anyway.
+            pass
+
         max_polling_retries = 3
         polling_retry_delay = 2.0
+        polling_started = False
 
         for polling_attempt in range(max_polling_retries):
             try:
                 await self._application.updater.start_polling(  # type: ignore[union-attr]
                     drop_pending_updates=True,
                 )
+                polling_started = True
                 break
+            except Conflict as exc:
+                wait = polling_retry_delay * (2**polling_attempt)
+                self._log.warning(
+                    "polling_conflict_retrying",
+                    attempt=polling_attempt + 1,
+                    max_retries=max_polling_retries,
+                    wait_s=wait,
+                    error=str(exc),
+                )
+                if polling_attempt < max_polling_retries - 1:
+                    await asyncio.sleep(wait)
             except TelegramError as exc:
-                if "Conflict" in str(exc) and polling_attempt < max_polling_retries - 1:
+                if "Conflict" in str(exc):
                     wait = polling_retry_delay * (2**polling_attempt)
                     self._log.warning(
                         "polling_conflict_retrying",
                         attempt=polling_attempt + 1,
+                        max_retries=max_polling_retries,
                         wait_s=wait,
+                        error=str(exc),
                     )
-                    await asyncio.sleep(wait)
-                    continue
-                raise
+                    if polling_attempt < max_polling_retries - 1:
+                        await asyncio.sleep(wait)
+                else:
+                    self._log.warning(
+                        "polling_start_failed_non_conflict",
+                        error=str(exc),
+                    )
+                    break
 
-        self._log.info("bot_started")
+        if polling_started:
+            self._log.info("bot_started")
+        else:
+            self._log.warning(
+                "bot_started_without_polling",
+                msg=(
+                    "Telegram bot application is running but polling could "
+                    "not start due to a persistent Conflict error. The bot "
+                    "will still send notifications and run background jobs, "
+                    "but will not receive commands until the conflicting "
+                    "instance is stopped and polling is re-established."
+                ),
+            )
 
     async def stop(self) -> None:
         """Gracefully shut down the Application."""
