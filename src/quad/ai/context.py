@@ -26,7 +26,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-import aiohttp
 import structlog
 
 from quad.config.schema import AiConfig
@@ -43,19 +42,11 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_BINANCE_FUTURES_KLINE_URL = "https://fapi.binance.com/fapi/v1/klines"
-
-# Shared aiohttp session (created on first use, closed via close_http_session())
-_shared_session: aiohttp.ClientSession | None = None
-
 # Mapping from our timeframe strings to Binance interval strings
 _TIMEFRAME_MAP: dict[str, str] = {
     "15m": "15m",
     "1h": "1h",
 }
-
-# aiohttp timeout for klines requests
-_KLINE_TIMEOUT_S = 15
 
 
 # ============================================================================
@@ -110,34 +101,27 @@ class MarketContext:
 # ============================================================================
 
 
-def _get_http_session() -> aiohttp.ClientSession:
-    """Return the shared aiohttp session, creating it on first access."""
-    global _shared_session
-    if _shared_session is None or _shared_session.closed:
-        _shared_session = aiohttp.ClientSession()
-    return _shared_session
-
-
 async def close_http_session() -> None:
-    """Close the shared aiohttp session (call during application shutdown)."""
-    global _shared_session
-    if _shared_session is not None and not _shared_session.closed:
-        await _shared_session.close()
-        _shared_session = None
+    """No-op kept for backward compatibility."""
+    pass
 
 
 async def _fetch_klines(
-    session: aiohttp.ClientSession,
+    exchange_adapter: Any,
     pair: str,
     interval: str,
     limit: int,
 ) -> list[tuple[float, ...]] | None:
-    """Fetch klines from the Binance Spot public API.
+    """Fetch klines via the exchange adapter.
+
+    Routes through the adapter's ``get_klines()`` method, which handles
+    URL resolution (production vs. testnet), rate-limit tracking, retries,
+    and server time offset.
 
     Parameters
     ----------
-    session:
-        Reusable aiohttp session.
+    exchange_adapter:
+        Exchange adapter with a ``get_klines`` method.
     pair:
         Trading pair, e.g. ``"BTCUSDT"``.
     interval:
@@ -151,46 +135,9 @@ async def _fetch_klines(
         Each tuple: (open_time, open, high, low, close, volume, ...).
         Timestamps are in seconds.
     """
-    params: dict[str, Any] = {
-        "symbol": pair,
-        "interval": interval,
-        "limit": limit,
-    }
-
     try:
-        async with session.get(
-            _BINANCE_FUTURES_KLINE_URL,
-            params=params,
-            timeout=aiohttp.ClientTimeout(total=_KLINE_TIMEOUT_S),
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.warning(
-                    "kline_fetch_failed",
-                    pair=pair,
-                    interval=interval,
-                    status=resp.status,
-                    body=body[:200],
-                )
-                return None
-
-            data = await resp.json()
-            # Binance kline format (index -> field):
-            # 0 -> open time (ms), 1 -> open, 2 -> high, 3 -> low,
-            # 4 -> close, 5 -> volume, 6 -> close time (ms), ...
-            results: list[tuple[float, ...]] = []
-            for k in data:
-                results.append((
-                    k[0] / 1000.0,  # open time in seconds
-                    float(k[1]),     # open
-                    float(k[2]),     # high
-                    float(k[3]),     # low
-                    float(k[4]),     # close
-                    float(k[5]),     # volume
-                ))
-            return results
-
-    except (asyncio.TimeoutError, aiohttp.ClientError, ValueError, TypeError) as exc:
+        return await exchange_adapter.get_klines(pair, interval, limit)
+    except Exception as exc:
         logger.warning(
             "kline_request_error",
             pair=pair,
@@ -286,16 +233,15 @@ async def collect_market_context(
     context = MarketContext(timestamp=time.time())
 
     # ------------------------------------------------------------------
-    # 1. Fetch candles via Binance Futures klines API (reused session)
+    # 1. Fetch candles via Binance Futures klines API (via exchange adapter)
     # ------------------------------------------------------------------
     try:
-        session = _get_http_session()
         tasks = []
         for pair in pairs:
             for tf in timeframes:
                 interval = _TIMEFRAME_MAP.get(tf, tf)
                 tasks.append(
-                    _fetch_klines(session, pair, interval, candle_count)
+                    _fetch_klines(exchange_adapter, pair, interval, candle_count)
                 )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -428,6 +428,44 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         )
         return Decimal(str(data.get("markPrice", "0")))
 
+    async def get_klines(
+        self, symbol: str, interval: str, limit: int = 500
+    ) -> list[tuple[float, ...]]:
+        """Fetch kline/candlestick data for a symbol.
+
+        Calls ``GET /fapi/v1/klines`` (unsigned).
+
+        Uses the adapter's own ``_request()`` method, which handles URL
+        resolution (production vs. testnet), rate-limit tracking, retries,
+        server time offset, and connection management.
+
+        Args:
+            symbol: Trading pair symbol, e.g. ``"BTCUSDT"``.
+            interval: Kline interval, e.g. ``"15m"``, ``"1h"``.
+            limit: Number of candles to fetch (max 1000, default 500).
+
+        Returns:
+            List of ``(open_time_s, open, high, low, close, volume)`` tuples.
+            ``open_time_s`` is the open timestamp in seconds (float).
+        """
+        data = await self._request(
+            "GET", "/fapi/v1/klines", signed=False,
+            data={"symbol": symbol, "interval": interval, "limit": limit},
+        )
+
+        # Binance kline format: [open_time, open, high, low, close, volume, ...]
+        results: list[tuple[float, ...]] = []
+        for k in data:
+            results.append((
+                k[0] / 1000.0,  # open time in seconds
+                float(k[1]),     # open
+                float(k[2]),     # high
+                float(k[3]),     # low
+                float(k[4]),     # close
+                float(k[5]),     # volume
+            ))
+        return results
+
     # ======================================================================
     # REST — Order Management
     # ======================================================================
