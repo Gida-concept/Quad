@@ -20,6 +20,15 @@ __all__ = [
     "RiskResult",
     "FuturesRiskMetadata",
     "Action",
+    "ActionType",
+]
+
+# Canonical action type constants (single source of truth)
+ActionType = Literal[
+    "ENTER", "EXIT", "HOLD",
+    "adjust_stop", "reduce_position",
+    "set_stop_loss", "set_take_profit",
+    "open_long", "open_short", "close_long", "close_short",
 ]
 
 
@@ -101,7 +110,7 @@ class Action:
     Represents a decision to enter, exit, adjust, or hold a position.
     """
 
-    type: Literal["open_long", "open_short", "close_long", "close_short", "hold", "adjust_stop", "reduce_position", "set_stop_loss", "set_take_profit"] = "hold"
+    type: ActionType = "HOLD"
     strategy: str = ""
     symbol: str = ""
     quantity: Decimal = Decimal("0")
@@ -117,12 +126,31 @@ class Action:
     take_profit_price: Decimal | None = None
 
     def __post_init__(self) -> None:
-        """Synchronise derived fields after initialisation."""
+        """Synchronise derived fields after initialisation.
+
+        Maps action types to default sides and order types.  Only sets
+        ``side`` when it was not explicitly provided by the caller, so
+        AI-generated actions that include a ``side`` field are preserved.
+        """
         self.contract = self.contract or self.symbol
-        if self.type in ("open_long", "close_short"):
-            self.side = "BUY"
-        elif self.type in ("open_short", "close_long", "set_stop_loss", "set_take_profit"):
-            self.side = "SELL"
+        # Set side only if not already provided
+        if not self.side:
+            if self.type in ("open_long", "close_short", "ENTER"):
+                if self.type == "ENTER":
+                    self.side = "BUY"  # default: open long
+                elif self.type == "open_long":
+                    self.side = "BUY"
+                elif self.type == "close_short":
+                    self.side = "BUY"
+            elif self.type in ("open_short", "close_long", "EXIT"):
+                if self.type == "EXIT":
+                    self.side = "SELL"  # default: close long
+                elif self.type == "open_short":
+                    self.side = "SELL"
+                elif self.type == "close_long":
+                    self.side = "SELL"
+            elif self.type in ("set_stop_loss", "set_take_profit"):
+                self.side = "SELL"
         if self.type == "set_stop_loss":
             self.order_type = "STOP_LOSS"
         elif self.type == "set_take_profit":

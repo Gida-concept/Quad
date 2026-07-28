@@ -12,9 +12,11 @@ QuadBot
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 from typing import Any
 
 import structlog
+from telegram import Update
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 from telegram.ext import (
@@ -22,6 +24,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
+    ContextTypes,
     ConversationHandler,
     MessageHandler,
     filters,
@@ -226,6 +229,30 @@ class QuadBot:
     # Internal: handler / job registration
     # ------------------------------------------------------------------
 
+    def _rate_limit_wrapper(
+        self,
+        cmd: str,
+        handler,
+    ):
+        """Wrap a command handler with per-user rate limiting.
+
+        Returns an async callback suitable for ``CommandHandler`` that
+        checks the rate limit before delegating to *handler*.
+        """
+
+        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Any:
+            user_id = update.effective_user.id if update.effective_user else 0
+            remaining = self._commands._check_rate_limit(user_id, cmd)
+            if remaining is not None:
+                if update.message:
+                    await update.message.reply_text(
+                        f"Please wait {remaining}s before using /{cmd} again.",
+                    )
+                return
+            return await handler(update, context)
+
+        return wrapped
+
     def _setup_handlers(self) -> None:
         """Register all CommandHandlers and the error handler."""
         if self._application is None:
@@ -233,33 +260,39 @@ class QuadBot:
 
         app = self._application
 
-        # Simple command handlers
-        app.add_handler(CommandHandler("start", self._commands.cmd_start))
-        app.add_handler(CommandHandler("help", self._commands.cmd_help))
-        app.add_handler(CommandHandler("status", self._commands.cmd_status))
-        app.add_handler(CommandHandler("balance", self._commands.cmd_balance))
-        app.add_handler(CommandHandler("positions", self._commands.cmd_positions))
-        app.add_handler(CommandHandler("orders", self._commands.cmd_orders))
-        app.add_handler(CommandHandler("funding_rate", self._commands.cmd_funding_rate))
-        app.add_handler(CommandHandler("book", self._commands.cmd_book))
-        app.add_handler(CommandHandler("leverage", self._commands.cmd_leverage))
-        app.add_handler(CommandHandler("position_mode", self._commands.cmd_position_mode))
-        app.add_handler(CommandHandler("liquidation_warnings", self._commands.cmd_liquidation_warnings))
-        app.add_handler(CommandHandler("market_regime", self._commands.cmd_market_regime))
-        app.add_handler(CommandHandler("strategies", self._commands.cmd_strategies))
-        app.add_handler(CommandHandler("kill", self._commands.cmd_kill))
-        app.add_handler(CommandHandler("risk", self._commands.cmd_risk))
-        app.add_handler(CommandHandler("cancel", self._commands.cmd_cancel))
-        app.add_handler(CommandHandler("settings", self._commands.cmd_settings))
-        app.add_handler(CommandHandler("set", self._commands.cmd_set))
+        # Simple command handlers (rate limited)
+        _command_names = [
+            "start",
+            "help",
+            "status",
+            "balance",
+            "positions",
+            "orders",
+            "funding_rate",
+            "book",
+            "leverage",
+            "position_mode",
+            "liquidation_warnings",
+            "market_regime",
+            "strategies",
+            "kill",
+            "risk",
+            "cancel",
+            "settings",
+            "set",
+            "analyze",
+            "ai_strategy",
+            "ai_status",
+            "ai_decision",
+        ]
+        for name in _command_names:
+            handler = getattr(self._commands, f"cmd_{name}", None)
+            if handler is not None:
+                app.add_handler(
+                    CommandHandler(name, self._rate_limit_wrapper(name, handler))
+                )
 
-        # AI-powered commands
-        app.add_handler(CommandHandler("analyze", self._commands.cmd_analyze))
-        app.add_handler(CommandHandler("ai_strategy", self._commands.cmd_ai_strategy))
-        app.add_handler(CommandHandler("ai_status", self._commands.cmd_ai_status))
-        app.add_handler(CommandHandler("ai_decision", self._commands.cmd_ai_decision))
-
-        # Execute conversation handler (multi-step)
+        # Execute conversation handler (multi-step, not rate-limited)
         app.add_handler(self._commands.get_execute_conversation_handler())
 
         # Kill switch inline keyboard callback handler
@@ -284,8 +317,6 @@ class QuadBot:
         if job_queue is None:
             self._log.warning("job_queue_not_available")
             return
-
-        import datetime as dt
 
         self._job_intervals = self._telegram_config["job_intervals"]
 

@@ -9,6 +9,8 @@ Orchestrates the 4-phase cycle:
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import time
 from decimal import Decimal
@@ -87,6 +89,7 @@ class Optimizer:
         self._rec_repo = recommendation_repo
         self._config_change_repo = config_change_repo
         self._config_dict = config_dict
+        self._config_lock = asyncio.Lock()
         self._log = logger.bind()
         self._consecutive_failures = 0
 
@@ -272,8 +275,37 @@ class Optimizer:
         score = confidence_map.get(rec.confidence, 0.0)
         return score >= self._retrain_cfg.confidence_threshold
 
+    async def _safe_update_config(self, key_path: str, value: Any) -> None:
+        """Atomically update a nested key in ``_config_dict`` under a lock.
+
+        Uses ``copy.deepcopy`` to avoid mutating the dict while other
+        coroutines may be reading it, then swaps the reference under
+        ``_config_lock``.
+
+        Parameters
+        ----------
+        key_path:
+            Dot-separated key path, e.g. ``"strategy.trend_following"``.
+        value:
+            New value to set at the key path.
+        """
+        if self._config_dict is None:
+            return
+        async with self._config_lock:
+            cfg = copy.deepcopy(self._config_dict)
+            parts = key_path.split(".")
+            target = cfg
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = value
+            self._config_dict = cfg
+
     async def _apply_recommendation(self, rec: OptimizationRecommendationModel) -> None:
         """Apply a single recommendation to the running config.
+
+        Uses ``copy.deepcopy`` on ``_config_dict`` before making changes, then
+        swaps the reference atomically under a lock, so concurrent readers see
+        a consistent view.
 
         Based on ``rec.recommendation_type``:
 
@@ -310,9 +342,7 @@ class Optimizer:
 
         if rec_type == "parameter_adjustment":
             # Update strategy parameters nested under strategy.<target>
-            if self._config_dict is not None:
-                strategy_section = self._config_dict.setdefault("strategy", {})
-                strategy_section[target] = recommended
+            await self._safe_update_config(f"strategy.{target}", recommended)
 
             # Update the Pydantic config model
             params = self._config.strategy_params or {}
@@ -330,10 +360,10 @@ class Optimizer:
 
         elif rec_type == "prompt_update":
             # Update the system prompt override
-            if self._config_dict is not None:
-                ai_section = self._config_dict.setdefault("ai", {})
-                if target == "system_prompt":
-                    ai_section["system_prompt_override"] = str(recommended)
+            if target == "system_prompt":
+                await self._safe_update_config(
+                    "ai.system_prompt_override", str(recommended)
+                )
 
             # Update the Pydantic AiConfig via the parent QuadConfig
             ai_cfg = self._config.ai
@@ -359,9 +389,7 @@ class Optimizer:
 
         elif rec_type == "risk_threshold":
             # Update risk configuration values
-            if self._config_dict is not None:
-                risk_section = self._config_dict.setdefault("risk", {})
-                risk_section[target] = recommended
+            await self._safe_update_config(f"risk.{target}", recommended)
 
             await self._log_config_change(
                 key=f"risk.{target}",
@@ -372,9 +400,7 @@ class Optimizer:
 
         elif rec_type == "strategy_toggle":
             # Enable / disable a strategy
-            if self._config_dict is not None:
-                strategy_section = self._config_dict.setdefault("strategy", {})
-                strategy_section[target] = recommended
+            await self._safe_update_config(f"strategy.{target}.enabled", recommended)
 
             await self._log_config_change(
                 key=f"strategy.{target}.enabled",

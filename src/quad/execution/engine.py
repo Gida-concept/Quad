@@ -66,10 +66,10 @@ class ExecutionEngine:
         # Build the twap sub-config: TwapSlicer expects flat keys from
         # execution.twap.* plus a default_window_seconds key that maps
         # to execution.twap_window_seconds.
-        exec_cfg = self._config["execution"]
-        twap_cfg = dict(exec_cfg["twap"])
+        exec_cfg = self._config.get("execution", {})
+        twap_cfg = dict(exec_cfg.get("twap", {}))
         twap_cfg["default_window_seconds"] = int(
-            exec_cfg["twap_window_seconds"]
+            exec_cfg.get("twap_window_seconds", 300)
         )
         self._twap = TwapSlicer(config=twap_cfg)
         self._reconciler = FillReconciler(
@@ -182,7 +182,7 @@ class ExecutionEngine:
                 client_order_id=order_request.client_order_id,
                 symbol=order_request.symbol,
                 side=order_request.side,
-                type=order_request.type,
+                order_type=order_request.order_type,
                 quantity=order_request.quantity,
                 price=order_request.price,
                 status="REJECTED",
@@ -204,7 +204,7 @@ class ExecutionEngine:
                 client_order_id=order_request.client_order_id,
                 symbol=order_request.symbol,
                 side=order_request.side,
-                type=order_request.type,
+                order_type=order_request.order_type,
                 quantity=order_request.quantity,
                 price=order_request.price,
                 status="REJECTED",
@@ -304,7 +304,7 @@ class ExecutionEngine:
         order_request = self._build_request(action)
 
         if window is None:
-            window = self._config["execution"]["twap_window_seconds"]
+            window = self._config.get("execution", {}).get("twap_window_seconds", 300)
 
         # 1. Risk check (skip if already checked upstream)
         if action.risk_checked:
@@ -325,7 +325,7 @@ class ExecutionEngine:
                     client_order_id=order_request.client_order_id,
                     symbol=order_request.symbol,
                     side=order_request.side,
-                    type=order_request.type,
+                    order_type=order_request.order_type,
                     quantity=order_request.quantity,
                     price=order_request.price,
                     status="REJECTED",
@@ -347,7 +347,7 @@ class ExecutionEngine:
                     client_order_id=order_request.client_order_id,
                     symbol=order_request.symbol,
                     side=order_request.side,
-                    type=order_request.type,
+                    order_type=order_request.order_type,
                     quantity=order_request.quantity,
                     price=order_request.price,
                     status="REJECTED",
@@ -441,7 +441,7 @@ class ExecutionEngine:
 
     async def _reconciliation_loop(self) -> None:
         """Background loop that periodically reconciles order state."""
-        interval = self._config["execution"]["reconcile_interval_seconds"]
+        interval = self._config.get("execution", {}).get("reconcile_interval_seconds", 60)
 
         while not self._stop_event.is_set():
             try:
@@ -470,25 +470,26 @@ class ExecutionEngine:
 
     def _build_request(self, action: Action) -> OrderRequest:
         """Build an ``OrderRequest`` from an ``Action``."""
+        exec_cfg = self._config.get("execution", {})
         order_request = OrderRequest(
             symbol=action.contract or "",
             side=action.side or "",
-            type=action.order_type or self._config["execution"]["default_order_type"],
+            type=action.order_type or exec_cfg.get("default_order_type", "LIMIT"),
             quantity=action.quantity,
             price=action.price,
-            reduce_only=self._config["execution"]["reduce_only"],
-            post_only=self._config["execution"]["post_only"],
+            reduce_only=exec_cfg.get("reduce_only", False),
+            post_only=exec_cfg.get("post_only", False),
         )
 
         # Handle TP/SL action types
         if action.type == "set_stop_loss":
-            order_request.type = "STOP_LOSS"
+            order_request.order_type = "STOP_LOSS"
             order_request.stop_price = action.stop_loss_price
             order_request.reduce_only = True
             order_request.working_type = "MARK_PRICE"
             order_request.price_protect = True
         elif action.type == "set_take_profit":
-            order_request.type = "TAKE_PROFIT"
+            order_request.order_type = "TAKE_PROFIT"
             order_request.stop_price = action.take_profit_price
             order_request.reduce_only = True
 

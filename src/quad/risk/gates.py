@@ -51,7 +51,7 @@ ALL_GATES = [
 
 def _is_entry(action_type: str) -> bool:
     """Return True for action types that open a new position."""
-    return action_type in ("open_long", "open_short")
+    return action_type in ("ENTER", "open_long", "open_short")
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ class GatePipeline:
     def __init__(self, config: dict[str, Any]) -> None:
         self._log = structlog.get_logger(__name__)
 
-        self._cfg: dict[str, Any] = config["risk"]
+        self._cfg: dict[str, Any] = config.get("risk", config)
 
         # Gate enable/disable flags -- all enabled by default
         self._enabled: dict[str, bool] = {g: True for g in ALL_GATES}

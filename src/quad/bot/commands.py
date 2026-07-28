@@ -8,8 +8,10 @@ format the response as Telegram markdown messages.
 from __future__ import annotations
 
 import json as _json
+import re as _re
 import time as _time
 import warnings
+from collections import defaultdict
 from decimal import Decimal
 from typing import Any
 
@@ -83,6 +85,56 @@ class QuadBotCommands:
         self._market_data_engine = shared_state.get("market_data_engine")
         self._db_manager = shared_state.get("db_manager")
         self._groq_client = shared_state.get("groq_client")
+
+        # Rate limiting: per-user per-command cooldown tracking
+        self._last_cmd: dict[int, dict[str, float]] = defaultdict(dict)
+        self._rate_limit_config: dict[str, float] = {
+            # AI-powered commands (expensive): 30s cooldown
+            "analyze": 30.0,
+            "ai_strategy": 30.0,
+            "ai_decision": 30.0,
+            # Status / data commands: 5s cooldown
+            "status": 5.0,
+            "balance": 5.0,
+            "positions": 5.0,
+            "orders": 5.0,
+            "funding_rate": 5.0,
+            "book": 5.0,
+            "market_regime": 5.0,
+            "liquidation_warnings": 5.0,
+            "strategies": 5.0,
+            "risk": 5.0,
+            "settings": 5.0,
+            # Safety commands: 2s cooldown
+            "start": 2.0,
+            "help": 2.0,
+            "leverage": 2.0,
+            "position_mode": 2.0,
+            "set": 2.0,
+            "ai_status": 2.0,
+            # Critical safety commands: no cooldown
+            "kill": 0.0,
+            "cancel": 0.0,
+        }
+        # Default cooldown for commands not listed
+        self._default_cooldown = 2.0
+
+    def _check_rate_limit(self, user_id: int, cmd: str) -> float | None:
+        """Check if *cmd* is rate-limited for *user_id*.
+
+        Returns ``None`` if the command passes, or the remaining cooldown
+        in seconds if the user must wait.
+        """
+        now = _time.time()
+        cooldown = self._rate_limit_config.get(cmd, self._default_cooldown)
+        if cooldown <= 0:
+            return None
+        last = self._last_cmd[user_id].get(cmd, 0.0)
+        elapsed = now - last
+        if elapsed < cooldown:
+            return round(cooldown - elapsed, 1)
+        self._last_cmd[user_id][cmd] = now
+        return None
 
     # ------------------------------------------------------------------
     # Simple command handlers
@@ -1015,13 +1067,11 @@ class QuadBotCommands:
             await update.message.reply_text("Usage: `/cancel <order_id>`")
             return
 
-        import re
-
         order_id = context.args[0].strip()
         if len(order_id) > 100:
             await update.message.reply_text("Order ID too long (max 100 chars)")
             return
-        if not re.match(r'^[a-zA-Z0-9_\-]+$', order_id):
+        if not _re.match(r'^[a-zA-Z0-9_\-]+$', order_id):
             await update.message.reply_text("Invalid order ID format")
             return
 

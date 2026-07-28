@@ -181,7 +181,7 @@ class MockAdapter(ExchangeAdapter):
         self._next_order_id += 1
 
         status = "NEW"
-        if request.type.upper() == "MARKET":
+        if request.order_type.upper() == "MARKET":
             status = "FILLED"
         elif request.price is not None:
             status = "NEW"
@@ -202,7 +202,7 @@ class MockAdapter(ExchangeAdapter):
             client_order_id=request.client_order_id or "",
             symbol=request.symbol,
             side=request.side,
-            type=request.type,
+            order_type=request.order_type,
             quantity=request.quantity,
             filled_qty=request.quantity if status == "FILLED" else Decimal("0"),
             price=request.price,
@@ -216,7 +216,7 @@ class MockAdapter(ExchangeAdapter):
             client_order_id=request.client_order_id or "",
             symbol=request.symbol,
             side=request.side,
-            type=request.type,
+            order_type=request.order_type,
             quantity=request.quantity,
             filled_qty=order.filled_qty,
             price=request.price,

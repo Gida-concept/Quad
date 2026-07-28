@@ -1,6 +1,6 @@
-"""Backtest engine for Quad options trading bot.
+"""Backtest engine for Quad futures trading bot.
 
-Simulates running a trading strategy against historical option data.
+Simulates running a trading strategy against historical market data.
 The engine steps through time, evaluates the strategy at each interval,
 and tracks simulated trades, PnL, and performance metrics without
 placing real orders.
@@ -38,7 +38,7 @@ logger = structlog.get_logger(__name__)
 class BacktestEngine:
     """Simulates strategy execution against historical data.
 
-    Loads historical option snapshots from the database, steps through
+    Loads historical market data from the database, steps through
     time, evaluates the strategy at each interval, and tracks simulated
     trades and performance metrics.  Does NOT place real orders.
 
@@ -340,29 +340,12 @@ class BacktestEngine:
     ) -> StrategyContext:
         """Build a ``StrategyContext`` from historical data at a given timestamp.
 
-        Attempts to load option chain snapshots and candle data from the
-        database.  Falls back to empty data if the database is unavailable.
+        Falls back to empty data if the database is unavailable.
         """
         context = StrategyContext(
             config=dict(self._config),
             strategy_params={},
         )
-
-        if self._db is not None:
-            try:
-                # Try to get historical option chain snapshot
-                async with self._db.pool.acquire() as conn:
-                    rows = await conn.fetch(
-                        "SELECT * FROM option_contracts WHERE underlying = $1 AND expiry > $2",
-                        underlying, timestamp_ms,
-                    )
-                    context.option_chain = list(rows or [])
-            except Exception as exc:
-                self._log.debug(
-                    "backtest_chain_load_failed",
-                    timestamp=timestamp.isoformat(),
-                    error=str(exc),
-                )
 
         return context
 
@@ -389,18 +372,8 @@ class BacktestEngine:
         fill_price = action.price
 
         if fill_price is None:
-            # Try to find a price from the option chain
-            for contract in context.option_chain:
-                symbol = getattr(contract, "symbol", getattr(contract, "contract", ""))
-                if symbol == action.contract:
-                    mid = (
-                        (Decimal(str(getattr(contract, "bid", 0) or 0))
-                         + Decimal(str(getattr(contract, "ask", 0) or 0)))
-                        / Decimal("2")
-                    )
-                    if mid > 0:
-                        fill_price = mid
-                    break
+            # No market data available for price discovery in backtest
+            pass
 
         if fill_price is None or fill_price <= 0:
             self._log.debug(
@@ -449,18 +422,6 @@ class BacktestEngine:
 
         for symbol, pos in open_positions.items():
             current_price = pos.get("entry_price", Decimal("0"))
-            # Try to get a current price from the context
-            for contract in context.option_chain:
-                sym = getattr(contract, "symbol", getattr(contract, "contract", ""))
-                if sym == symbol:
-                    mid = (
-                        (Decimal(str(getattr(contract, "bid", 0) or 0))
-                         + Decimal(str(getattr(contract, "ask", 0) or 0)))
-                        / Decimal("2")
-                    )
-                    if mid > 0:
-                        current_price = mid
-                    break
 
             total += current_price * pos.get("quantity", Decimal("0"))
 

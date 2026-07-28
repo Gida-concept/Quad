@@ -677,7 +677,7 @@ class QuadOrchestrator:
         server.  Requires ``tradingview_webhook.enabled`` in config.
         """
         tv_cfg = TradingViewWebhookConfig.model_validate(
-            self._config_dict["tradingview_webhook"]
+            self._config_dict.get("tradingview_webhook", {})
         )
         if not tv_cfg.enabled:
             self._log.info("tradingview_webhook_disabled")
@@ -702,9 +702,27 @@ class QuadOrchestrator:
                 msg=(
                     "TradingView webhook is enabled but no secret is configured. "
                     "Set a non-empty secret via tradingview_webhook.secret in config "
-                    "or the QUAD_TRADINGVIEW_WEBHOOK_SECRET env var."
+                    "or the QUAD_TRADINGVIEW_WEBHOOK_SECRET env var. "
+                    "The webhook will reject all requests until a secret is set."
                 ),
             )
+
+        # Check whether auth is strictly required (default: yes, fail closed)
+        tv_allow_noauth = self._config_dict.get("tradingview_webhook", {}).get(
+            "allow_without_secret", False
+        )
+        if not secret and not tv_allow_noauth:
+            self._log.error(
+                "tradingview_webhook_disabled_no_secret",
+                msg=(
+                    "TradingView webhook is enabled but no secret is configured and "
+                    "allow_without_secret is not set.  The webhook is disabled.  "
+                    "Either set a secret or explicitly set "
+                    "tradingview_webhook.allow_without_secret: true in config."
+                ),
+            )
+            self._tv_webhook = None
+            return
 
         # Build the aiohttp handler
         async def _tv_webhook_handler(request: Any) -> Any:
@@ -908,7 +926,9 @@ class QuadOrchestrator:
         The cycle runs every ``ai_cycle_interval`` seconds (default 3600).
         Exactly one position at a time is enforced by the force-close step.
         """
-        underlyings = list(self._config_manager["trading"]["underlyings"])
+        underlyings = list(
+            self._config_manager.get("trading", {}).get("underlyings", [])
+        )
 
         while not self._stop_event.is_set():
             cycle_start = time.monotonic()

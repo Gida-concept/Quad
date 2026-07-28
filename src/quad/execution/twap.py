@@ -20,6 +20,7 @@ Algorithm
 
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from collections.abc import Sequence
@@ -43,23 +44,23 @@ class TwapSlicer:
     Parameters
     ----------
     config:
-        Configuration dictionary.  Must contain keys expected by the slicer
+        Configuration dictionary with optional keys
         (``min_slices``, ``max_slices``, ``default_window_seconds``,
         ``jitter_seconds``, ``min_slice_quantity``,
-        ``fill_urgency_threshold``).  A ``KeyError`` is raised if any are
-        missing — no fallback defaults are applied.
+        ``fill_urgency_threshold``).  Sensible defaults are applied when a
+        key is missing.
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
         self._log = structlog.get_logger(__name__)
         self._config = config
 
-        self._min_slices = int(config["min_slices"])
-        self._max_slices = int(config["max_slices"])
-        self._default_window = int(config["default_window_seconds"])
-        self._jitter_seconds = float(config["jitter_seconds"])
-        self._min_slice_qty: Decimal = config["min_slice_quantity"]
-        self._urgency_threshold = float(config["fill_urgency_threshold"])
+        self._min_slices = int(config.get("min_slices", 1))
+        self._max_slices = int(config.get("max_slices", 10))
+        self._default_window = int(config.get("default_window_seconds", 300))
+        self._jitter_seconds = float(config.get("jitter_seconds", 5.0))
+        self._min_slice_qty: Decimal = config.get("min_slice_quantity", Decimal("0.001"))
+        self._urgency_threshold = float(config.get("fill_urgency_threshold", 0.5))
 
     # ------------------------------------------------------------------
     # Public API
@@ -130,7 +131,7 @@ class TwapSlicer:
                 OrderRequest(
                     symbol=order_request.symbol,
                     side=order_request.side,
-                    type=order_request.type,
+                    order_type=order_request.order_type,
                     quantity=slice_qty,
                     price=order_request.price,
                     stop_price=order_request.stop_price,
@@ -225,7 +226,7 @@ class TwapSlicer:
                         urgent_req = OrderRequest(
                             symbol=slice_req.symbol,
                             side=slice_req.side,
-                            type=slice_req.type,
+                            order_type=slice_req.order_type,
                             quantity=remaining,
                             price=order_request.price,
                             client_order_id=(
@@ -271,6 +272,4 @@ __all__ = [
 # Small helper to avoid clashing with built-in ``time.sleep``
 async def asyncio_sleep(delay: float) -> None:
     """Async sleep helper (wraps ``asyncio.sleep``)."""
-    import asyncio
-
     await asyncio.sleep(delay)

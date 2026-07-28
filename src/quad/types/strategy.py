@@ -107,8 +107,5 @@ class StrategyContext:
     strategy_params: dict[str, Any] = field(default_factory=dict)
     """Strategy-specific parameters."""
 
-    option_chain: list[Any] = field(default_factory=list)
-    """Option chain contracts (empty for futures-only bot; used by backtester)."""
-
     historical: HistoricalDataAccess | None = None
     """Interface for accessing historical market data."""

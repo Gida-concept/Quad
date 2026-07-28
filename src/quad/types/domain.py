@@ -204,7 +204,7 @@ class Order:
     side: str = ""
     """Order side: BUY or SELL."""
 
-    type: str = ""
+    order_type: str = ""
     """Order type: LIMIT, MARKET, STOP_LOSS, etc."""
 
     quantity: Decimal = Decimal("0")
@@ -246,7 +246,7 @@ class OrderRequest:
     side: str = ""
     """Order side: BUY or SELL."""
 
-    type: str = ""
+    order_type: str = ""
     """Order type: LIMIT, MARKET, STOP_LOSS, etc."""
 
     quantity: Decimal = Decimal("0")
@@ -291,7 +291,7 @@ class OrderResult:
     side: str = ""
     """Order side: BUY or SELL."""
 
-    type: str = ""
+    order_type: str = ""
     """Order type."""
 
     quantity: Decimal = Decimal("0")

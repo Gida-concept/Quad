@@ -57,12 +57,14 @@ class BaseRepository(Generic[T]):
         self,
         db_manager: DatabaseManager,
         model_cls: Optional[type[T]] = None,
+        slow_query_threshold_ms: int = 500,
     ) -> None:
         self._db = db_manager
         self._model_cls = model_cls  # type: ignore[assignment]
         self._table = model_cls.__tablename__  # type: ignore[attr-defined]
         self._columns = model_cls.columns()  # type: ignore[attr-defined]
         self._log = logger.bind(table=self._table)
+        self._slow_query_threshold_ms = slow_query_threshold_ms
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -104,7 +106,7 @@ class BaseRepository(Generic[T]):
                     id,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get", id=id)
             if row is None:
                 return None
@@ -131,7 +133,7 @@ class BaseRepository(Generic[T]):
                     rows = await conn.fetch(sql)
 
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="list")
             return [self._model_cls.from_row(r) for r in rows]  # type: ignore[attr-defined]
         except Exception:
@@ -150,7 +152,7 @@ class BaseRepository(Generic[T]):
                     *model.to_row(),  # type: ignore[attr-defined]
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="create")
             self._log.info("row_created", id=last_id)
             return last_id  # type: ignore[return-value]
@@ -178,7 +180,7 @@ class BaseRepository(Generic[T]):
                     id,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="update", id=id)
             self._log.info("row_updated", id=id, fields=list(updates.keys()))
         except Exception:
@@ -195,7 +197,7 @@ class BaseRepository(Generic[T]):
                     id,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="delete", id=id)
             self._log.info("row_deleted", id=id)
         except Exception:
@@ -219,7 +221,7 @@ class BaseRepository(Generic[T]):
                         f"SELECT COUNT(*) FROM {self._table}"
                     )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="count")
             return row if row is not None else 0  # type: ignore[return-value]
         except Exception:
@@ -256,7 +258,7 @@ class AccountRepository(BaseRepository[AccountModel]):
                     exchange,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_exchange")
             if row is None:
                 return None
@@ -299,7 +301,7 @@ class AccountRepository(BaseRepository[AccountModel]):
                     *account.to_row(),
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="upsert_account")
             return last_id  # type: ignore[return-value]
         except Exception:
@@ -347,7 +349,7 @@ class PositionRepository(BaseRepository[PositionModel]):
                         symbol,
                     )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_open_futures_positions")
             return [PositionModel.from_row(r) for r in rows]
         except Exception:
@@ -368,7 +370,7 @@ class PositionRepository(BaseRepository[PositionModel]):
                     "WHERE status = 'OPEN' AND liquidation_price != '0' AND current_price != '0'",
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_liquidation_risk_positions")
             results: list[PositionModel] = []
             for r in rows:
@@ -420,7 +422,7 @@ class OrderRepository(BaseRepository[OrderModel]):
                     f"WHERE status IN ('NEW', 'PARTIALLY_FILLED')",
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_open")
             return [OrderModel.from_row(r) for r in rows]
         except Exception:
@@ -457,7 +459,7 @@ class OrderRepository(BaseRepository[OrderModel]):
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_recent")
             return [OrderModel.from_row(r) for r in rows]
         except Exception:
@@ -490,7 +492,7 @@ class TradeRepository(BaseRepository[TradeModel]):
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_recent")
             return [TradeModel.from_row(r) for r in rows]
         except Exception:
@@ -513,7 +515,7 @@ class TradeRepository(BaseRepository[TradeModel]):
                     start, end,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
             return [TradeModel.from_row(r) for r in rows]
         except Exception:
@@ -542,7 +544,7 @@ class DecisionRepository(BaseRepository[DecisionModel]):
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_recent")
             return [DecisionModel.from_row(r) for r in rows]
         except Exception:
@@ -569,7 +571,7 @@ class DecisionRepository(BaseRepository[DecisionModel]):
                     start, end,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
             return [DecisionModel.from_row(r) for r in rows]
         except Exception:
@@ -597,7 +599,7 @@ class SessionRepository(BaseRepository[SessionModel]):
                     f"ORDER BY start_time DESC LIMIT 1",
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_latest")
             if row is None:
                 return None
@@ -624,9 +626,7 @@ class SessionRepository(BaseRepository[SessionModel]):
 
     async def start_session(self, mode: str) -> int:
         """Create a new session and return its id."""
-        import time as _time
-
-        now = int(_time.time() * 1000)
+        now = int(time.time() * 1000)
         session = SessionModel(
             id=0,
             start_time=now,
@@ -660,7 +660,7 @@ class PerformanceSnapshotRepository(BaseRepository[PerformanceSnapshotModel]):
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_recent")
             return [PerformanceSnapshotModel.from_row(r) for r in rows]
         except Exception:
@@ -683,7 +683,7 @@ class PerformanceSnapshotRepository(BaseRepository[PerformanceSnapshotModel]):
                     start, end,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
             return [PerformanceSnapshotModel.from_row(r) for r in rows]
         except Exception:
@@ -858,7 +858,7 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
                     breaker_name, limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_type")
             return [CircuitBreakerEventModel.from_row(r) for r in rows]
         except Exception:
@@ -876,7 +876,7 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_recent")
             return [CircuitBreakerEventModel.from_row(r) for r in rows]
         except Exception:
@@ -897,7 +897,7 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
                     start, end,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
             return [CircuitBreakerEventModel.from_row(r) for r in rows]
         except Exception:
@@ -928,7 +928,7 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
                     level, limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_level")
             return [ErrorLogModel.from_row(r) for r in rows]
         except Exception:
@@ -946,7 +946,7 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_recent")
             return [ErrorLogModel.from_row(r) for r in rows]
         except Exception:
@@ -967,7 +967,7 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
                     start, end,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
             return [ErrorLogModel.from_row(r) for r in rows]
         except Exception:
@@ -987,7 +987,7 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
                     source, limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_source")
             return [ErrorLogModel.from_row(r) for r in rows]
         except Exception:
@@ -1016,7 +1016,7 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
                     name,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_by_strategy")
             if row is None:
                 return None
@@ -1039,7 +1039,7 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
                     "ORDER BY strategy_name ASC",
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_all")
             return [StrategyStateModel.from_row(r) for r in rows]
         except Exception:
@@ -1068,7 +1068,7 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
                     *state.to_row(),
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="upsert")
             return last_id  # type: ignore[return-value]
         except Exception:
@@ -1095,8 +1095,7 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
         self, symbol: str, position_id: int, amount: str, rate: str
     ) -> int:
         """Record a funding payment."""
-        import time as _time
-        now = int(_time.time() * 1000)
+        now = int(time.time() * 1000)
         payment = FundingPaymentModel(
             id=0, symbol=symbol, position_id=position_id,
             amount=amount, rate=rate, funding_time=now,
@@ -1116,7 +1115,7 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
                     symbol, limit,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_funding_history")
             return [FundingPaymentModel.from_row(r) for r in rows]
         except Exception:
@@ -1134,7 +1133,7 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
                     position_id,
                 )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_total_funding_paid")
             return str(row) if row is not None else "0"
         except Exception:
@@ -1156,8 +1155,7 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
         self, symbol: str, position_id: int, amount: str, price: str, side: str
     ) -> int:
         """Record a liquidation event."""
-        import time as _time
-        now = int(_time.time() * 1000)
+        now = int(time.time() * 1000)
         event = LiquidationEventModel(
             id=0, symbol=symbol, position_id=position_id,
             amount=amount, price=price, side=side, timestamp=now,
@@ -1168,8 +1166,7 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
         self, symbol: str | None = None, hours: int = 24
     ) -> list[LiquidationEventModel]:
         """Return liquidation events from the past N hours."""
-        import time as _time
-        cutoff = int(_time.time() * 1000) - hours * 3600 * 1000
+        cutoff = int(time.time() * 1000) - hours * 3600 * 1000
         t0 = time.monotonic()
         try:
             async with self._db.pool.acquire() as conn:
@@ -1187,7 +1184,7 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
                         cutoff,
                     )
             dur = (time.monotonic() - t0) * 1000
-            if dur > 500:
+            if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="get_recent_liquidations")
             return [LiquidationEventModel.from_row(r) for r in rows]
         except Exception:

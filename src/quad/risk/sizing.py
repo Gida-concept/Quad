@@ -47,7 +47,7 @@ class PositionSizer:
         self._log = structlog.get_logger(__name__)
         self._db = db_manager
 
-        self._cfg: dict[str, Any] = config["risk"]
+        self._cfg: dict[str, Any] = config.get("risk", {})
 
         # Sizing parameters — read from config dict with inline fallbacks
         # that match config.yaml / schema.py defaults.
@@ -69,10 +69,20 @@ class PositionSizer:
         self._min_pos_usd = Decimal(
             str(self._cfg["min_position_size_usd"])
         )
-        # Read trade_capital_usd from strategy section (single source of truth)
-        trade_capital = config.get("strategy", {}).get(
-            "trend_following", {}
-        ).get("trade_capital_usd", 5)
+        # Read trade_capital_usd from risk config, with strategy-level fallback
+        risk_trade_capital = self._cfg.get("trade_capital_usd")
+        if risk_trade_capital is not None:
+            trade_capital = risk_trade_capital
+        else:
+            # Fallback: scan strategy configs for trade_capital_usd
+            all_strategy_configs = config.get("strategy", {})
+            trade_capital = 5
+            for sc in all_strategy_configs.values():
+                if isinstance(sc, dict):
+                    tc = sc.get("trade_capital_usd")
+                    if tc is not None:
+                        trade_capital = tc
+                        break
         self._trade_capital_usd = Decimal(str(trade_capital))
         self._sl_enabled = bool(
             self._cfg["per_position_sl"]["enabled"]

@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import structlog
 from aiohttp import web
+
+if TYPE_CHECKING:
+    from quad.monitoring.metrics import MetricsCollector
 
 # ---------------------------------------------------------------------------
 # Logger
@@ -50,7 +53,7 @@ class HealthServer:
         self,
         port: int | None = None,
         components: dict[str, Any] | None = None,
-        metrics_collector: Any = None,
+        metrics_collector: MetricsCollector | None = None,
         config: dict[str, Any] | None = None,
     ) -> None:
         self._config = config or {}
@@ -62,7 +65,7 @@ class HealthServer:
             or 9090
         )
         self._components: dict[str, Any] = dict(components or {})
-        self._metrics: Any = metrics_collector
+        self._metrics: MetricsCollector | None = metrics_collector
 
         self._start_time: float = 0.0
         self._runner: web.AppRunner | None = None
@@ -127,7 +130,7 @@ class HealthServer:
         await self._runner.setup()
         self._site = web.TCPSite(
             self._runner,
-            self._monitoring_config.get("health_server", {}).get("bind_address", "0.0.0.0"),
+            self._monitoring_config.get("health_server", {}).get("bind_address", "127.0.0.1"),
             self._port,
         )
         await self._site.start()
@@ -169,8 +172,31 @@ class HealthServer:
     # Endpoint handlers
     # ------------------------------------------------------------------
 
+    def _check_api_key(self, request: web.Request) -> bool:
+        """Check the ``X-API-Key`` header against the configured key.
+
+        Returns ``True`` if no key is configured (no auth required), or
+        if the request includes a matching ``X-API-Key`` header.
+        """
+        api_key = self._monitoring_config.get("health_server", {}).get("api_key", "")
+        if not api_key:
+            return True  # No auth configured
+        return request.headers.get("X-API-Key", "") == api_key
+
+    async def _require_auth(self, request: web.Request) -> web.Response | None:
+        """Return a 403 response if API key check fails, otherwise ``None``."""
+        if not self._check_api_key(request):
+            return web.json_response(
+                {"error": "Forbidden", "message": "Invalid or missing X-API-Key header"},
+                status=403,
+            )
+        return None
+
     async def _handle_health(self, request: web.Request) -> web.Response:
         """GET /health — Return overall bot health."""
+        auth = await self._require_auth(request)
+        if auth:
+            return auth
         uptime = _time.time() - self._start_time
 
         return web.json_response(
@@ -184,6 +210,9 @@ class HealthServer:
 
     async def _handle_readiness(self, request: web.Request) -> web.Response:
         """GET /readiness — Return component readiness status."""
+        auth = await self._require_auth(request)
+        if auth:
+            return auth
         results: dict[str, bool] = {}
         all_ready = True
 
@@ -209,10 +238,16 @@ class HealthServer:
 
     async def _handle_liveness(self, request: web.Request) -> web.Response:
         """GET /liveness — Return simple alive status."""
+        auth = await self._require_auth(request)
+        if auth:
+            return auth
         return web.json_response({"alive": True})
 
     async def _handle_metrics(self, request: web.Request) -> web.Response:
         """GET /metrics — Return Prometheus-style metrics text."""
+        auth = await self._require_auth(request)
+        if auth:
+            return auth
         if self._metrics is not None:
             text = self._metrics.get_metrics_text()
         else:

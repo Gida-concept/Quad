@@ -490,7 +490,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         params: dict[str, Any] = {
             "symbol": request.symbol,
             "side": request.side.upper(),
-            "type": request.type.upper(),
+            "type": request.order_type.upper(),
             "quantity": str(request.quantity),
         }
 
@@ -525,7 +525,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             client_order_id=data.get("clientOrderId", ""),
             symbol=data.get("symbol", request.symbol),
             side=data.get("side", request.side),
-            type=data.get("type", request.type),
+            order_type=data.get("type", request.order_type),
             quantity=Decimal(
                 str(data.get("origQty", str(request.quantity)))
             ),

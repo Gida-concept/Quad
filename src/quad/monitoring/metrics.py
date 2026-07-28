@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time as _time
+from collections import deque
 from typing import Any
 
 import structlog
@@ -36,13 +37,22 @@ class MetricsCollector:
     Thread-safe: all mutations are protected by a lock.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_observations: int = 1000) -> None:
+        """Initialize the metrics collector.
+
+        Parameters
+        ----------
+        max_observations:
+            Maximum number of observations retained per histogram.  Older
+            values are discarded when the limit is reached.  Default 1000.
+        """
         self._lock = threading.Lock()
+        self._max_observations = max_observations
 
         # Internal storage: {name: value}
         self._gauges: dict[str, float] = {}
         self._counters: dict[str, float] = {}
-        self._histograms: dict[str, list[float]] = {}
+        self._histograms: dict[str, deque[float]] = {}
 
         # Label storage: {name: {label_key: value}}
         self._gauge_labels: dict[str, dict[str, str]] = {}
@@ -89,22 +99,25 @@ class MetricsCollector:
             if labels:
                 self._counter_labels[name] = labels
 
-    def observe_histogram(self, name: str, value: float, labels: dict[str, str] | None = None) -> None:
+    def observe_histogram(self, name: str, value: int | float, labels: dict[str, str] | None = None) -> None:
         """Record a histogram observation.
+
+        Old observations beyond ``max_observations`` are automatically
+        discarded to bound memory usage.
 
         Parameters
         ----------
         name:
             Metric name (e.g. ``"quad_order_latency_seconds"``).
         value:
-            Observed value.
+            Observed value (converted to float).
         labels:
             Optional label dict.
         """
         with self._lock:
             if name not in self._histograms:
-                self._histograms[name] = []
-            self._histograms[name].append(value)
+                self._histograms[name] = deque(maxlen=self._max_observations)
+            self._histograms[name].append(float(value))
             if labels:
                 self._histogram_labels[name] = labels
 
@@ -181,17 +194,25 @@ class MetricsCollector:
 
                 metric_name = name.replace("-", "_").replace(" ", "_").lower()
                 lines.append(f"# HELP {metric_name} Histogram metric")
-                lines.append(f"# TYPE {metric_name} gauge")
+                lines.append(f"# TYPE {metric_name} histogram")
 
                 if values:
                     count = len(values)
                     total = sum(values)
+                    sorted_vals = sorted(values)
+                    # Prometheus histogram spec requires _bucket, _count, _sum
+                    # Define bucket boundaries for typical trading metrics
+                    buckets = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, float("inf")]
+                    for b in buckets:
+                        le = "+Inf" if b == float("inf") else str(b)
+                        bucket_count = sum(1 for v in sorted_vals if v <= b)
+                        lines.append(f'{metric_name}_bucket{label_str}{{le="{le}"}} {bucket_count}')
                     lines.append(f'{metric_name}_count{label_str} {count}')
                     lines.append(f'{metric_name}_sum{label_str} {total}')
-                    lines.append(f'{metric_name}_avg{label_str} {total / count:.4f}')
                     if count > 0:
-                        lines.append(f'{metric_name}_min{label_str} {min(values)}')
-                        lines.append(f'{metric_name}_max{label_str} {max(values)}')
+                        lines.append(f'{metric_name}_min{label_str} {sorted_vals[0]}')
+                        lines.append(f'{metric_name}_max{label_str} {sorted_vals[-1]}')
+                        lines.append(f'{metric_name}_avg{label_str} {total / count:.4f}')
 
         lines.append("")
         return "\n".join(lines)

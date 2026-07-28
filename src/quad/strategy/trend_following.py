@@ -9,6 +9,7 @@ exits and sets TP/SL bracket orders on entry.
 from __future__ import annotations
 
 import statistics
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -305,8 +306,6 @@ class TrendFollowingStrategy(StrategyBase):
             int(self.get_param("adx_period", 14)),
         )
         lookback = max_period * 3
-        import time
-
         now_ms = int(time.time() * 1000)
         start_ms = now_ms - (lookback * 60 * 1000)
         try:

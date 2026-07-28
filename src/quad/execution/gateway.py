@@ -85,7 +85,7 @@ class OrderGateway:
         self._log = structlog.get_logger(__name__)
         self._exchange = exchange_adapter
         self._config = config or {}
-        self._gateway_config = self._config["exchange"]["gateway"]
+        self._gateway_config = self._config.get("exchange", {}).get("gateway", {})
 
         self._active_orders: dict[str, Order] = {}
         self._completed_ids: deque[str] = deque(maxlen=self._completed_ids_maxlen)
@@ -143,7 +143,7 @@ class OrderGateway:
         request = OrderRequest(
             symbol=order_request.symbol,
             side=order_request.side,
-            type=order_request.type,
+            order_type=order_request.order_type,
             quantity=order_request.quantity,
             price=order_request.price,
             stop_price=order_request.stop_price,
@@ -210,7 +210,7 @@ class OrderGateway:
             client_order_id=client_order_id,
             symbol=result.symbol,
             side=result.side,
-            type=result.type,
+            order_type=result.order_type,
             quantity=result.quantity,
             filled_qty=result.filled_qty,
             price=result.price,

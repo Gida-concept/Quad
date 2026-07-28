@@ -87,7 +87,7 @@ def create_default_strategies(
         Strategies that fail to instantiate are excluded.
     """
     strategies: dict[str, StrategyBase] = {}
-    strategy_configs = config["strategy"]
+    strategy_configs = config.get("strategy", {})
 
     for name in StrategyRegistry.list():
         params = strategy_configs.get(name, {})

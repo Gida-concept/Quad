@@ -26,10 +26,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+import aiohttp
 import structlog
 
 if TYPE_CHECKING:
-    import aiohttp
     from quad.exchange.base import ExchangeAdapter
 
 logger = structlog.get_logger(__name__)
@@ -147,8 +147,6 @@ class WebSocketManager:
         if self._running:
             self._log.warning("already_running")
             return
-
-        import aiohttp
 
         self._running = True
         self._session = aiohttp.ClientSession()

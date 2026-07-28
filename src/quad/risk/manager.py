@@ -182,15 +182,6 @@ class RiskManager:
         cb_status = self._breakers.status()
         gate_status = self._gates.get_gate_status()
 
-        dd_breaker = cb_status.get(
-            "DRAWDOWN_BREAKER",
-            type("obj", (object,), {"active": False})(),
-        )
-        dl_breaker = cb_status.get(
-            "DAILY_LOSS_BREAKER",
-            type("obj", (object,), {"active": False})(),
-        )
-
         drawdown = Decimal("0")
         daily_pnl = Decimal("0")
         daily_loss_limit = Decimal("500")

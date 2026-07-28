@@ -43,7 +43,8 @@ You MUST respond with valid JSON only. No markdown, no explanation outside the J
 
 {
   "reasoning": "Brief explanation of market conditions and decision logic",
-  "action": "open_long" | "open_short" | "close_long" | "close_short" | "hold" | "adjust_stop" | "reduce_position",
+  "action": "ENTER" | "EXIT" | "HOLD" | "adjust_stop" | "reduce_position",
+  "side": "buy" or "sell" (use buy for opening long or closing short; use sell for opening short or closing long),
   "symbol": "BTCUSDT" or null,
   "quantity": 0.001-10 or null,
   "price": 0.0 or null (limit price),
@@ -341,7 +342,7 @@ def build_trading_prompt(
     sections.append("")
 
     sections.append("## Decision Required")
-    sections.append("Based on the above data, recommend a trading action (open_long, open_short, close_long, close_short, hold, adjust_stop, or reduce_position).")
+    sections.append("Based on the above data, recommend a trading action (ENTER to open, EXIT to close, HOLD to do nothing, adjust_stop, or reduce_position).")
     sections.append("Respond with valid JSON only following the specified format.")
 
     user_prompt = "\n".join(sections)

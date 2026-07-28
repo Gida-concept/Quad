@@ -107,7 +107,12 @@ class _SQLitePool:
         self._conn: aiosqlite.Connection | None = None
 
     def _ensure(self) -> aiosqlite.Connection:
-        """Open the connection if not already open (not async)."""
+        """Open the connection if not already open (non-blocking via aiosqlite).
+
+        Uses ``aiosqlite.connect()`` which returns immediately and runs the
+        actual SQLite connection on a background thread, avoiding event-loop
+        blocking that raw ``sqlite3.connect()`` would cause.
+        """
         if self._conn is None:
             self._conn = aiosqlite.connect(
                 self._db_path,
@@ -391,32 +396,87 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     async def backup(self, backup_dir: str | Path) -> None:
-        """Stub: SQLite backup is a no-op that logs the intent.
+        """Create a timestamped backup of the SQLite database file.
 
-        Production backups should use file-level copy or VACUUM INTO.
+        Uses aiosqlite's backup API to create a consistent snapshot of the
+        database while it may be under active use.  The backup file is named
+        ``quad_YYYYMMDD_HHMMSS.db`` and placed in *backup_dir*.
+
+        Parameters
+        ----------
+        backup_dir:
+            Directory path for the backup file.  Created automatically if it
+            does not exist.
         """
-        self._log.warning(
-            "sqlite_backup_not_implemented",
-            message=(
-                "SQLite backup is not implemented in-app. "
-                "Use VACUUM INTO, file-level copy, or a cron job "
-                "for production backups."
-            ),
-            backup_dir=str(backup_dir),
-        )
+        if self._pool is None:
+            self._log.warning("backup_no_pool")
+            return
 
-    async def snapshot(self) -> None:
-        """Stub: SQLite snapshot is a no-op that logs the intent.
+        backup_path = Path(backup_dir)
+        backup_path.mkdir(parents=True, exist_ok=True)
 
-        For point-in-time snapshots, use VACUUM INTO or file-level copy.
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        dest_file = backup_path / f"quad_{timestamp}.db"
+
+        try:
+            # Access the raw aiosqlite connection for the backup
+            raw = self._pool._ensure()
+            await raw  # ensure the background thread is started
+            if raw is None:
+                self._log.warning("backup_no_connection")
+                return
+
+            # Backup via aiosqlite's .backup() method
+            dest = await aiosqlite.connect(str(dest_file))
+            try:
+                await raw.backup(dest)
+                self._log.info(
+                    "backup_completed",
+                    source=self._dsn,
+                    destination=str(dest_file),
+                )
+            finally:
+                await dest.close()
+        except Exception as exc:
+            self._log.exception("backup_failed", error=str(exc))
+
+    async def snapshot(self, snapshot_name: str = "") -> None:
+        """Create a named snapshot of the database.
+
+        Uses ``VACUUM INTO`` to write a consistent point-in-time copy.
+        The snapshot is saved alongside the main database file with the
+        name ``<db_stem>_<snapshot_name>.db``.
+
+        Parameters
+        ----------
+        snapshot_name:
+            Name for the snapshot (e.g. ``"pre_optimization"``).  If empty,
+            a timestamp-based name is used.
         """
-        self._log.warning(
-            "sqlite_snapshot_not_implemented",
-            message=(
-                "SQLite snapshot is not implemented in-app. "
-                "Use VACUUM INTO or file-level copy."
-            ),
-        )
+        if self._pool is None:
+            self._log.warning("snapshot_no_pool")
+            return
+
+        db_path = self._dsn
+        if db_path == ":memory:":
+            self._log.warning("snapshot_memory_db")
+            return
+
+        name = snapshot_name or time.strftime("snapshot_%Y%m%d_%H%M%S")
+        db_stem = Path(db_path).stem
+        dest_file = Path(db_path).parent / f"{db_stem}_{name}.db"
+
+        try:
+            async with self._pool.acquire() as conn:
+                # VACUUM INTO creates a consistent point-in-time copy
+                await conn.execute(f"VACUUM INTO '{dest_file}'")
+                self._log.info(
+                    "snapshot_completed",
+                    destination=str(dest_file),
+                    name=name,
+                )
+        except Exception as exc:
+            self._log.exception("snapshot_failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Context manager

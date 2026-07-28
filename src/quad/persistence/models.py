@@ -25,9 +25,105 @@ SCHEMA_VERSION: int = 3
 """Current schema version. Increment when making breaking changes."""
 
 SCHEMA_MIGRATIONS: dict[int, list[str]] = {
-    # version -> list of DDL / ALTER statements
+    1: [
+        # Version 1 --> 2: Add leverage, margin_type, position_side, liquidation_price,
+        # initial_margin, maintenance_margin, funding_paid columns to positions table.
+        # These were added to support Binance USD-M futures position tracking.
+        "ALTER TABLE positions ADD COLUMN leverage INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE positions ADD COLUMN margin_type TEXT NOT NULL DEFAULT 'isolated'",
+        "ALTER TABLE positions ADD COLUMN position_side TEXT NOT NULL DEFAULT 'LONG'",
+        "ALTER TABLE positions ADD COLUMN liquidation_price TEXT NOT NULL DEFAULT '0'",
+        "ALTER TABLE positions ADD COLUMN initial_margin TEXT NOT NULL DEFAULT '0'",
+        "ALTER TABLE positions ADD COLUMN maintenance_margin TEXT NOT NULL DEFAULT '0'",
+        "ALTER TABLE positions ADD COLUMN funding_paid TEXT NOT NULL DEFAULT '0'",
+        # Add working_type, position_side, price_protect to orders table
+        "ALTER TABLE orders ADD COLUMN working_type TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN position_side TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE orders ADD COLUMN price_protect INTEGER NOT NULL DEFAULT 0",
+    ],
+    2: [
+        # Version 2 --> 3: Add avg_fill_price to orders, add sessions table,
+        # add optimization run tables.
+        "ALTER TABLE orders ADD COLUMN avg_fill_price TEXT NOT NULL DEFAULT '0'",
+        # Sessions table (idempotent via IF NOT EXISTS)
+        "CREATE TABLE IF NOT EXISTS sessions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "start_time BIGINT NOT NULL, "
+        "end_time BIGINT, "
+        "mode TEXT NOT NULL DEFAULT 'binance', "
+        "state TEXT NOT NULL DEFAULT 'running', "
+        "pnl TEXT NOT NULL DEFAULT '0', "
+        "trades_count INTEGER NOT NULL DEFAULT 0)",
+        # Optimization runs table
+        "CREATE TABLE IF NOT EXISTS optimization_runs ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "run_at BIGINT NOT NULL, "
+        "trigger TEXT NOT NULL DEFAULT 'scheduled', "
+        "decisions_analyzed INTEGER NOT NULL DEFAULT 0, "
+        "trades_analyzed INTEGER NOT NULL DEFAULT 0, "
+        "recommendations_count INTEGER NOT NULL DEFAULT 0, "
+        "applied_count INTEGER NOT NULL DEFAULT 0, "
+        "status TEXT NOT NULL DEFAULT 'running', "
+        "started_at BIGINT NOT NULL, "
+        "completed_at BIGINT, "
+        "summary_json TEXT NOT NULL DEFAULT '{}', "
+        "error_message TEXT NOT NULL DEFAULT '')",
+        # Optimization recommendations table
+        "CREATE TABLE IF NOT EXISTS optimization_recommendations ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "run_id INTEGER NOT NULL, "
+        "recommendation_type TEXT NOT NULL, "
+        "target_area TEXT NOT NULL, "
+        "current_value TEXT NOT NULL DEFAULT '', "
+        "recommended_value TEXT NOT NULL DEFAULT '', "
+        "rationale TEXT NOT NULL DEFAULT '', "
+        "impact_estimate TEXT NOT NULL DEFAULT '', "
+        "confidence TEXT NOT NULL DEFAULT 'medium', "
+        "status TEXT NOT NULL DEFAULT 'pending', "
+        "applied_at BIGINT, "
+        "applied_strategy_params_json TEXT NOT NULL DEFAULT '{}', "
+        "FOREIGN KEY (run_id) REFERENCES optimization_runs(id))",
+        # Liquidation events table
+        "CREATE TABLE IF NOT EXISTS liquidation_events ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "symbol TEXT NOT NULL, "
+        "position_id INTEGER REFERENCES positions(id), "
+        "amount TEXT NOT NULL DEFAULT '0', "
+        "price TEXT NOT NULL DEFAULT '0', "
+        "side TEXT NOT NULL DEFAULT '', "
+        "timestamp BIGINT NOT NULL)",
+        # Funding rate records table
+        "CREATE TABLE IF NOT EXISTS funding_rate_records ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "symbol TEXT NOT NULL, "
+        "rate TEXT NOT NULL DEFAULT '0', "
+        "time BIGINT NOT NULL, "
+        "mark_price TEXT NOT NULL DEFAULT '0', "
+        "index_price TEXT NOT NULL DEFAULT '0')",
+        # Indexes for new tables
+        "CREATE INDEX IF NOT EXISTS idx_opt_runs_status ON optimization_runs(status)",
+        "CREATE INDEX IF NOT EXISTS idx_opt_runs_run_at ON optimization_runs(run_at)",
+        "CREATE INDEX IF NOT EXISTS idx_opt_recommendations_run_id ON optimization_recommendations(run_id)",
+        "CREATE INDEX IF NOT EXISTS idx_opt_recommendations_status ON optimization_recommendations(status)",
+        "CREATE INDEX IF NOT EXISTS idx_liquidation_events_symbol ON liquidation_events(symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_liquidation_events_time ON liquidation_events(timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_funding_rate_records_symbol ON funding_rate_records(symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_funding_rate_records_time ON funding_rate_records(time)",
+    ],
 }
-"""Mapping of version numbers to lists of SQL migration statements."""
+"""Mapping of version numbers to lists of SQL migration statements.
+
+Schema version history:
+- Version 0 (initial): accounts, positions (basic), orders, trades, decisions,
+  strategy_state, performance_snapshots, circuit_breaker_events, config_changes,
+  error_logs tables.
+- Version 1 --> 2: Added futures-specific columns to positions (leverage, margin_type,
+  position_side, liquidation_price, initial_margin, maintenance_margin, funding_paid)
+  and orders (working_type, position_side, price_protect).
+- Version 2 --> 3: Added avg_fill_price to orders.  Added sessions, optimization_runs,
+  optimization_recommendations, liquidation_events, and funding_rate_records tables
+  with associated indexes.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -255,64 +351,6 @@ class TradeModel:
     timestamp BIGINT NOT NULL,
     FOREIGN KEY (position_id) REFERENCES positions(id),
     FOREIGN KEY (order_id) REFERENCES orders(id)
-)"""
-
-    @classmethod
-    def columns(cls) -> list[str]:
-        return _col_names(cls)
-
-    def to_row(self) -> tuple:
-        return _to_row(self)
-
-    @classmethod
-    def from_row(cls, row: tuple) -> Self:
-        return _from_row(cls, row)
-
-
-@dataclass
-class OptionContractModel:
-    """Option chain contract snapshot (historical reference)."""
-
-    __tablename__: ClassVar[str] = "option_contracts"
-
-    id: int
-    symbol: str
-    underlying: str
-    strike: str
-    expiry: int
-    option_type: str
-    mark_price: str
-    bid: str
-    ask: str
-    volume: str
-    open_interest: int
-    iv: str
-    delta: str
-    gamma: str
-    theta: str
-    vega: str
-    updated_at: int
-
-    @classmethod
-    def create_table_ddl(cls) -> str:
-        return """CREATE TABLE IF NOT EXISTS option_contracts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL UNIQUE,
-    underlying TEXT NOT NULL,
-    strike TEXT NOT NULL DEFAULT '0',
-    expiry BIGINT NOT NULL,
-    option_type TEXT NOT NULL,
-    mark_price TEXT NOT NULL DEFAULT '0',
-    bid TEXT NOT NULL DEFAULT '0',
-    ask TEXT NOT NULL DEFAULT '0',
-    volume TEXT NOT NULL DEFAULT '0',
-    open_interest INTEGER NOT NULL DEFAULT 0,
-    iv TEXT NOT NULL DEFAULT '0',
-    delta TEXT NOT NULL DEFAULT '0',
-    gamma TEXT NOT NULL DEFAULT '0',
-    theta TEXT NOT NULL DEFAULT '0',
-    vega TEXT NOT NULL DEFAULT '0',
-    updated_at BIGINT NOT NULL
 )"""
 
     @classmethod

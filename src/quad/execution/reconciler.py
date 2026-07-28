@@ -61,7 +61,7 @@ class FillReconciler:
         self._log = structlog.get_logger(__name__)
         self._exchange = exchange_adapter
         self._db = db_manager
-        self._reconciler_config = config["exchange"]["reconciler"] if config else {}
+        self._reconciler_config = config.get("exchange", {}).get("reconciler", {}) if config else {}
         self._discrepancy_history: deque[dict[str, Any]] = deque(
             maxlen=self._max_discrepancy_history
         )
