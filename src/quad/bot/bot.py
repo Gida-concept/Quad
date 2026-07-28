@@ -160,7 +160,7 @@ class QuadBot:
         # Start polling
         await self._application.initialize()
         await self._application.start()
-        await self._application.updater.start_polling()  # type: ignore[union-attr]
+        await self._application.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
 
         self._log.info("bot_started")
 

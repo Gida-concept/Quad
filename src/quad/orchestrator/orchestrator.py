@@ -1081,83 +1081,97 @@ class QuadOrchestrator:
         ai_start = time.monotonic()
         self._ai_cycle_count += 1
 
-        # 1. Collect market context
-        from quad.ai.context import collect_market_context
-
-        context = await collect_market_context(
-            exchange_adapter=self._exchange_adapter,
-            market_data_engine=self._market_data,
-            db_manager=self._db_manager,
-            config=self._config_dict,
-        )
-        self._log.debug(
-            "market_context_collected",
-            pairs=len(context.candles),
-            positions=len(context.positions),
-            errors=len(context.errors),
-        )
-
-        # 2. Compute technical indicators per pair/timeframe (cache disabled)
-        from quad.ai.ta import compute_indicators
-
-        indicators: dict[str, dict[str, Any]] = {}
-        for key, candles in context.candles.items():
-            try:
-                indicators[key] = compute_indicators(candles)
-            except Exception as exc:
-                self._log.warning(
-                    "indicator_computation_failed",
-                    key=key,
-                    error=str(exc),
-                )
-                indicators[key] = {}
-
-        # 3. Build structured prompts
-        from quad.ai.prompt import build_trading_prompt
-
-        prompts = build_trading_prompt(
-            context=context,
-            indicators=indicators,
-            config=self._config_dict,
-        )
-
-        # 4. Call Groq for trading decision
-        self._log.debug(
-            "ai_decision_request",
-            cycle=self._ai_cycle_count,
-            system_prompt_len=len(prompts["system"]),
-            user_prompt_len=len(prompts["user"]),
-        )
-
-        ai_trade_cfg = self._config_dict.get("ai")
-        decision = await self._groq_client.decide_trades(
-            system_prompt=prompts["system"],
-            user_prompt=prompts["user"],
-            temperature=ai_trade_cfg.get("temperature"),
-            max_tokens=ai_trade_cfg.get("max_tokens"),
-        )
-
-        # Track timing
-        self._last_ai_cycle_time_ms = round(
-            (time.monotonic() - ai_start) * 1000, 2
-        )
-        self._last_ai_decision = decision
-
-        # 5. Log decision to database
         try:
-            await self._log_ai_decision(decision, context)
+            # 1. Collect market context
+            from quad.ai.context import collect_market_context
+
+            context = await collect_market_context(
+                exchange_adapter=self._exchange_adapter,
+                market_data_engine=self._market_data,
+                db_manager=self._db_manager,
+                config=self._config_dict,
+            )
+            self._log.debug(
+                "market_context_collected",
+                pairs=len(context.candles),
+                positions=len(context.positions),
+                errors=len(context.errors),
+            )
+
+            # 2. Compute technical indicators per pair/timeframe (cache disabled)
+            from quad.ai.ta import compute_indicators
+
+            indicators: dict[str, dict[str, Any]] = {}
+            for key, candles in context.candles.items():
+                try:
+                    indicators[key] = compute_indicators(candles)
+                except Exception as exc:
+                    self._log.warning(
+                        "indicator_computation_failed",
+                        key=key,
+                        error=str(exc),
+                    )
+                    indicators[key] = {}
+
+            # 3. Build structured prompts
+            from quad.ai.prompt import build_trading_prompt
+
+            prompts = build_trading_prompt(
+                context=context,
+                indicators=indicators,
+                config=self._config_dict,
+            )
+
+            # 4. Call Groq for trading decision
+            self._log.debug(
+                "ai_decision_request",
+                cycle=self._ai_cycle_count,
+                system_prompt_len=len(prompts["system"]),
+                user_prompt_len=len(prompts["user"]),
+            )
+
+            ai_trade_cfg = self._config_dict.get("ai")
+            decision = await self._groq_client.decide_trades(
+                system_prompt=prompts["system"],
+                user_prompt=prompts["user"],
+                temperature=ai_trade_cfg.get("temperature"),
+                max_tokens=ai_trade_cfg.get("max_tokens"),
+            )
+
+            # Track timing
+            self._last_ai_cycle_time_ms = round(
+                (time.monotonic() - ai_start) * 1000, 2
+            )
+            self._last_ai_decision = decision
+
+            # 5. Log decision to database
+            try:
+                await self._log_ai_decision(decision, context)
+            except Exception as exc:
+                self._log.warning("ai_decision_log_failed", error=str(exc))
+
+            self._log.debug(
+                "ai_decision_received",
+                action=decision.get("action", "unknown"),
+                strategy=decision.get("strategy"),
+                confidence=decision.get("confidence"),
+                cycle_time_ms=self._last_ai_cycle_time_ms,
+            )
+
+            return decision
+
         except Exception as exc:
-            self._log.warning("ai_decision_log_failed", error=str(exc))
-
-        self._log.debug(
-            "ai_decision_received",
-            action=decision.get("action", "unknown"),
-            strategy=decision.get("strategy"),
-            confidence=decision.get("confidence"),
-            cycle_time_ms=self._last_ai_cycle_time_ms,
-        )
-
-        return decision
+            self._log.warning(
+                "ai_trading_cycle_crashed",
+                error=str(exc),
+                cycle=self._ai_cycle_count,
+            )
+            return {
+                "reasoning": f"Trading cycle exception: {exc}",
+                "action": "HOLD",
+                "confidence": 0.0,
+                "indicators": {},
+            }
 
     async def _close_all_positions(self) -> bool:
         """Close all open positions using MARKET EXIT orders.

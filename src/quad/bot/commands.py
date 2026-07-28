@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json as _json
 import time as _time
+import warnings
 from decimal import Decimal
 from typing import Any
 
@@ -1668,10 +1669,10 @@ class QuadBotCommands:
                 await query.edit_message_text("✅ Execution cancelled.")
             return ConversationHandler.END
 
-        # NOTE: per_message=False (the default) means CallbackQueryHandler
-        # won't be re-triaged on every new text message — only callback
-        # queries trigger state transitions.  The benign PTBUserWarning
-        # about this is harmless for our bot-driven flow.
+        # Suppress the benign PTBUserWarning about per_message=False.
+        # This warning is harmless for our callback-only flow.
+        warnings.filterwarnings("ignore", message="If 'per_message=False'")
+
         return ConversationHandler(
             entry_points=[CommandHandler("execute", execute_start)],
             states={
