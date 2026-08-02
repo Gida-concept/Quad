@@ -201,6 +201,28 @@ class QuadBot:
         polling_retry_delay = 2.0
         polling_started = False
 
+        async def _teardown_updater() -> None:
+            """Release the getUpdates connection before a polling retry.
+
+            If ``start_polling`` raised a ``Conflict``, the previous polling
+            attempt may not have fully released the bot token on the updater
+            side.  Stopping (and shutdowning) the updater between attempts frees
+            the connection so the next attempt isn't an immediate self-conflict.
+            """
+            try:
+                updater = self._application.updater  # type: ignore[union-attr]
+                if updater is not None:
+                    await updater.stop()
+                    await updater.shutdown()
+            except Exception as exc:
+                self._log.debug(
+                    "polling_teardown_ignored",
+                    error=str(exc),
+                )
+
+        def _is_conflict(exc: TelegramError) -> bool:
+            return isinstance(exc, Conflict) or "Conflict" in str(exc)
+
         for polling_attempt in range(max_polling_retries):
             try:
                 await self._application.updater.start_polling(  # type: ignore[union-attr]
@@ -208,7 +230,13 @@ class QuadBot:
                 )
                 polling_started = True
                 break
-            except Conflict as exc:
+            except TelegramError as exc:
+                if not _is_conflict(exc):
+                    self._log.warning(
+                        "polling_start_failed_non_conflict",
+                        error=str(exc),
+                    )
+                    break
                 wait = polling_retry_delay * (2**polling_attempt)
                 self._log.warning(
                     "polling_conflict_retrying",
@@ -218,25 +246,9 @@ class QuadBot:
                     error=str(exc),
                 )
                 if polling_attempt < max_polling_retries - 1:
+                    # Free the connection before re-attempting.
+                    await _teardown_updater()
                     await asyncio.sleep(wait)
-            except TelegramError as exc:
-                if "Conflict" in str(exc):
-                    wait = polling_retry_delay * (2**polling_attempt)
-                    self._log.warning(
-                        "polling_conflict_retrying",
-                        attempt=polling_attempt + 1,
-                        max_retries=max_polling_retries,
-                        wait_s=wait,
-                        error=str(exc),
-                    )
-                    if polling_attempt < max_polling_retries - 1:
-                        await asyncio.sleep(wait)
-                else:
-                    self._log.warning(
-                        "polling_start_failed_non_conflict",
-                        error=str(exc),
-                    )
-                    break
 
         if polling_started:
             self._log.info("bot_started")
