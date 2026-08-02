@@ -311,17 +311,18 @@ class QuadBotCommands:
         self._log.info("cmd_balance", user=update.effective_user.id)
 
         try:
-            account = None
-            if self._orchestrator is not None:
-                try:
-                    account = getattr(self._orchestrator, "account", None)
-                    if callable(account):
-                        account = account()
-                except Exception as exc:
-                    self._log.warning("balance_orchestrator_error", error=str(exc))
+            # Fetch live account data from the exchange adapter
+            exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None) if self._orchestrator else None
+            if exchange_adapter is None:
+                await update.message.reply_text("⚠️ Exchange adapter not available.", parse_mode="Markdown")
+                return
 
-            if account is None and self._risk_manager is not None:
-                pass  # RiskManager does not hold account data
+            try:
+                account = await exchange_adapter.get_account()
+            except Exception as exc:
+                self._log.warning("balance_fetch_failed", error=str(exc))
+                await update.message.reply_text(f"⚠️ Error fetching balance: {exc}", parse_mode="Markdown")
+                return
 
             if account is None:
                 # No account data available

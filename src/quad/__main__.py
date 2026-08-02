@@ -7,6 +7,7 @@ handling.  All logging is configured before the orchestrator starts.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 
@@ -56,6 +57,24 @@ def _configure_logging() -> None:
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+    # Explicitly attach a StreamHandler to the root logger so INFO+ records
+    # reach stdout. structlog's stdlib LoggerFactory delegates to the stdlib
+    # ``logging`` module, but without a handler stdlib only has the
+    # `lastResort` handler, which emits WARNING+ to stderr — every INFO record
+    # is dropped. The app logs mostly at INFO, so nothing appeared in the
+    # Docker / Dokploy logs. A stdout StreamHandler is captured by the
+    # container's json-file logging driver, matching QUAD_LOG_LEVEL.
+    #
+    # structlog's stdlib BoundLogger renders the full event (processors +
+    # JSONRenderer) and passes it to the stdlib logger as the formatted
+    # message string, so the handler only needs to dump that message verbatim.
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setLevel(log_level)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(handler)
 
 
 async def main() -> None:
