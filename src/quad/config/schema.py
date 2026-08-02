@@ -868,6 +868,20 @@ class PromptBuilderConfig(BaseModel):
     )
 
 
+class AiRotationConfig(BaseModel):
+    """Per-pair rotation: trade one pair at a time, rotate on position close."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Trade one pair at a time; advance only after the position closes",
+    )
+    retry_sleep_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        description="Sleep between HOLD scans of successive pairs (seconds)",
+    )
+
+
 # ============================================================================
 # AI Section
 # ============================================================================
@@ -884,7 +898,7 @@ class AiConfig(BaseModel):
         description="Enable AI-driven trading analysis",
     )
     model: str = Field(
-        default="llama-3.3-70b-versatile",
+        default="llama-3.1-8b-instant",
         description="Groq LLM model identifier",
     )
     timeout: int = Field(
@@ -942,6 +956,10 @@ class AiConfig(BaseModel):
     prompt: PromptBuilderConfig = Field(
         default_factory=PromptBuilderConfig,
         description="AI prompt builder configuration",
+    )
+    rotation: AiRotationConfig = Field(
+        default_factory=AiRotationConfig,
+        description="Per-pair rotation configuration",
     )
 
 

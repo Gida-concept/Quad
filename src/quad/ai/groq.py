@@ -56,7 +56,7 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+_DEFAULT_MODEL = "llama-3.1-8b-instant"
 """Default model: fast, high-quality, 131K context, production-grade."""
 
 _FALLBACK_MODEL = "llama-3.1-8b-instant"
@@ -154,7 +154,7 @@ class GroqClient:
         the environment.
     model:
         Groq model ID to use for chat completions.
-        Defaults to ``llama-3.3-70b-versatile``.
+        Defaults to ``llama-3.1-8b-instant``.
     timeout:
         Request timeout in seconds.
     max_retries:

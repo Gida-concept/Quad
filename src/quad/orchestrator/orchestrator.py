@@ -122,6 +122,10 @@ class QuadOrchestrator:
         self._last_ai_cycle_time_ms: float = 0.0
         self._consecutive_ai_failures: int = 0
 
+        # Pair-rotation state: trade one pair at a time, advance on close.
+        self._rotation_index: int = 0      # index into ai.pairs of next pair to scan
+        self._current_symbol: str = ""     # held / being-scanned pair
+
         # Telegram notification support
         self._telegram_bot: Any = None
         self._telegram_chat_id: int = 0
@@ -963,10 +967,14 @@ class QuadOrchestrator:
                     pass  # Non-critical; continue with empty orders
 
                 # ----------------------------------------------------------
-                # 2. Force-close all positions for fresh analysis each cycle
+                # 2. Strategy context (futures-only; no option chains)
                 # ----------------------------------------------------------
-                if self._config_dict.get("trading", {}).get("serial_trade_mode", True):
-                    await self._close_all_positions()
+                context = StrategyContext(
+                    account=account,
+                    positions=positions,
+                    orders=open_orders,
+                    config=self._config_dict,
+                )
 
                 # ----------------------------------------------------------
                 # 3. AI-First Decision (if enabled and available)
@@ -978,11 +986,23 @@ class QuadOrchestrator:
                     try:
                         ai_available = self._groq_client.is_available()
                         if ai_available:
-                            ai_decision = await self._run_ai_trading_cycle(
-                                underlyings, account, positions
+                            rotation_enabled = bool(
+                                self._config_dict.get("ai", {}).get("rotation", {}).get("enabled", False)
                             )
-                            ai_used = True
-                            self._consecutive_ai_failures = 0
+                            if rotation_enabled:
+                                ai_used = await self._run_ai_rotation(
+                                    account, positions, open_orders, context
+                                )
+                            else:  # legacy path unchanged
+                                if self._config_dict.get("trading", {}).get("serial_trade_mode", True):
+                                    await self._close_all_positions()
+                                ai_decision = await self._run_ai_trading_cycle(
+                                    underlyings, account, positions
+                                )
+                                ai_used = True
+                                self._consecutive_ai_failures = 0
+                                if ai_decision.get("action") in ("ENTER", "EXIT"):
+                                    await self._execute_ai_action(ai_decision, context)
                         else:
                             self._log.warning("ai_not_available_skipping")
                     except Exception as exc:
@@ -993,30 +1013,6 @@ class QuadOrchestrator:
                             consecutive=self._consecutive_ai_failures,
                             error=str(exc),
                         )
-
-                # ----------------------------------------------------------
-                # 4. Build strategy context (futures-only; no option chains)
-                # ----------------------------------------------------------
-
-                context = StrategyContext(
-                    account=account,
-                    positions=positions,
-                    orders=open_orders,
-                    config=self._config_dict,
-                )
-
-                # ----------------------------------------------------------
-                # 5. Execute AI action if valid, otherwise HOLD (no deterministic fallback)
-                # ----------------------------------------------------------
-                if ai_used and ai_decision.get("action") in ("ENTER", "EXIT"):
-                    await self._execute_ai_action(ai_decision, context)
-                else:
-                    self._log.debug(
-                        "ai_no_action_or_fallback",
-                        ai_used=ai_used,
-                        action=ai_decision.get("action", "none"),
-                        msg="AI is the sole decision-maker; no deterministic fallback",
-                    )
 
                 # ----------------------------------------------------------
                 # 6. Update monitoring / metrics
@@ -1210,6 +1206,177 @@ class QuadOrchestrator:
                 "indicators": {},
             }
 
+    async def _run_ai_rotation(
+        self,
+        account: Any,
+        positions: Any,
+        open_orders: Any,
+        context: StrategyContext,
+    ) -> bool:
+        """Run the pair-rotation AI cycle (one pair at a time).
+
+        CASE A — a position is open: scan ONLY that pair and manage it
+        (EXIT / adjust_stop / reduce_position); never open a second.
+
+        CASE B — flat: scan each configured pair once, starting at the
+        rotation index, sleeping ``retry_sleep`` seconds between attempts.
+        Advance to the next pair only when the current position closes.
+
+        Returns
+        -------
+        bool
+            ``True`` if the rotation made progress this cycle, ``False``
+            if it could not run (no pairs / Groq unavailable).
+        """
+        pairs = list(self._config_dict.get("ai", {}).get("pairs", []))
+        if not pairs or self._groq_client is None or not self._groq_client.is_available():
+            self._log.warning("ai_rotation_unavailable")
+            return False
+        retry_sleep = float(
+            self._config_dict["ai"]["rotation"].get("retry_sleep_seconds", 30.0)
+        )
+        from quad.types.domain import PositionStatus
+
+        open_positions = [
+            p for p in positions if getattr(p, "status", None) == PositionStatus.OPEN
+        ]
+
+        # CASE A — a position is open: manage it, never open a second.
+        if open_positions:
+            held = open_positions[0]
+            held_symbol = getattr(held, "symbol", "") or getattr(held, "contract_symbol", "")
+            self._current_symbol = held_symbol
+            self._log.info("rotation_managing_open_position", symbol=held_symbol)
+            try:
+                decision = await self._scan_pair(held_symbol)   # raises on Groq/API error
+            except Exception as exc:                             # CancelledError NOT caught (BaseException)
+                self._log.warning("ai_scan_error", symbol=held_symbol, error=str(exc))
+                return False
+            if decision.get("action") in ("ENTER", "EXIT"):
+                await self._execute_ai_action(decision, context)
+            return True                     # HOLD -> keep holding; wait for next hour
+
+        # CASE B — flat: scan each pair once, starting at the rotation index.
+        self._rotation_index %= len(pairs)
+        scanned = 0
+        while scanned < len(pairs):
+            if not self._groq_client.is_available():    # daily limit hit mid-scan
+                self._log.warning("ai_rate_limit_hit_stopping_scan")
+                break
+            symbol = pairs[self._rotation_index % len(pairs)]
+            self._current_symbol = symbol
+            self._log.info("rotation_scanning_pair", symbol=symbol, index=self._rotation_index)
+            try:
+                decision = await self._scan_pair(symbol)
+            except Exception as exc:
+                self._consecutive_ai_failures += 1
+                self._last_ai_error = str(exc)
+                self._log.warning("ai_scan_failed", symbol=symbol, error=str(exc))
+                if isinstance(exc, RuntimeError) and "rate limit" in str(exc).lower():
+                    break                            # stop burning requests this hour
+                decision = {"action": "HOLD", "reasoning": f"scan exception: {exc}", "confidence": 0.0}
+
+            action = decision.get("action", "HOLD")
+            if action == "ENTER":
+                if await self._execute_ai_action(decision, context):
+                    # Position opened -> index now points at the NEXT pair, so the
+                    # post-close scan continues after this one.
+                    self._rotation_index = (self._rotation_index + 1) % len(pairs)
+                    self._log.info("rotation_opened_position", symbol=symbol)
+                    return True
+                self._log.warning("rotation_enter_failed_advancing", symbol=symbol)  # risk/exec rejected
+            elif action == "EXIT":
+                self._log.info("rotation_exit_without_position_advancing", symbol=symbol)
+
+            self._rotation_index = (self._rotation_index + 1) % len(pairs)
+            scanned += 1
+            if scanned < len(pairs):
+                await asyncio.sleep(retry_sleep)     # 30s between HOLD scans
+
+        self._log.info("rotation_scan_complete_all_hold", scanned=scanned)
+        return True
+
+    async def _scan_pair(self, symbol: str) -> dict[str, Any]:
+        """Run the single-pair AI pipeline for ``symbol``.
+
+        Mirrors ``_run_ai_trading_cycle`` but scoped to one pair: collects
+        market context with ``ai.pairs=[symbol]``, computes indicators,
+        builds prompts, calls Groq, logs the decision, and pins the
+        decision contract to ``symbol`` so the LLM cannot hallucinate a
+        different pair.
+
+        Parameters
+        ----------
+        symbol:
+            Trading pair to scan, e.g. ``"BTCUSDT"``.
+
+        Returns
+        -------
+        dict
+            The parsed trading decision from the LLM.
+
+        Raises
+        ------
+        Exception
+            Groq / API errors propagate to the caller (``_run_ai_rotation``).
+        """
+        ai_start = time.monotonic()
+        self._ai_cycle_count += 1
+        cfg = dict(self._config_dict)
+        cfg["ai"] = dict(self._config_dict["ai"])
+        cfg["ai"]["pairs"] = [symbol]
+
+        from quad.ai.context import collect_market_context
+
+        context = await collect_market_context(
+            exchange_adapter=self._exchange_adapter,
+            market_data_engine=self._market_data,
+            db_manager=self._db_manager,
+            config=cfg,
+        )
+
+        from quad.ai.ta import compute_indicators
+
+        indicators: dict[str, dict[str, Any]] = {}
+        for key, candles in context.candles.items():
+            try:
+                indicators[key] = compute_indicators(candles)
+            except Exception as exc:
+                self._log.warning(
+                    "indicator_computation_failed",
+                    key=key,
+                    error=str(exc),
+                )
+                indicators[key] = {}
+
+        from quad.ai.prompt import build_trading_prompt
+
+        prompts = build_trading_prompt(
+            context=context,
+            indicators=indicators,
+            config=cfg,
+        )
+        decision = await self._groq_client.decide_trades(          # may raise (rate-limit/API)
+            system_prompt=prompts["system"],
+            user_prompt=prompts["user"],
+            temperature=cfg["ai"].get("temperature"),
+            max_tokens=cfg["ai"].get("max_tokens"),
+        )
+
+        self._last_ai_cycle_time_ms = round((time.monotonic() - ai_start) * 1000, 2)
+        self._last_ai_decision = decision
+        try:
+            await self._log_ai_decision(decision, context)
+        except Exception as exc:
+            self._log.warning("ai_decision_log_failed", error=str(exc))
+
+        # Pin contract: the prompt contains ONLY this pair, so any other contract is a hallucination.
+        if decision.get("action") in ("ENTER", "EXIT"):
+            if decision.get("contract") != symbol:
+                self._log.warning("ai_contract_pinned", expected=symbol, got=decision.get("contract"))
+            decision["contract"] = symbol
+        return decision
+
     async def _close_all_positions(self) -> bool:
         """Close all open positions using MARKET EXIT orders.
 
@@ -1289,7 +1456,7 @@ class QuadOrchestrator:
             if pos_side is None:
                 log.warning(
                     "close_all_positions_unknown_side",
-                    contract=getattr(position, "contract_symbol", "unknown"),
+                    contract=getattr(position, "symbol", getattr(position, "contract_symbol", "")),
                 )
                 continue
 
@@ -1300,7 +1467,7 @@ class QuadOrchestrator:
             action = Action(
                 type="EXIT",
                 strategy="serial_close",
-                contract=getattr(position, "contract_symbol", ""),
+                contract=getattr(position, "symbol", getattr(position, "contract_symbol", "")),
                 side=close_side,
                 quantity=int(getattr(position, "quantity", 0)),
                 order_type="MARKET",
@@ -1349,7 +1516,7 @@ class QuadOrchestrator:
         self,
         decision: dict[str, Any],
         context: StrategyContext,
-    ) -> None:
+    ) -> bool:
         """Execute an AI-generated trading action through risk and execution.
 
         Parameters
@@ -1358,11 +1525,19 @@ class QuadOrchestrator:
             The parsed trading decision dict from the LLM.
         context:
             The current strategy context for risk evaluation.
+
+        Returns
+        -------
+        bool
+            ``True`` after the order is submitted successfully; ``False``
+            on HOLD, incomplete decision, risk rejection/error, or
+            execution exception.  Pair-rotation uses this to distinguish
+            "ENTER opened a position" from "ENTER was rejected".
         """
         action_type = decision.get("action", "HOLD")
         if action_type == "HOLD":
             self._log.debug("ai_decision_hold", reason=decision.get("reasoning", ""))
-            return
+            return False
 
         strategy_name = decision.get("strategy") or "ai_default"
         contract_symbol = decision.get("contract")
@@ -1378,7 +1553,7 @@ class QuadOrchestrator:
                 side=side,
                 quantity=quantity,
             )
-            return
+            return False
 
         # (Positions were already force-closed at cycle start via _main_cycle)
         self._log.debug(
@@ -1417,11 +1592,11 @@ class QuadOrchestrator:
                     reason=result.reason,
                     gate=result.gate,
                 )
-                return
+                return False
             action.risk_checked = True
         except Exception as exc:
             self._log.exception("ai_risk_evaluation_error", error=str(exc))
-            return
+            return False
 
         # Execute
         try:
@@ -1446,6 +1621,7 @@ class QuadOrchestrator:
                     price=str(action.price) if action.price else None,
                     reason=action.reason,
                 )
+            return True
         except Exception as exc:
             self._log.exception(
                 "ai_order_execution_error",
@@ -1453,6 +1629,7 @@ class QuadOrchestrator:
                 contract=contract_symbol,
                 error=str(exc),
             )
+            return False
 
     async def _log_ai_decision(
         self,

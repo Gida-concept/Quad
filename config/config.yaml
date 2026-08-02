@@ -3,7 +3,7 @@ _mode: "binance"
 _dry_run: true
 
 trading:
-  serial_trade_mode: true
+  serial_trade_mode: false
   default_strategy: "trend_following"
   ai_cycle_interval: 3600
   underlyings:
@@ -11,7 +11,6 @@ trading:
     - "ETHUSDT"
     - "SOLUSDT"
     - "BNBUSDT"
-    - "DOGEUSDT"
   leverage: 50
   margin_mode: "isolated"
   position_mode: "one_way"
@@ -46,16 +45,21 @@ telegram:
 
 ai:
   enabled: true
+  model: "llama-3.1-8b-instant"
   pairs:
     - "BTCUSDT"
     - "ETHUSDT"
     - "SOLUSDT"
     - "BNBUSDT"
-    - "DOGEUSDT"
   timeframes:
     - "1h"
   candle_count: 150
   max_tokens: 4096
+  prompt:
+    max_candles: 20
+  rotation:
+    enabled: true
+    retry_sleep_seconds: 30
 
 monitoring:
   health_server:
