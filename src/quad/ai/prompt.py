@@ -83,8 +83,15 @@ def _format_account_summary(account: Account | None) -> str:
         f"Total Value: ${total:,.2f} USDT",
     ]
     if account.balances:
-        for asset, qty in sorted(account.balances.items()):
-            val = float(qty)
+        for asset, balance in sorted(account.balances.items()):
+            # `balance` is a Balance dataclass (has .total), not a raw number.
+            # Use its .total (free + locked) value; degrade gracefully if the
+            # slot was populated with a raw number or string instead.
+            raw = getattr(balance, "total", balance)
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                val = 0.0
             if val > 0:
                 lines.append(f"  {asset}: {val}")
     return "\n".join(lines)
