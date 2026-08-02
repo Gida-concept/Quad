@@ -41,7 +41,7 @@ _SYSTEM_PROMPT_TEMPLATE = """You are a professional futures trading AI for Binan
 ## Output Format
 You MUST respond with valid JSON only. No markdown, no explanation outside the JSON block.
 
-{
+{{
   "reasoning": "Brief explanation of market conditions and decision logic",
   "action": "ENTER" | "EXIT" | "HOLD" | "adjust_stop" | "reduce_position",
   "side": "buy" or "sell" (use buy for opening long or closing short; use sell for opening short or closing long),
@@ -51,15 +51,15 @@ You MUST respond with valid JSON only. No markdown, no explanation outside the J
   "limit_price": 0.0 or null (limit price; use null for market orders),
   "strategy": "trend_following" | null,
   "confidence": 0.0-1.0,
-  "risk_checks": {
+  "risk_checks": {{
     "position_size_ok": true/false,
     "portfolio_risk_ok": true/false,
     "concentration_ok": true/false,
     "max_drawdown_ok": true/false,
     "circuit_breakers_ok": true/false,
     "daily_loss_ok": true/false
-  }
-}
+  }}
+}}
 
 ## Position Management Rules
 - Always check liquidation distance before opening. If price can move against you by more than {max_liquidation_pct}% of the distance to liquidation, reduce size or skip.

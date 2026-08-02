@@ -184,9 +184,12 @@ class GroqClient:
 
         # Rate limiter / backoff configuration
         rate_limiter_cfg = self._groq_config["rate_limiter"]
+        # Fall back to a sensible default when the key is absent so that
+        # comparisons in is_available / _check_rate_limit never see None.
         self._max_requests_per_day = (
             max_requests_per_day
             or rate_limiter_cfg.get("max_requests_per_day")
+            or 1000
         )
         self._rate_limit_window_s = rate_limiter_cfg.get("window_seconds")
         self._warning_level_1 = rate_limiter_cfg.get("warning_level_1")
