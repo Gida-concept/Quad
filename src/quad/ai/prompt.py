@@ -15,7 +15,7 @@ import structlog
 
 from quad.ai.context import MarketContext
 from quad.config.schema import AiConfig
-from quad.types.domain import Account, Position
+from quad.types.domain import Account, Position, PositionStatus
 from quad.types.market import FundingRate
 
 # ---------------------------------------------------------------------------
@@ -28,44 +28,31 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT_TEMPLATE = """You are a professional futures trading AI for Binance Futures. Your role is to analyze market data and recommend trades.
+_SYSTEM_PROMPT_TEMPLATE = """You are a Binance Futures trading AI. Analyze the market data and recommend exactly one trade.
 
-## Core Principles
-1. **Capital preservation first** — never risk more than is justified by the setup.
-2. **Trade with the trend** — trend following and momentum are your primary edge.
-3. **Respect funding rates** — high positive funding (longs paying shorts) suggests crowding and potential reversal; high negative suggests the opposite.
-4. **Manage leverage carefully** — use lower leverage in volatile or ranging markets; higher leverage only in strong, clear trends.
-5. **Risk management first** — always check liquidation distance, funding costs, and stop-loss viability.
-6. **Market regime awareness** — trending markets favour trend following; ranging markets favour mean reversion or grid trading; volatile markets demand wider stops and lower size.
+## Rules
+1. Capital preservation first — never risk more than the setup justifies.
+2. Trade with the trend; respect funding rates (crowding/reversal signal); use lower leverage in volatile or ranging markets.
+3. All entry and exit orders are MARKET — never suggest limit orders or prices.
+4. Before entering, check liquidation distance. If price can move against you by more than {max_liquidation_pct}% of the distance to liquidation, reduce size or skip.
+5. Funding cost matters: {funding_period_hours}h at {funding_rate_example}% annualizes to ~{funding_annual_example}%. High cumulative funding erodes profit.
 
-## Output Format
-You MUST respond with valid JSON only. No markdown, no explanation outside the JSON block.
-
+## Output — valid JSON only, no prose outside the JSON
 {{
-  "reasoning": "Brief explanation of market conditions and decision logic",
-  "action": "ENTER" | "EXIT" | "HOLD" | "adjust_stop" | "reduce_position",
-  "side": "buy" or "sell" (use buy for opening long or closing short; use sell for opening short or closing long),
+  "reasoning": "brief explanation of market conditions and decision logic",
+  "direction": "LONG" | "SHORT" | "NEUTRAL" (your market view — the bot derives the order side from this),
+  "action": "ENTER" | "EXIT" | "HOLD",
+  "confidence": 0.0-1.0 (your conviction in this decision),
   "contract": "BTCUSDT" or null,
-  "quantity": 0.001-10 or null,
-  "order_type": "MARKET" or "LIMIT",
-  "limit_price": 0.0 or null (limit price; use null for market orders),
-  "strategy": "trend_following" | null,
-  "confidence": 0.0-1.0,
-  "risk_checks": {{
-    "position_size_ok": true/false,
-    "portfolio_risk_ok": true/false,
-    "concentration_ok": true/false,
-    "max_drawdown_ok": true/false,
-    "circuit_breakers_ok": true/false,
-    "daily_loss_ok": true/false
-  }}
+  "quantity": 0.001-10 or null
 }}
 
-## Position Management Rules
-- Always check liquidation distance before opening. If price can move against you by more than {max_liquidation_pct}% of the distance to liquidation, reduce size or skip.
-- Factor funding rate into position cost: {funding_period_hours}h funding at {funding_rate_example}% annualises to ~{funding_annual_example}%. High cumulative funding cost can erode profits.
-- Use market orders for entry when speed matters; use limit orders for tight entries when there's no rush.
-- Prefer limit orders for take-profit and stop-loss placements."""
+## Direction & Side
+- State direction only: LONG (expect up), SHORT (expect down), or NEUTRAL (no edge / flat).
+- The bot derives the order side (BUY/SELL) deterministically from your direction and the current position. Never output a side yourself.
+- ENTER requires a clear LONG or SHORT. NEVER enter with NEUTRAL.
+- EXIT closes the position you hold (see Current Position). If flat, you cannot EXIT — use HOLD or ENTER.
+- HOLD means do nothing — only when there is no edge."""
 
 
 # ============================================================================
@@ -95,6 +82,26 @@ def _format_account_summary(account: Account | None) -> str:
             if val > 0:
                 lines.append(f"  {asset}: {val}")
     return "\n".join(lines)
+
+
+def _format_current_position(positions: list[Position]) -> str:
+    """Return a one-line summary of the currently held position.
+
+    Example: ``"LONG BTCUSDT"``, ``"LONG BTCUSDT, SHORT ETHUSDT"``, or
+    ``"flat"`` when nothing is held.  The LLM uses this to decide EXIT
+    behaviour (EXIT closes whatever is held).
+    """
+    open_positions = [
+        p for p in positions if getattr(p, "status", None) == PositionStatus.OPEN
+    ]
+    if not open_positions:
+        return "flat"
+    parts = []
+    for p in open_positions:
+        side = getattr(p, "side", "")
+        symbol = getattr(p, "symbol", "") or getattr(p, "contract_symbol", "")
+        parts.append(f"{side} {symbol}".strip())
+    return ", ".join(parts)
 
 
 def _format_positions(positions: list[Position]) -> str:
@@ -304,6 +311,10 @@ def build_trading_prompt(
     sections.append(_format_account_summary(context.account))
     sections.append("")
 
+    sections.append("## Current Position")
+    sections.append(f"Current Position: {_format_current_position(context.positions)}")
+    sections.append("")
+
     sections.append("## Open Positions")
     sections.append(_format_positions(context.positions))
     sections.append("")
@@ -350,8 +361,7 @@ def build_trading_prompt(
     sections.append("")
 
     sections.append("## Decision Required")
-    sections.append("Based on the above data, recommend a trading action (ENTER to open, EXIT to close, HOLD to do nothing, adjust_stop, or reduce_position).")
-    sections.append("Respond with valid JSON only following the specified format.")
+    sections.append("State direction (LONG/SHORT/NEUTRAL) and exactly one action: ENTER to open, EXIT to close, or HOLD. Do not include a side. Respond with valid JSON only following the specified format.")
 
     user_prompt = "\n".join(sections)
 

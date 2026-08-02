@@ -157,6 +157,16 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             else int(self._binance_config["recv_window"])
         )
 
+        # Dry-run hard guard flag (top-level ``_dry_run`` config key).  When
+        # set AND the exchange is live (``testnet=False``), place_order()
+        # refuses every order to protect real funds.
+        self._dry_run: bool = bool(self._config.get("_dry_run", False))
+        # TTL for the exchange-info LOT_SIZE / MIN_NOTIONAL filter cache used
+        # by normalize_quantity().
+        self._exchange_info_ttl: float = float(
+            self._binance_config.get("exchange_info_ttl_seconds", 60)
+        )
+
         # Resolve base URLs
         self._rest_base: str = (
             self._binance_config["testnet_base_url"] if testnet
@@ -294,6 +304,11 @@ class BinanceFuturesAdapter(ExchangeAdapter):
     def is_connected(self) -> bool:
         """Whether the HTTP session is active."""
         return self._connected and self._session is not None
+
+    @property
+    def is_testnet(self) -> bool:
+        """Whether this adapter is pointed at the Binance Futures testnet."""
+        return self._testnet
 
     # ======================================================================
     # REST — Account & Positions
@@ -484,14 +499,44 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         Raises:
             ExchangeOrderError: If the order is rejected.
             ExchangeRateLimitError: If rate limits are breached.
+            RuntimeError: If a hard dry-run guard blocks the order, or the
+                quantity fails exchange filter validation.
         """
+        # 0. Hard dry-run guard -- refuse every order when dry-run mode is
+        #    enabled but the exchange is LIVE.  This is the lowest choke
+        #    point in the whole order path: every order (AI rotation, /ai
+        #    telegram command, TradingView webhook, strategy actions,
+        #    TP/SL brackets, close-all) funnels through place_order(), so
+        #    this cannot be bypassed.
+        if self._dry_run and not self._testnet:
+            self._log.critical(
+                "dry_run_guard_blocked_order",
+                symbol=request.symbol,
+                side=request.side,
+                order_type=request.order_type,
+                qty=str(request.quantity),
+                dry_run=self._dry_run,
+                testnet=self._testnet,
+            )
+            raise RuntimeError(
+                "DRY_RUN_GUARD: dry-run mode is enabled but the exchange is "
+                "LIVE (testnet=False). Refusing to place the order to protect "
+                "real funds."
+            )
+
+        # 0b. Normalize quantity to the exchange's LOT_SIZE / MIN_NOTIONAL
+        #     filters so no order is rejected for -1113/-1111/-4164.  The
+        #     engine already normalizes too, but this is the authoritative
+        #     last-line-of-defense (idempotent).
+        quantity = await self.normalize_quantity(request.symbol, request.quantity)
+
         await self._wait_if_rate_limited()
 
         params: dict[str, Any] = {
             "symbol": request.symbol,
             "side": request.side.upper(),
             "type": request.order_type.upper(),
-            "quantity": str(request.quantity),
+            "quantity": str(quantity),
         }
 
         if request.price is not None:
@@ -527,7 +572,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             side=data.get("side", request.side),
             order_type=data.get("type", request.order_type),
             quantity=Decimal(
-                str(data.get("origQty", str(request.quantity)))
+                str(data.get("origQty", str(quantity)))
             ),
             filled_qty=Decimal(str(data.get("executedQty", "0"))),
             price=(

@@ -21,7 +21,7 @@ else:
 # Schema versioning
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 """Current schema version. Increment when making breaking changes."""
 
 SCHEMA_MIGRATIONS: dict[int, list[str]] = {
@@ -110,6 +110,21 @@ SCHEMA_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_funding_rate_records_symbol ON funding_rate_records(symbol)",
         "CREATE INDEX IF NOT EXISTS idx_funding_rate_records_time ON funding_rate_records(time)",
     ],
+    4: [
+        # Version 3 --> 4: Phase 1 inversion-proof upgrade.  The LLM now
+        # forecasts a DIRECTION and the bot derives the order side
+        # deterministically.  Track the predicted direction, confidence,
+        # plausibility-gate result, and the position outcome so unresolved
+        # ENTER decisions can be reconciled when the position closes.
+        "ALTER TABLE decisions ADD COLUMN predicted_direction TEXT NOT NULL DEFAULT 'NEUTRAL'",
+        "ALTER TABLE decisions ADD COLUMN confidence REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE decisions ADD COLUMN gate_result TEXT NOT NULL DEFAULT 'not_checked'",
+        "ALTER TABLE decisions ADD COLUMN entry_price TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE decisions ADD COLUMN exit_price TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE decisions ADD COLUMN realized_pnl TEXT NOT NULL DEFAULT '0'",
+        "ALTER TABLE decisions ADD COLUMN outcome TEXT NOT NULL DEFAULT 'open'",
+        "ALTER TABLE decisions ADD COLUMN resolved_at BIGINT",
+    ],
 }
 """Mapping of version numbers to lists of SQL migration statements.
 
@@ -123,6 +138,10 @@ Schema version history:
 - Version 2 --> 3: Added avg_fill_price to orders.  Added sessions, optimization_runs,
   optimization_recommendations, liquidation_events, and funding_rate_records tables
   with associated indexes.
+- Version 3 --> 4: Added Phase-1 decision-outcome columns to decisions
+  (predicted_direction, confidence, gate_result, entry_price, exit_price,
+  realized_pnl, outcome, resolved_at) for the inversion-proof direction ->
+  side validation upgrade.
 """
 
 
@@ -367,7 +386,13 @@ class TradeModel:
 
 @dataclass
 class DecisionModel:
-    """Strategy decision record."""
+    """Strategy decision record.
+
+    Phase 1 fields: the LLM forecasts ``predicted_direction`` (LONG / SHORT /
+    NEUTRAL) and the bot derives the order side deterministically.  ``outcome``
+    tracks whether an executed ENTER resolved to a win / loss / flat (closed
+    without PnL), defaulting to ``"open"`` until the position closes.
+    """
 
     __tablename__: ClassVar[str] = "decisions"
 
@@ -380,6 +405,14 @@ class DecisionModel:
     risk_passed: int
     executed: int
     cycle_time_ms: int
+    predicted_direction: str = "NEUTRAL"
+    confidence: float = 0.0
+    gate_result: str = "not_checked"
+    entry_price: str = ""
+    exit_price: str = ""
+    realized_pnl: str = "0"
+    outcome: str = "open"
+    resolved_at: int | None = None
 
     @classmethod
     def create_table_ddl(cls) -> str:
@@ -392,7 +425,15 @@ class DecisionModel:
     reason TEXT NOT NULL DEFAULT '',
     risk_passed INTEGER NOT NULL DEFAULT 0,
     executed INTEGER NOT NULL DEFAULT 0,
-    cycle_time_ms INTEGER NOT NULL DEFAULT 0
+    cycle_time_ms INTEGER NOT NULL DEFAULT 0,
+    predicted_direction TEXT NOT NULL DEFAULT 'NEUTRAL',
+    confidence REAL NOT NULL DEFAULT 0.0,
+    gate_result TEXT NOT NULL DEFAULT 'not_checked',
+    entry_price TEXT NOT NULL DEFAULT '',
+    exit_price TEXT NOT NULL DEFAULT '',
+    realized_pnl TEXT NOT NULL DEFAULT '0',
+    outcome TEXT NOT NULL DEFAULT 'open',
+    resolved_at BIGINT
 )"""
 
     @classmethod

@@ -5,6 +5,9 @@ Provides a production-ready wrapper around ``groq.AsyncGroq`` with:
 - Configurable model selection with sensible defaults
 - Rate-limit awareness and automatic retry jitter
 - Sliding-window rate limiter (max requests per day)
+- Daily TOKEN-budget throttle (chars/4 estimate) so ``is_available()``
+  reports ``False`` once the day's token quota is spent instead of the
+  caller burning HTTP 429s
 - Structured error handling with structlog logging
 - Connection timeout and max-retry configuration
 
@@ -46,6 +49,8 @@ from groq import (
     RateLimitError,
 )
 
+from quad.ai.validator import canonical_direction
+
 # ---------------------------------------------------------------------------
 # Logger
 # ---------------------------------------------------------------------------
@@ -64,6 +69,16 @@ _FALLBACK_MODEL = "llama-3.1-8b-instant"
 
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.3
+
+_DEFAULT_MAX_TOKENS_PER_DAY = 500_000
+"""Daily token budget for the default model (llama-3.1-8b-instant free tier).
+
+The Groq free tier is quota-bound by TOKENS per day, not requests.  With a
+~10K-token prompt this allows only ~50 requests/day — the old 70b model hit
+exactly this wall (``429 tokens per day: Limit 100000, used 97364``)."""
+
+_TOKEN_CHARS_PER_TOKEN = 4
+"""Chars-per-token heuristic for dependency-light token estimation."""
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +212,31 @@ class GroqClient:
         self._warning_level_3 = rate_limiter_cfg.get("warning_level_3")
         self._base_backoff = self._groq_config.get("base_backoff_seconds")
 
+        # Daily token-budget throttle.  The Groq free tier is token-quota
+        # bound (500K tokens/day for the 8b model); requests-per-day alone
+        # under-counts the real constraint.  Fall back to sane defaults when
+        # the nested config key is absent (tests / minimal configs).
+        token_budget_cfg = self._groq_config.get("token_budget", {}) or {}
+        self._token_budget_enabled = bool(
+            token_budget_cfg.get("enabled", True)
+        )
+        self._max_tokens_per_day = int(
+            token_budget_cfg.get("max_tokens_per_day")
+            or _DEFAULT_MAX_TOKENS_PER_DAY
+        )
+        self._token_window_s = float(
+            token_budget_cfg.get("window_seconds") or 86400
+        )
+        self._token_warning_level_1 = int(
+            token_budget_cfg.get("warning_level_1") or 400_000
+        )
+        self._token_warning_level_2 = int(
+            token_budget_cfg.get("warning_level_2") or 450_000
+        )
+        self._token_warning_level_3 = int(
+            token_budget_cfg.get("warning_level_3") or 480_000
+        )
+
         self._log = logger.bind(model=self._model)
 
         # Internal async client (created eagerly to warm the connection)
@@ -214,6 +254,11 @@ class GroqClient:
         # Sliding-window rate limiter: timestamps of requests in current window
         self._request_timestamps: deque[float] = deque()
         self._rate_limit_warning_sent: int = 0  # tracks highest warning level sent
+
+        # Daily token budget: rolling deque of (timestamp, tokens_used).
+        self._token_usages: deque[tuple[float, int]] = deque()
+        self._total_tokens_estimated: int = 0
+        self._token_warning_sent: int = 0  # tracks highest token warning level
 
     # ------------------------------------------------------------------
     # Properties
@@ -236,25 +281,169 @@ class GroqClient:
             "last_rate_limit": self._last_rate_limit,
             "requests_in_window": len(self._request_timestamps),
             "max_requests_per_day": self._max_requests_per_day,
-            "available": self.is_available(),
+            "token_budget_enabled": self._token_budget_enabled,
+            "tokens_used_in_window": self.tokens_used_in_window(now),
+            "total_tokens_estimated": self._total_tokens_estimated,
+            "max_tokens_per_day": self._max_tokens_per_day,
+            "available": self.is_available(now),
         }
 
     # ------------------------------------------------------------------
     # Availability check
     # ------------------------------------------------------------------
 
-    def is_available(self) -> bool:
+    def is_available(self, now: float | None = None) -> bool:
         """Check if the client is available for trading decisions.
 
-        Returns ``True`` if:
-        - API key is configured, AND
-        - The sliding-window count is below the daily limit.
+        Returns ``True`` only when ALL of:
+        - an API key is configured, AND
+        - the request sliding-window count is below the daily request limit,
+          AND
+        - the rolling daily token usage is below the token budget (when the
+          token throttle is enabled).
+
+        Parameters
+        ----------
+        now:
+            Optional timestamp override for offline tests.  Production
+            callers omit it.
+
+        The ``_run_ai_rotation`` loop consults this between pairs so it stops
+        scanning (instead of burning HTTP 429s) once the daily token budget
+        is spent.
         """
         if not self._api_key:
             return False
-        now = time.time()
+        if now is None:
+            now = time.time()
         self._prune_timestamps(now)
-        return len(self._request_timestamps) < self._max_requests_per_day
+        if len(self._request_timestamps) >= self._max_requests_per_day:
+            return False
+        self._prune_token_usages(now)
+        if self._token_budget_enabled:
+            used = sum(t for _, t in self._token_usages)
+            if used >= self._max_tokens_per_day:
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Token budget (daily token-quota throttle)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """Estimate the token count of ``text`` with a chars/4 heuristic.
+
+        Deliberately dependency-light: no tokenizer is pulled in.  The
+        daily budget is a coarse safety valve, so a modest
+        over/under-estimate is acceptable; we err toward over-estimating
+        (see ``chat`` where the output cap is added) so the throttle
+        under-consumes rather than overspending the real quota.
+        """
+        if not text:
+            return 0
+        return max(1, len(text) // _TOKEN_CHARS_PER_TOKEN)
+
+    def tokens_used_in_window(self, now: float | None = None) -> int:
+        """Return estimated tokens consumed within the rolling window."""
+        self._prune_token_usages(now)
+        return sum(t for _, t in self._token_usages)
+
+    def _prune_token_usages(self, now: float | None = None) -> None:
+        """Drop token-usage entries older than the rolling window."""
+        if now is None:
+            now = time.time()
+        cutoff = now - self._token_window_s
+        while self._token_usages and self._token_usages[0][0] < cutoff:
+            self._token_usages.popleft()
+
+    def _record_token_usage(
+        self,
+        tokens: int,
+        now: float | None = None,
+    ) -> None:
+        """Record an estimated token spend at ``now`` (default: real time).
+
+        Entries older than ``window_seconds`` are pruned on the next
+        read, which gives the daily reset behaviour (usage rolls off once
+        the window slides past it).
+        """
+        if tokens <= 0 or not self._token_budget_enabled:
+            return
+        if now is None:
+            now = time.time()
+        self._prune_token_usages(now)
+        self._token_usages.append((now, tokens))
+        self._total_tokens_estimated += tokens
+
+    async def _check_token_budget(
+        self,
+        estimate: int,
+        now: float | None = None,
+    ) -> None:
+        """Refuse a request whose estimate would exceed the daily token budget.
+
+        Also emits one-shot warnings as usage approaches the budget (mirrors
+        the request limiter's warning ladder).
+
+        Parameters
+        ----------
+        estimate:
+            Estimated token cost of the pending request.
+        now:
+            Optional timestamp override for offline tests.  Production
+            callers omit it.
+
+        Raises
+        ------
+        RuntimeError
+            When ``used + estimate`` would exceed ``max_tokens_per_day``.
+            The message deliberately contains the words "rate limit" so the
+            orchestrator's existing ``RuntimeError`` + "rate limit" break in
+            ``_run_ai_rotation`` also stops the scan for token-budget refusals.
+        """
+        if not self._token_budget_enabled:
+            return
+        if now is None:
+            now = time.time()
+        self._prune_token_usages(now)
+        used = sum(t for _, t in self._token_usages)
+
+        if used + estimate > self._max_tokens_per_day:
+            self._log.error(
+                "groq_token_budget_exceeded",
+                used=used,
+                estimate=estimate,
+                max_per_day=self._max_tokens_per_day,
+            )
+            raise RuntimeError(
+                f"Groq rate limit reached: daily token budget "
+                f"(used={used}, estimate={estimate}, max_per_day="
+                f"{self._max_tokens_per_day}). "
+                "Skipping AI trading cycle until the window resets."
+            )
+
+        if used >= self._token_warning_level_3 and self._token_warning_sent < 3:
+            self._log.warning(
+                "groq_token_budget_critical",
+                used=used,
+                max_per_day=self._max_tokens_per_day,
+            )
+            self._token_warning_sent = 3
+        elif used >= self._token_warning_level_2 and self._token_warning_sent < 2:
+            self._log.warning(
+                "groq_token_budget_high",
+                used=used,
+                max_per_day=self._max_tokens_per_day,
+            )
+            self._token_warning_sent = 2
+        elif used >= self._token_warning_level_1 and self._token_warning_sent < 1:
+            self._log.warning(
+                "groq_token_budget_warning",
+                used=used,
+                max_per_day=self._max_tokens_per_day,
+            )
+            self._token_warning_sent = 1
 
     # ------------------------------------------------------------------
     # Rate limiter
@@ -390,10 +579,23 @@ class GroqClient:
         active_model = model or self._model
         last_error: Exception | None = None
 
+        # Estimate the token cost of this request BEFORE sending so the
+        # daily token budget can refuse before the API burns a 429.  Input is
+        # the char/4 estimate of every message; output is the (conservative)
+        # max-token cap, which over-counts on purpose so the throttle never
+        # overspends the real quota.
+        input_chars = sum(len(str(m.get("content", ""))) for m in msgs)
+        estimated_total_tokens = (
+            (input_chars // _TOKEN_CHARS_PER_TOKEN)
+            + int(max_tokens or _DEFAULT_MAX_TOKENS)
+        )
+
         for attempt in range(1, self._max_retries + 1):
             try:
-                # Check rate limit before making the request
+                # Check request rate limit before making the request
                 await self._check_rate_limit()
+                # Check the daily TOKEN budget before making the request
+                await self._check_token_budget(estimated_total_tokens)
 
                 completion_kwargs = dict(
                     model=active_model,
@@ -408,6 +610,7 @@ class GroqClient:
                 )
                 self._total_requests += 1
                 self._request_timestamps.append(time.time())
+                self._record_token_usage(estimated_total_tokens)
                 return completion.choices[0].message.content or ""
 
             except RateLimitError as exc:
@@ -492,9 +695,11 @@ class GroqClient:
         -------
         dict
             Parsed JSON decision dict with keys: reasoning, action,
-            contract, side, quantity, order_type, limit_price, strategy,
-            confidence, risk_checks.  On parse failure returns a safe
-            HOLD dict with an explanatory reasoning field.
+            side, contract, quantity.  Legacy keys (order_type,
+            limit_price, strategy, confidence, risk_checks) are
+            tolerated when present and defaulted when absent.  On parse
+            failure returns a safe HOLD dict with an explanatory
+            reasoning field.
 
         Raises
         ------
@@ -538,6 +743,7 @@ class GroqClient:
                 return {
                     "reasoning": f"LLM returned a {type(decision).__name__}, expected a JSON object",
                     "action": "HOLD",
+                    "direction": "NEUTRAL",
                     "confidence": 0.0,
                     "indicators": {},
                 }
@@ -551,10 +757,11 @@ class GroqClient:
             return {
                 "reasoning": f"Failed to parse LLM response: {exc}",
                 "action": "HOLD",
+                "direction": "NEUTRAL",
                 "contract": None,
                 "side": None,
                 "quantity": None,
-                "order_type": None,
+                "order_type": "MARKET",
                 "limit_price": None,
                 "strategy": None,
                 "confidence": 0.0,
@@ -585,6 +792,25 @@ class GroqClient:
                 action=action,
             )
             decision["action"] = fallback_action
+
+        # The simplified prompt no longer asks for order_type / limit_price /
+        # strategy / risk_checks.  Tolerate decisions that omit them by
+        # defaulting gracefully so downstream consumers never KeyError.
+        # All orders are MARKET (no limit orders), so the default order_type
+        # is MARKET rather than None.
+        decision.setdefault("order_type", "MARKET")
+        decision.setdefault("limit_price", None)
+        decision.setdefault("strategy", None)
+        decision.setdefault("risk_checks", {})
+        decision.setdefault("confidence", 0.0)
+
+        # Canonicalize the direction field (Phase 1 inversion guard).  The
+        # model states a DIRECTION; the bot derives the order side from it.
+        # Tolerate the legacy raw ``side`` field as a backward-compat source
+        # of direction when the model omits the new field.
+        if not decision.get("direction") and decision.get("side"):
+            decision["direction"] = decision.get("side")
+        decision["direction"] = canonical_direction(decision.get("direction"))
 
         return decision
 

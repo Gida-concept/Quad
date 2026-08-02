@@ -578,6 +578,153 @@ class DecisionRepository(BaseRepository[DecisionModel]):
             self._log.exception("get_decisions_by_date_range_failed")
             raise
 
+    async def get_unresolved(self, limit: int = 100) -> list[DecisionModel]:
+        """Return decisions whose position outcome is still unresolved.
+
+        An executed ENTER decision stays ``outcome='open'`` until the
+        position closes (via TP/SL bracket on the exchange).  The
+        orchestrator reconciles these against live positions each cycle.
+
+        Parameters
+        ----------
+        limit:
+            Maximum number of unresolved decisions to return.
+
+        Returns
+        -------
+        list[DecisionModel]
+            Unresolved decisions ordered oldest-first.
+        """
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    f"WHERE outcome = 'open' ORDER BY timestamp ASC LIMIT $1",
+                    limit,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > self._slow_query_threshold_ms:
+                self._log.warning("slow_query", ms=round(dur), method="get_unresolved")
+            return [DecisionModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_unresolved_decisions_failed")
+            raise
+
+    async def get_resolved(
+        self,
+        limit: int = 500,
+        since: int | None = None,
+        only_directional: bool = True,
+    ) -> list[DecisionModel]:
+        """Return decisions whose outcome has been resolved (not ``'open'``).
+
+        Used by the Phase-3 prediction-quality metrics module: hit rate, ECE,
+        and Brier score are computed over resolved ENTER decisions.  The
+        ``outcome`` column is one of ``'win'``, ``'loss'``, or ``'flat'``; the
+        caller (``quad.ai.metrics``) decides how each label counts.
+
+        Parameters
+        ----------
+        limit:
+            Maximum number of resolved decisions to return (oldest-first).
+        since:
+            Optional Unix-epoch millisecond floor on ``timestamp``, so the
+            metrics window can be narrowed without pulling the whole table.
+        only_directional:
+            When True (default), restrict to rows that carry a directional
+            prediction (LONG/SHORT) AND a resolved outcome — exactly the rows
+            ``metrics.compute_metrics`` can use.  When False, return every
+            resolved row (including NEUTRAL predictions and non-ENTER
+            actions) for inspection.
+
+        Returns
+        -------
+        list[DecisionModel]
+            Resolved decisions ordered oldest-first.
+        """
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                if since is not None:
+                    if only_directional:
+                        rows = await conn.fetch(
+                            f"SELECT {self._column_list()} FROM {self._table} "
+                            f"WHERE outcome != 'open' "
+                            f"AND predicted_direction IN ('LONG', 'SHORT') "
+                            f"AND timestamp >= $1 "
+                            f"ORDER BY timestamp ASC LIMIT $2",
+                            since, limit,
+                        )
+                    else:
+                        rows = await conn.fetch(
+                            f"SELECT {self._column_list()} FROM {self._table} "
+                            f"WHERE outcome != 'open' "
+                            f"AND timestamp >= $1 "
+                            f"ORDER BY timestamp ASC LIMIT $2",
+                            since, limit,
+                        )
+                else:
+                    if only_directional:
+                        rows = await conn.fetch(
+                            f"SELECT {self._column_list()} FROM {self._table} "
+                            f"WHERE outcome != 'open' "
+                            f"AND predicted_direction IN ('LONG', 'SHORT') "
+                            f"ORDER BY timestamp ASC LIMIT $1",
+                            limit,
+                        )
+                    else:
+                        rows = await conn.fetch(
+                            f"SELECT {self._column_list()} FROM {self._table} "
+                            f"WHERE outcome != 'open' "
+                            f"ORDER BY timestamp ASC LIMIT $1",
+                            limit,
+                        )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > self._slow_query_threshold_ms:
+                self._log.warning("slow_query", ms=round(dur), method="get_resolved")
+            return [DecisionModel.from_row(r) for r in rows]
+        except Exception:
+            self._log.exception("get_resolved_decisions_failed")
+            raise
+
+    async def mark_outcome(
+        self,
+        decision_id: int,
+        outcome: str,
+        realized_pnl: str = "0",
+        exit_price: str = "",
+        resolved_at: int | None = None,
+    ) -> None:
+        """Mark a decision's position outcome as resolved.
+
+        Called when the position opened by an ENTER decision disappears
+        (closed by TP/SL bracket, liquidation, or manual close).  ``outcome``
+        is one of ``"win"``, ``"loss"``, or ``"flat"``.
+
+        Parameters
+        ----------
+        decision_id:
+            Primary key of the decision to resolve.
+        outcome:
+            ``"win"``, ``"loss"``, or ``"flat"``.
+        realized_pnl:
+            Realized PnL as a decimal string.
+        exit_price:
+            Price at which the position closed (decimal string).
+        resolved_at:
+            Unix epoch seconds when the position closed.  Defaults to now.
+        """
+        if resolved_at is None:
+            resolved_at = int(time.time())
+        await self.update(
+            decision_id,
+            outcome=outcome,
+            realized_pnl=str(realized_pnl or "0"),
+            exit_price=str(exit_price or ""),
+            resolved_at=resolved_at,
+        )
+
 
 class SessionRepository(BaseRepository[SessionModel]):
     """Repository for trading sessions."""

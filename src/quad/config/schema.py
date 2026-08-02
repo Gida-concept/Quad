@@ -814,11 +814,57 @@ class RateLimiterConfig(BaseModel):
     )
 
 
+class TokenBudgetConfig(BaseModel):
+    """Daily token-budget throttle for the Groq API.
+
+    The Groq free tier is quota-bound by TOKENS per day, not requests
+    (the old 70b model burned exactly this: ``429 tokens per day: Limit
+    100000, used 97364``).  ``GroqClient`` estimates tokens per request
+    with a dependency-light chars/4 heuristic and refuses / throttles once
+    the rolling daily token usage is exhausted, instead of burning HTTP
+    429s.  The request-based :class:`RateLimiterConfig` is unchanged and
+    continues to apply alongside this.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable the daily token-budget throttle",
+    )
+    max_tokens_per_day: int = Field(
+        default=500_000,
+        ge=1,
+        description=(
+            "Daily token budget (default matches llama-3.1-8b-instant "
+            "free tier: 500K tokens/day)"
+        ),
+    )
+    window_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Rolling token-usage window in seconds (default 24h)",
+    )
+    warning_level_1: int = Field(
+        default=400_000,
+        ge=1,
+        description="First warning level (estimated tokens used in window)",
+    )
+    warning_level_2: int = Field(
+        default=450_000,
+        ge=1,
+        description="Second warning level (estimated tokens used in window)",
+    )
+    warning_level_3: int = Field(
+        default=480_000,
+        ge=1,
+        description="Third warning level (estimated tokens used in window)",
+    )
+
+
 class GroqClientConfig(BaseModel):
     """Groq LLM client configuration.
 
-    Controls retry/backoff, rate-limiter warning levels, and fallback
-    action logic.
+    Controls retry/backoff, rate-limiter warning levels, the daily
+    token-budget throttle, and fallback action logic.
     """
 
     timeout_seconds: float = Field(
@@ -841,8 +887,12 @@ class GroqClientConfig(BaseModel):
         default_factory=RateLimiterConfig,
         description="Groq API rate limiter configuration",
     )
+    token_budget: TokenBudgetConfig = Field(
+        default_factory=TokenBudgetConfig,
+        description="Daily token-budget throttle for the Groq API",
+    )
     valid_actions: list[str] = Field(
-        default_factory=lambda: ["ENTER", "EXIT", "HOLD"],
+        default_factory=lambda: ["ENTER", "EXIT", "HOLD", "adjust_stop", "reduce_position"],
         description="Valid AI trading actions",
     )
     fallback_action: str = Field(
@@ -885,6 +935,62 @@ class AiRotationConfig(BaseModel):
 # ============================================================================
 # AI Section
 # ============================================================================
+
+class AiValidatorConfig(BaseModel):
+    """Deterministic direction-to-side validation of AI decisions.
+
+    Phase 1 inversion guard: the LLM forecasts a direction and the bot
+    derives the order side deterministically.  ``gate_mode`` controls how
+    the technical plausibility gate treats entries that fight the trend.
+    """
+
+    gate_mode: Literal["warn", "veto"] = Field(
+        default="warn",
+        description=(
+            "Plausibility gate behaviour: 'warn' logs a trend/RSI veto "
+            "without rejecting; 'veto' rejects the decision"
+        ),
+    )
+    min_confidence_to_trade: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum confidence (0-1) for ENTER/EXIT decisions.  Decisions "
+            "below this threshold are rejected (downgraded to a safe HOLD by "
+            "the orchestrator).  0.0 disables the gate."
+        ),
+    )
+
+
+class AiMetricsConfig(BaseModel):
+    """Prediction-quality metrics computation for AI decisions.
+
+    Phase 3: the orchestrator periodically pulls resolved decisions
+    (``outcome != 'open'``) and feeds them to ``quad.ai.metrics`` to compute
+    hit rate, Expected Calibration Error, and Brier score.  This section gates
+    whether the computation runs and how often.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Compute and log AI decision-quality metrics each interval",
+    )
+    interval_cycles: int = Field(
+        default=1,
+        ge=1,
+        description="Compute metrics every N main cycles (1 = every cycle)",
+    )
+    min_resolved: int = Field(
+        default=5,
+        ge=0,
+        description="Minimum resolved directional rows before logging metrics",
+    )
+    only_directional: bool = Field(
+        default=True,
+        description="Restrict the metrics query to LONG/SHORT resolved rows",
+    )
+
 
 class AiConfig(BaseModel):
     """AI-driven trading analysis and signal generation configuration."""
@@ -960,6 +1066,14 @@ class AiConfig(BaseModel):
     rotation: AiRotationConfig = Field(
         default_factory=AiRotationConfig,
         description="Per-pair rotation configuration",
+    )
+    validator: AiValidatorConfig = Field(
+        default_factory=AiValidatorConfig,
+        description="Deterministic direction-to-side decision validation",
+    )
+    metrics: AiMetricsConfig = Field(
+        default_factory=AiMetricsConfig,
+        description="Prediction-quality metrics computation (hit rate, ECE, Brier)",
     )
 
 
@@ -1087,8 +1201,8 @@ class ExecutionConfig(BaseModel):
         description="Default TWAP execution window in seconds",
     )
     default_order_type: str = Field(
-        default="LIMIT",
-        description="Default order type (LIMIT or MARKET)",
+        default="MARKET",
+        description="Default order type (MARKET only; limit orders disabled)",
     )
     reduce_only: bool = Field(
         default=False,

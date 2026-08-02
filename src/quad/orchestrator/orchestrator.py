@@ -121,6 +121,8 @@ class QuadOrchestrator:
         self._last_ai_error: str | None = None
         self._last_ai_cycle_time_ms: float = 0.0
         self._consecutive_ai_failures: int = 0
+        # Phase 3: main-cycle counter for the config-gated metrics interval.
+        self._metrics_cycle_count: int = 0
 
         # Pair-rotation state: trade one pair at a time, advance on close.
         self._rotation_index: int = 0      # index into ai.pairs of next pair to scan
@@ -189,6 +191,9 @@ class QuadOrchestrator:
                     "on_start_positions_sync_failed",
                     error=str(exc),
                 )
+
+            # Configure futures account (leverage, margin mode, position mode)
+            await self._setup_futures_account()
 
             await self._init_market_data()
             await self._init_risk_manager()
@@ -424,6 +429,126 @@ class QuadOrchestrator:
             exchange_name=exchange_cfg["name"],
         )
 
+    async def _setup_futures_account(self) -> None:
+        """Configure futures account settings once at startup.
+
+        Per configured symbol: sets leverage and margin mode.  Then syncs the
+        position mode: if the exchange account is in HEDGE (dual-side) mode
+        but the bot is configured for one-way, logs a LOUD warning (dual-side
+        positions break single-sided SL/TP brackets and ``reduceOnly`` is
+        forbidden in hedge mode) and only auto-switches to one-way on
+        testnet/dry-run — never on live.
+
+        Per-symbol failures are logged and swallowed so one bad symbol cannot
+        abort startup.
+        """
+        trading_cfg = self._config_dict.get("trading", {})
+        leverage = int(trading_cfg.get("leverage", 1))
+        margin_mode = str(trading_cfg.get("margin_mode", "isolated"))
+        position_mode = str(trading_cfg.get("position_mode", "one_way"))
+        symbols = list(trading_cfg.get("underlyings", []))
+        adapter = self._exchange_adapter
+        if adapter is None:
+            return
+
+        for symbol in symbols:
+            try:
+                await adapter.set_leverage(symbol, leverage)
+                self._log.info(
+                    "account_setup_leverage_set",
+                    symbol=symbol,
+                    leverage=leverage,
+                )
+            except Exception as exc:
+                self._log.warning(
+                    "account_setup_leverage_failed",
+                    symbol=symbol,
+                    error=str(exc),
+                )
+            try:
+                await adapter.set_margin_mode(symbol, margin_mode)
+                self._log.info(
+                    "account_setup_margin_mode_set",
+                    symbol=symbol,
+                    margin_mode=margin_mode,
+                )
+            except Exception as exc:
+                self._log.warning(
+                    "account_setup_margin_mode_failed",
+                    symbol=symbol,
+                    error=str(exc),
+                )
+
+        # Position mode sync
+        try:
+            current_mode = await adapter.get_position_mode()
+        except Exception as exc:
+            self._log.warning(
+                "account_setup_position_mode_read_failed",
+                error=str(exc),
+            )
+            return
+
+        if current_mode == "hedge" and position_mode != "hedge":
+            self._log.critical(
+                "account_position_mode_conflict",
+                current_mode=current_mode,
+                configured_mode=position_mode,
+                msg=(
+                    "Exchange account is in HEDGE (dual-side) position mode "
+                    "but the bot is configured for one-way.  Dual-side "
+                    "positions break single-sided SL/TP brackets and "
+                    "reduceOnly is forbidden in hedge mode.  Auto-switching "
+                    "to one-way ONLY on testnet/dry-run; never on live."
+                ),
+            )
+            adapter_is_testnet = bool(getattr(adapter, "is_testnet", False))
+            if self._mode == "dry_run" or adapter_is_testnet:
+                try:
+                    await adapter.set_position_mode("one_way")
+                    self._log.info(
+                        "account_position_mode_switched",
+                        to="one_way",
+                        reason="dry_run_or_testnet",
+                    )
+                except Exception as exc:
+                    self._log.warning(
+                        "account_position_mode_switch_failed",
+                        error=str(exc),
+                    )
+            else:
+                self._log.critical(
+                    "account_position_mode_live_conflict",
+                    msg=(
+                        "NOT auto-switching position mode on LIVE.  Manually "
+                        "set the account to one-way (or change "
+                        "trading.position_mode to hedge) before enabling "
+                        "live trading."
+                    ),
+                )
+        else:
+            self._log.info(
+                "account_position_mode_ok",
+                current_mode=current_mode,
+                configured_mode=position_mode,
+            )
+
+    @property
+    def _is_dry_run(self) -> bool:
+        """Whether dry-run mode is enabled.
+
+        Either the top-level ``_dry_run`` config key (``QUAD_DRY_RUN``) is
+        truthy, or the resolved mode is ``"dry_run"``.  This mirrors the
+        execution engine's guard so status/metrics report the same effective
+        state that actually blocks live orders.
+        """
+        if self._mode == "dry_run":
+            return True
+        val = self._config_dict.get("_dry_run", False)
+        if isinstance(val, str):
+            return val.lower() in ("1", "true", "yes")
+        return bool(val)
+
     async def _init_market_data(self) -> None:
         """Initialise the market data engine."""
         self._market_data = MarketDataEngine(
@@ -642,6 +767,9 @@ class QuadOrchestrator:
 
         self._metrics = MetricsCollector()
         self._metrics.set_gauge("orchestrator_started", 1.0)
+        self._metrics.set_gauge(
+            "dry_run", 1.0 if self._is_dry_run else 0.0
+        )
         self._log.info("metrics_collector_initialized")
 
     async def _init_groq_ai(self) -> None:
@@ -802,28 +930,22 @@ class QuadOrchestrator:
             # Route to execution engine if available
             if self._execution_engine is not None and signal.signal_type != "exit":
                 try:
-                    from dataclasses import dataclass
+                    from quad.types.risk import Action
 
-                    @dataclass
-                    class _Action:
-                        type: str
-                        strategy: str
-                        contract: str
-                        side: str
-                        quantity: Any
-                        price: Any
-                        reason: str
-                        metadata: Any
-
-                    action = _Action(
+                    action = Action(
                         type="ENTER",
                         strategy=f"tradingview_{signal.strategy_name}",
+                        symbol=signal.symbol,
                         contract=signal.symbol,
                         side=signal.side,
-                        quantity=signal.quantity,
-                        price=signal.price,
+                        # Preserve the exact signal quantity.  int() would
+                        # truncate fractional quantities to 0, silently
+                        # zeroing the order.
+                        quantity=Decimal(str(signal.quantity)),
+                        price=None,  # all orders are MARKET; no limit price
+                        order_type="MARKET",
                         reason=f"TradingView alert: {signal.strategy_name}",
-                        metadata=signal.metadata,
+                        metadata=dict(signal.metadata or {}),
                     )
                     await self._execution_engine.execute(action, {})
                 except Exception as exc:
@@ -953,6 +1075,7 @@ class QuadOrchestrator:
 
         while not self._stop_event.is_set():
             cycle_start = time.monotonic()
+            self._metrics_cycle_count += 1
 
             try:
                 # ----------------------------------------------------------
@@ -965,6 +1088,26 @@ class QuadOrchestrator:
                     open_orders = await self._exchange_adapter.get_open_orders()
                 except Exception:
                     pass  # Non-critical; continue with empty orders
+
+                # ----------------------------------------------------------
+                # 1b. Resolve AI decision outcomes against live positions.
+                #     Positions close on the exchange (TP/SL brackets); an
+                #     ENTER decision stays outcome='open' until its symbol no
+                #     longer has an open position.
+                # ----------------------------------------------------------
+                try:
+                    await self._reconcile_decision_outcomes(positions)
+                except Exception as exc:
+                    self._log.warning("decision_outcome_reconcile_failed", error=str(exc))
+
+                # ----------------------------------------------------------
+                # 1c. Phase 3 prediction-quality metrics.  Lightweight: one
+                #     indexed SELECT + in-memory arithmetic, gated by config.
+                # ----------------------------------------------------------
+                try:
+                    await self._compute_ai_metrics()
+                except Exception as exc:
+                    self._log.warning("ai_metrics_failed", error=str(exc))
 
                 # ----------------------------------------------------------
                 # 2. Strategy context (futures-only; no option chains)
@@ -1038,12 +1181,35 @@ class QuadOrchestrator:
                         error=str(exc),
                     )
 
+                # ----------------------------------------------------------
+                # 6b. Periodic status / metrics (surface dry-run state)
+                # ----------------------------------------------------------
+                dry_run = self._is_dry_run
+                testnet = bool(
+                    getattr(self._exchange_adapter, "is_testnet", False)
+                )
+                self._log.info(
+                    "cycle_status",
+                    dry_run=dry_run,
+                    testnet=testnet,
+                    dry_run_guard_active=dry_run and not testnet,
+                    mode=self._mode,
+                    positions=len(positions),
+                    ai_used=ai_used,
+                )
+
                 if self._metrics is not None:
                     self._metrics.set_gauge(
                         "active_positions", float(len(positions))
                     )
                     self._metrics.set_gauge(
                         "active_strategies", float(len(self._active_strategies))
+                    )
+                    self._metrics.set_gauge(
+                        "dry_run", 1.0 if dry_run else 0.0
+                    )
+                    self._metrics.set_gauge(
+                        "dry_run_guard_active", 1.0 if (dry_run and not testnet) else 0.0
                     )
                     self._metrics.increment_counter("trading_cycles")
 
@@ -1252,9 +1418,20 @@ class QuadOrchestrator:
             except Exception as exc:                             # CancelledError NOT caught (BaseException)
                 self._log.warning("ai_scan_error", symbol=held_symbol, error=str(exc))
                 return False
-            if decision.get("action") in ("ENTER", "EXIT"):
+            hold_action = decision.get("action", "HOLD")
+            if hold_action in ("ENTER", "EXIT"):
+                # Hold-until-TP/SL: while a position is open, never open a new
+                # trade and never close early.  The position is closed ONLY by
+                # the STOP_LOSS / TAKE_PROFIT bracket orders attached at entry.
+                self._log.info(
+                    "rotation_hold_until_tp_sl",
+                    action=hold_action,
+                    symbol=held_symbol,
+                    reason="position open; close only via TP/SL bracket",
+                )
+            elif hold_action in ("adjust_stop", "reduce_position"):
                 await self._execute_ai_action(decision, context)
-            return True                     # HOLD -> keep holding; wait for next hour
+            return True                     # HOLD / no-op -> keep holding; wait for next hour
 
         # CASE B — flat: scan each pair once, starting at the rotation index.
         self._rotation_index %= len(pairs)
@@ -1295,6 +1472,66 @@ class QuadOrchestrator:
 
         self._log.info("rotation_scan_complete_all_hold", scanned=scanned)
         return True
+
+    def _position_side_for_symbol(
+        self,
+        context: StrategyContext,
+        symbol: str,
+    ) -> Any:
+        """Return the open position side for ``symbol``, or ``None`` when flat.
+
+        Used by the validator and the execution backstop to derive EXIT sides
+        deterministically and to decide whether an EXIT is even possible.
+
+        Parameters
+        ----------
+        context:
+            Current strategy context (contains live positions).
+        symbol:
+            Contract symbol, e.g. ``"BTCUSDT"``.
+
+        Returns
+        -------
+        Any
+            The ``PositionSide`` of the open position for ``symbol``, or
+            ``None`` when no such position is open.
+        """
+        from quad.types.domain import PositionStatus
+
+        for p in context.positions:
+            sym = getattr(p, "symbol", "") or getattr(p, "contract_symbol", "")
+            if sym == symbol and getattr(p, "status", None) == PositionStatus.OPEN:
+                return getattr(p, "side", None)
+        return None
+
+    @staticmethod
+    def _merge_indicators_for_symbol(
+        indicators: dict[str, dict[str, Any]],
+        symbol: str,
+    ) -> dict[str, Any]:
+        """Merge per-timeframe indicator dicts for ``symbol`` into one dict.
+
+        ``indicators`` keys look like ``"BTCUSDT_15m"``.  The merged dict is
+        passed to the validator's plausibility gate; later timeframes (e.g.
+        1h) override earlier ones, biasing the gate toward the macro view.
+
+        Parameters
+        ----------
+        indicators:
+            Dict of ``{pair_timeframe_key: indicator_dict}``.
+        symbol:
+            Contract symbol to filter on, e.g. ``"BTCUSDT"``.
+
+        Returns
+        -------
+        dict[str, Any]
+            Merged indicator dict for ``symbol`` (possibly empty).
+        """
+        merged: dict[str, Any] = {}
+        for key, ind in indicators.items():
+            if key.split("_", 1)[0] == symbol:
+                merged.update(ind or {})
+        return merged
 
     async def _scan_pair(self, symbol: str) -> dict[str, Any]:
         """Run the single-pair AI pipeline for ``symbol``.
@@ -1364,6 +1601,61 @@ class QuadOrchestrator:
         )
 
         self._last_ai_cycle_time_ms = round((time.monotonic() - ai_start) * 1000, 2)
+
+        # ----------------------------------------------------------------
+        # Phase 1 inversion guard: deterministically validate the decision.
+        # The LLM forecasts a DIRECTION; normalize_decision derives the order
+        # side and (in veto mode) rejects implausible entries.  A rejected
+        # decision is replaced with a safe HOLD so it never reaches execution.
+        # ----------------------------------------------------------------
+        from quad.ai.validator import normalize_decision
+
+        position_side = self._position_side_for_symbol(context, symbol)
+        indicator_snapshot = self._merge_indicators_for_symbol(indicators, symbol)
+        validator_cfg = cfg.get("ai", {}).get("validator", {})
+        gate_mode = validator_cfg.get("gate_mode", "warn")
+        min_confidence_to_trade = validator_cfg.get("min_confidence_to_trade", 0.0)
+
+        result = normalize_decision(
+            decision,
+            position_side=position_side,
+            indicators=indicator_snapshot,
+            gate_mode=gate_mode,
+            min_confidence_to_trade=min_confidence_to_trade,
+        )
+        decision = result.decision
+        decision["indicators"] = indicator_snapshot
+
+        if not result.ok:
+            self._log.warning(
+                "ai_decision_rejected",
+                action=decision.get("action"),
+                contract=symbol,
+                reason=result.rejected_reason,
+                corrected=result.corrected,
+            )
+            # Replace with a safe HOLD (same style as contract-pinning):
+            # a rejected decision must never reach execution.
+            decision = {
+                "reasoning": f"Decision rejected by validator: {result.rejected_reason}",
+                "action": "HOLD",
+                "direction": "NEUTRAL",
+                "side": None,
+                "contract": symbol,
+                "quantity": None,
+                "confidence": 0.0,
+                "gate_result": decision.get("gate_result", "not_checked"),
+                "indicators": indicator_snapshot,
+            }
+        elif result.corrected:
+            self._log.info(
+                "ai_decision_corrected",
+                action=decision.get("action"),
+                contract=symbol,
+                corrected=result.corrected,
+                side=decision.get("side"),
+            )
+
         self._last_ai_decision = decision
         try:
             await self._log_ai_decision(decision, context)
@@ -1371,7 +1663,7 @@ class QuadOrchestrator:
             self._log.warning("ai_decision_log_failed", error=str(exc))
 
         # Pin contract: the prompt contains ONLY this pair, so any other contract is a hallucination.
-        if decision.get("action") in ("ENTER", "EXIT"):
+        if decision.get("action") in ("ENTER", "EXIT", "adjust_stop", "reduce_position"):
             if decision.get("contract") != symbol:
                 self._log.warning("ai_contract_pinned", expected=symbol, got=decision.get("contract"))
             decision["contract"] = symbol
@@ -1469,7 +1761,10 @@ class QuadOrchestrator:
                 strategy="serial_close",
                 contract=getattr(position, "symbol", getattr(position, "contract_symbol", "")),
                 side=close_side,
-                quantity=int(getattr(position, "quantity", 0)),
+                # Preserve the exact fractional quantity.  int() would
+                # truncate fractional quantities to 0, silently zeroing the
+                # order (and the engine now rejects zero/negative quantities).
+                quantity=Decimal(str(getattr(position, "quantity", 0))),
                 order_type="MARKET",
                 price=None,
                 reason="Serial trade mode: closing position before new ENTER",
@@ -1541,12 +1836,52 @@ class QuadOrchestrator:
 
         strategy_name = decision.get("strategy") or "ai_default"
         contract_symbol = decision.get("contract")
-        side = decision.get("side")
         quantity = decision.get("quantity")
-        order_type = decision.get("order_type", "LIMIT")
-        limit_price = decision.get("limit_price")
+        # All entries/exits are MARKET — never let the AI pick a limit order.
+        order_type = "MARKET"
+        limit_price = None  # market orders carry no limit price
 
-        if not contract_symbol or not side or not quantity:
+        if not contract_symbol or not quantity:
+            self._log.warning(
+                "ai_decision_incomplete",
+                contract=contract_symbol,
+                quantity=quantity,
+            )
+            return False
+
+        # ----------------------------------------------------------------
+        # Phase 1 mandatory backstop: re-derive the order side deterministically
+        # for ENTER/EXIT.  NEVER fall through to Action.__post_init__ defaults,
+        # which would silently invert (ENTER->BUY, EXIT->SELL) and re-introduce
+        # the exact long/short inversion bug this upgrade eliminates.
+        # ----------------------------------------------------------------
+        side = decision.get("side")
+        if action_type in ("ENTER", "EXIT"):
+            from quad.ai.validator import canonical_direction, derive_side
+
+            direction = canonical_direction(decision.get("direction"))
+            position_side = self._position_side_for_symbol(context, contract_symbol)
+            derived_side = derive_side(action_type, direction, position_side)
+            if not derived_side:
+                self._log.warning(
+                    "ai_side_un_derivable",
+                    action=action_type,
+                    direction=direction,
+                    contract=contract_symbol,
+                    position_side=getattr(position_side, "name", position_side),
+                )
+                return False
+            if side not in (None, "") and str(side).strip().upper() != derived_side:
+                self._log.warning(
+                    "ai_side_derived_overrides",
+                    action=action_type,
+                    ai_side=side,
+                    derived_side=derived_side,
+                    contract=contract_symbol,
+                )
+            side = derived_side
+
+        if not side:
             self._log.warning(
                 "ai_decision_incomplete",
                 contract=contract_symbol,
@@ -1563,19 +1898,34 @@ class QuadOrchestrator:
             side=side,
         )
 
+        # Attach per-position TP/SL bracket prices on ENTER so the execution
+        # engine places STOP_LOSS + TAKE_PROFIT orders alongside the market
+        # entry.  The position is then closed ONLY by those brackets.
+        stop_loss_price: Decimal | None = None
+        take_profit_price: Decimal | None = None
+        if action_type == "ENTER":
+            stop_loss_price, take_profit_price = await self._compute_bracket_prices(
+                contract_symbol, side
+            )
+
         # Build Action dataclass
         from quad.types.risk import Action
 
         action = Action(
             type=action_type,  # type: ignore[arg-type]
             strategy=strategy_name,
+            symbol=contract_symbol,
             contract=contract_symbol,
             side=side,
-            quantity=int(quantity),
+            # Preserve the exact AI quantity (e.g. 0.005).  int() would
+            # truncate fractional quantities to 0, silently zeroing the order.
+            quantity=Decimal(str(quantity)),
             order_type=order_type,
             price=(
                 Decimal(str(limit_price)) if limit_price is not None else None
             ),
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
             reason=decision.get("reasoning", "AI trading decision"),
             # fallback matches AiConfig.default_confidence schema default
             metadata={"ai_confidence": decision.get("confidence", self._config_dict.get("ai", {}).get("default_confidence", 0.8))},
@@ -1593,14 +1943,24 @@ class QuadOrchestrator:
                     gate=result.gate,
                 )
                 return False
-            action.risk_checked = True
+            # Use the risk-sized action (Fix #4): RiskManager.evaluate returns a
+            # possibly-reduced quantity in details["action"].  Record the
+            # pre-sizing quantity so the execution engine can floor a
+            # sub-minQty sized quantity up to the exchange minimum without
+            # exceeding the AI's original request (the "pre-cap").
+            sized_action = result.details.get("action", action)
+            sized_action.risk_checked = True
+            sized_action.metadata = {
+                **(sized_action.metadata or {}),
+                "pre_size_quantity": str(action.quantity),
+            }
         except Exception as exc:
             self._log.exception("ai_risk_evaluation_error", error=str(exc))
             return False
 
         # Execute
         try:
-            order_result = await self._execution_engine.execute(action, context)
+            order_result = await self._execution_engine.execute(sized_action, context)
             self._log.info(
                 "ai_order_executed",
                 action=action_type,
@@ -1617,7 +1977,10 @@ class QuadOrchestrator:
                     strategy=strategy_name,
                     contract=contract_symbol,
                     side=side,
-                    quantity=int(quantity),
+                    # Use the sized/final quantity.  int() would truncate
+                    # fractional quantities (e.g. 0.005) to 0 in the
+                    # notification.
+                    quantity=str(sized_action.quantity),
                     price=str(action.price) if action.price else None,
                     reason=action.reason,
                 )
@@ -1630,6 +1993,70 @@ class QuadOrchestrator:
                 error=str(exc),
             )
             return False
+
+    async def _compute_bracket_prices(
+        self,
+        symbol: str,
+        side: str,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        """Compute per-position stop-loss / take-profit prices for an ENTER.
+
+        Uses the same formula as ``StrategyBase._build_tp_sl_actions``: for a
+        fixed SL/TP the price offset is ``capital_pct / 100 / leverage``
+        applied to the current mark price (the market entry price).  Prices
+        are ``None`` when the feature is disabled or the mark price is
+        unavailable, in which case no bracket orders are placed.
+
+        Parameters
+        ----------
+        symbol:
+            Contract symbol being entered, e.g. ``"BTCUSDT"``.
+        side:
+            Entry side, ``"buy"``/``"sell"`` or ``"BUY"``/``"SELL"``.
+
+        Returns
+        -------
+        tuple[Decimal | None, Decimal | None]
+            ``(stop_loss_price, take_profit_price)``.
+        """
+        risk_cfg = self._config_dict.get("risk", {})
+        sl_cfg = risk_cfg.get("per_position_sl", {})
+        tp_cfg = risk_cfg.get("per_position_tp", {})
+        if not sl_cfg.get("enabled", True) and not tp_cfg.get("enabled", True):
+            return None, None
+
+        try:
+            mark = await self._exchange_adapter.get_mark_price(symbol)
+            entry = Decimal(str(mark))
+        except Exception as exc:
+            self._log.warning(
+                "ai_bracket_price_unavailable",
+                symbol=symbol,
+                error=str(exc),
+            )
+            return None, None
+        if entry <= 0:
+            self._log.warning(
+                "ai_bracket_price_invalid",
+                symbol=symbol,
+                mark=str(entry),
+            )
+            return None, None
+
+        leverage = Decimal(str(self._config_dict.get("trading", {}).get("leverage", 50)))
+        sl_pct = Decimal(str(sl_cfg.get("capital_pct", 30.0)))
+        tp_pct = Decimal(str(tp_cfg.get("capital_pct", 50.0)))
+        is_long = side.strip().upper() in ("BUY", "LONG")
+
+        sl_price: Decimal | None = None
+        tp_price: Decimal | None = None
+        if sl_cfg.get("enabled", True):
+            offset = sl_pct / Decimal("100") / leverage
+            sl_price = entry * (Decimal("1") - offset) if is_long else entry * (Decimal("1") + offset)
+        if tp_cfg.get("enabled", True):
+            offset = tp_pct / Decimal("100") / leverage
+            tp_price = entry * (Decimal("1") + offset) if is_long else entry * (Decimal("1") - offset)
+        return sl_price, tp_price
 
     async def _log_ai_decision(
         self,
@@ -1645,6 +2072,25 @@ class QuadOrchestrator:
 
         repo = DecisionRepository(self._db_manager)
         try:
+            # Confidence arrives as a float after normalize_decision, but the
+            # legacy path may carry a raw string; coerce defensively.
+            try:
+                confidence = float(decision.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            action = decision.get("action") or "HOLD"
+            symbol = decision.get("contract") or ""
+            # Phase 3: capture the mark price at decision time for ENTER
+            # decisions so realized PnL / exit can be computed later once a
+            # close source exists.  ``context.mark_prices`` is keyed by pair
+            # symbol and is already available without an extra API call.
+            entry_price = ""
+            if action == "ENTER":
+                try:
+                    mark_prices = getattr(context, "mark_prices", None) or {}
+                    entry_price = str(mark_prices.get(symbol) or "")
+                except Exception:
+                    entry_price = ""
             await repo.create(
                 DecisionModel(
                     id=0,  # auto-generated by AUTOINCREMENT
@@ -1656,16 +2102,180 @@ class QuadOrchestrator:
                     # null-ish values (None / "") back to the fallback here so
                     # the repository INSERT never hits the constraint.
                     strategy=decision.get("strategy") or "ai_default",
-                    action=decision.get("action") or "HOLD",
-                    symbol=decision.get("contract") or "",
+                    action=action,
+                    symbol=symbol,
                     reason=(decision.get("reasoning") or "")[:500],
-                    risk_passed=1 if decision.get("action") in ("ENTER", "EXIT") else 0,
+                    risk_passed=1 if action in ("ENTER", "EXIT") else 0,
                     executed=0,
                     cycle_time_ms=int(self._last_ai_cycle_time_ms),
+                    # Phase 1 fields: predicted direction + plausibility gate.
+                    predicted_direction=decision.get("direction") or "NEUTRAL",
+                    confidence=confidence,
+                    gate_result=decision.get("gate_result") or "not_checked",
+                    # Phase 3: mark price at decision time (empty when the
+                    # context had no mark price for the symbol).
+                    entry_price=entry_price,
+                    # Only an ENTER decision opens a position worth tracking to
+                    # resolution; every other action is inherently "no open
+                    # position from this decision".
+                    outcome="open" if action == "ENTER" else "flat",
                 )
             )
         except Exception as exc:
             self._log.warning("ai_decision_db_log_error", error=str(exc))
+
+    async def _reconcile_decision_outcomes(self, positions: Any) -> None:
+        """Resolve open ENTER decision outcomes against the live position set.
+
+        There is no repository-level close path: positions close on the
+        exchange via the STOP_LOSS / TAKE_PROFIT bracket orders attached at
+        entry (``execution.engine``), and the fill reconciler only detects
+        discrepancies.  So each cycle we compare unresolved ENTER decisions
+        (``outcome='open'``) against the live open positions and mark any
+        whose symbol no longer has an open position as resolved.
+
+        The close happened off-process, so realized PnL / exit price are not
+        available locally; the outcome is marked ``"flat"`` so the row stops
+        being treated as open.  The Phase-2 metrics module can backfill actual
+        win/loss from trade history.
+
+        Parameters
+        ----------
+        positions:
+            The live open positions fetched this cycle.
+        """
+        if self._db_manager is None:
+            return
+
+        from quad.types.domain import PositionStatus
+        from quad.persistence.repositories import DecisionRepository
+
+        open_symbols = {
+            (getattr(p, "symbol", "") or getattr(p, "contract_symbol", ""))
+            for p in positions
+            if getattr(p, "status", None) == PositionStatus.OPEN
+        }
+
+        repo = DecisionRepository(self._db_manager)
+        unresolved = await repo.get_unresolved()
+        now = int(time.time())
+        for dec in unresolved:
+            if dec.symbol in open_symbols:
+                continue  # position still open; keep unresolved
+            self._log.info(
+                "decision_outcome_resolved",
+                decision_id=dec.id,
+                symbol=dec.symbol,
+                action=dec.action,
+            )
+            await repo.mark_outcome(
+                decision_id=dec.id,
+                outcome="flat",
+                resolved_at=now,
+            )
+
+    async def _compute_ai_metrics(self) -> None:
+        """Compute and log prediction-quality metrics over resolved decisions.
+
+        Phase 3: pulls resolved (non-``'open'``) decisions via
+        ``DecisionRepository.get_resolved``, feeds them to
+        ``quad.ai.metrics.compute_metrics`` (hit rate, Expected Calibration
+        Error, Brier score), and logs the result on a config-gated interval.
+        See ``quad.ai.metrics`` for the win/loss/flat semantics.
+
+        Cost control (kept deliberately lightweight):
+        - Runs every ``metrics.interval_cycles`` main cycles (default 1).
+        - Skips logging when fewer than ``metrics.min_resolved`` directional
+          rows exist (default 5).
+        - The work is one indexed SELECT plus in-memory arithmetic — no
+          network, no exchange calls.
+
+        Known limitation (flagged intentionally): ``_reconcile_decision_outcomes``
+        marks every disappeared symbol ``'flat'``, conflating "closed at
+        breakeven" with "symbol rotation moved on while the decision was still
+        open".  Because realized PnL is not backfilled (no income-history API,
+        no local close path), win/loss labels are not yet assigned, so the
+        directional count is typically 0 and the ratio metrics log as ``None``
+        until a real close source lands.
+        """
+        if self._db_manager is None:
+            return
+
+        metrics_cfg = self._config_dict.get("ai", {}).get("metrics", {})
+        if not metrics_cfg.get("enabled", True):
+            return
+
+        interval = int(metrics_cfg.get("interval_cycles", 1) or 1)
+        if interval < 1:
+            interval = 1
+        if self._metrics_cycle_count % interval != 0:
+            return
+
+        min_resolved = int(metrics_cfg.get("min_resolved", 5) or 0)
+        only_directional = bool(metrics_cfg.get("only_directional", True))
+
+        try:
+            from quad.ai.metrics import compute_metrics
+            from quad.persistence.repositories import DecisionRepository
+
+            repo = DecisionRepository(self._db_manager)
+            resolved = await repo.get_resolved(
+                limit=2000,
+                only_directional=only_directional,
+            )
+            m = compute_metrics(resolved)
+            if m.directional_count < min_resolved:
+                self._log.debug(
+                    "ai_metrics_skipped",
+                    directional_count=m.directional_count,
+                    min_resolved=min_resolved,
+                    resolved_count=m.resolved_count,
+                    flat_count=m.flat_count,
+                    open_count=m.open_count,
+                )
+                return
+
+            self._log.info(
+                "ai_decision_metrics",
+                sample_count=m.sample_count,
+                resolved_count=m.resolved_count,
+                directional_count=m.directional_count,
+                wins=m.wins,
+                losses=m.losses,
+                flat_count=m.flat_count,
+                open_count=m.open_count,
+                hit_rate=round(m.hit_rate, 4) if m.hit_rate is not None else None,
+                ece=round(m.ece, 4) if m.ece is not None else None,
+                brier=round(m.brier, 4) if m.brier is not None else None,
+                mean_confidence=(
+                    round(m.mean_confidence, 4)
+                    if m.mean_confidence is not None
+                    else None
+                ),
+                n_bins=len(m.ece_bins),
+            )
+
+            if self._metrics is not None:
+                self._metrics.set_gauge(
+                    "ai_hit_rate",
+                    m.hit_rate if m.hit_rate is not None else float("nan"),
+                )
+                self._metrics.set_gauge(
+                    "ai_ece",
+                    m.ece if m.ece is not None else float("nan"),
+                )
+                self._metrics.set_gauge(
+                    "ai_brier",
+                    m.brier if m.brier is not None else float("nan"),
+                )
+                self._metrics.set_gauge(
+                    "ai_decisions_resolved", float(m.resolved_count)
+                )
+                self._metrics.set_gauge(
+                    "ai_decisions_directional", float(m.directional_count)
+                )
+        except Exception as exc:
+            self._log.warning("ai_metrics_compute_failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Telegram trade notifications
@@ -1677,7 +2287,7 @@ class QuadOrchestrator:
         strategy: str,
         contract: str,
         side: str,
-        quantity: int,
+        quantity: str,
         price: str | None,
         reason: str,
         pnl: str | None = None,
@@ -1844,20 +2454,33 @@ class QuadOrchestrator:
             Status dictionary with keys: orchestrator, config, exchange,
             market_data, risk, execution, strategies, telegram, health.
         """
+        dry_run = self._is_dry_run
         result: dict[str, Any] = {
             "orchestrator": {
                 "started": self._started,
                 "mode": self._mode,
+                "dry_run": dry_run,
                 "cycle_interval_s": self._cycle_interval,
                 "stop_event_set": self._stop_event.is_set(),
             },
             "config": {
                 "loaded": self._config_manager is not None,
                 "mode": self._mode,
+                "dry_run": dry_run,
             },
             "exchange": {
                 "connected": (
                     getattr(self._exchange_adapter, "is_connected", False)
+                    if self._exchange_adapter
+                    else False
+                ),
+                "testnet": (
+                    bool(getattr(self._exchange_adapter, "is_testnet", False))
+                    if self._exchange_adapter
+                    else None
+                ),
+                "dry_run_guard_active": dry_run and not (
+                    bool(getattr(self._exchange_adapter, "is_testnet", False))
                     if self._exchange_adapter
                     else False
                 ),

@@ -74,6 +74,7 @@ class TradingViewSignal:
         side: str,
         quantity: Decimal,
         price: Decimal | None = None,
+        order_type: str = "MARKET",
         signal_type: str = "entry",
         strategy_name: str = "tradingview",
         raw: dict[str, Any] | None = None,
@@ -83,6 +84,7 @@ class TradingViewSignal:
         self.side = side
         self.quantity = quantity
         self.price = price
+        self.order_type = order_type
         self.signal_type = signal_type
         self.strategy_name = strategy_name
         self.raw = raw or {}
@@ -95,6 +97,7 @@ class TradingViewSignal:
             "side": self.side,
             "quantity": str(self.quantity),
             "price": str(self.price) if self.price else None,
+            "order_type": self.order_type,
             "signal_type": self.signal_type,
             "strategy_name": self.strategy_name,
         }
@@ -168,13 +171,8 @@ def convert_to_action(
             logger.warning("tv_signal_invalid_quantity", value=qty_raw)
 
     # ----- Extract price -----
+    # All orders are MARKET — ignore any limit price in the alert.
     price: Decimal | None = None
-    price_raw = parsed.get("price") or parsed.get("limit_price")
-    if price_raw is not None:
-        try:
-            price = Decimal(str(price_raw))
-        except (ValueError, TypeError):
-            pass
 
     # ----- Extract strategy name -----
     strategy_name = parsed.get("strategy", "tradingview")
@@ -204,6 +202,7 @@ def convert_to_action(
         side=side,
         quantity=quantity,
         price=price,
+        order_type="MARKET",  # all orders are MARKET; no limit orders
         signal_type=signal_type,
         strategy_name=strategy_name,
         raw=parsed,

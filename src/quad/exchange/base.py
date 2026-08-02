@@ -8,9 +8,13 @@ All monetary values use ``Decimal`` for precision.
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from typing import Any
+
+import structlog
 
 from quad.types.domain import (
     Account,
@@ -23,6 +27,8 @@ from quad.types.domain import (
 )
 from quad.types.exchange import AccountUpdate
 from quad.types.market import FundingRate, FuturesContract
+
+log = structlog.get_logger(__name__)
 
 
 class ExchangeAdapter(ABC):
@@ -60,6 +66,18 @@ class ExchangeAdapter(ABC):
     def is_connected(self) -> bool:
         """Whether the adapter is currently connected to the exchange."""
         ...
+
+    @property
+    def is_testnet(self) -> bool:
+        """Whether this adapter targets a testnet environment.
+
+        Defaults to ``False``.  Live Binance adapters override this to
+        report their ``testnet`` flag so higher layers (execution engine,
+        orchestrator) can enforce a hard dry-run guard without trusting
+        the raw config (which may be inconsistent with the adapter's
+        actual resolved environment).
+        """
+        return False
 
     # ------------------------------------------------------------------
     # REST — Account & Positions
@@ -214,6 +232,160 @@ class ExchangeAdapter(ABC):
             The full exchange info response as a dict.
         """
         ...
+
+    async def get_symbol_filters(self, symbol: str) -> dict[str, Decimal]:
+        """Return the cached LOT_SIZE / MIN_NOTIONAL filters for a symbol.
+
+        Convenience wrapper around ``_get_lot_filters`` for callers that
+        need the raw filter values (e.g. the execution engine flooring a
+        sized quantity up to the exchange minimum).
+
+        Returns:
+            Dict with keys ``step_size``, ``min_qty``, ``min_notional``
+            (all ``Decimal``).
+        """
+        step, min_qty, min_notional = await self._get_lot_filters(symbol)
+        return {
+            "step_size": step,
+            "min_qty": min_qty,
+            "min_notional": min_notional,
+        }
+
+    async def normalize_quantity(
+        self,
+        symbol: str,
+        quantity: Decimal | str,
+        price: Decimal | None = None,
+    ) -> Decimal:
+        """Normalize a quantity to the exchange's LOT_SIZE / MIN_NOTIONAL filters.
+
+        Rounds **down** to ``stepSize`` (never up), then validates against
+        ``minQty`` and ``minNotional`` (using the supplied ``price`` or the
+        current mark price).
+
+        Raises ``RuntimeError`` with a clear, exchange-error-mapped message
+        when the quantity is below ``minQty`` (Binance ``-1113``/``-1111``)
+        or when the implied notional is below ``minNotional`` (Binance
+        ``-4164``) — the exchange would reject such an order anyway, so we
+        fail loudly before it is ever sent.
+
+        Filter data is cached per symbol for a short TTL
+        (``_exchange_info_ttl``, default 60s) to avoid re-fetching the full
+        ``/fapi/v1/exchangeInfo`` dump on every order.
+
+        Parameters
+        ----------
+        symbol:
+            Contract symbol, e.g. ``"BTCUSDT"``.
+        quantity:
+            Raw quantity to normalize (may be a ``Decimal`` or str).
+        price:
+            Optional reference price for the minNotional check.  Falls back
+            to the current mark price when omitted.
+
+        Returns:
+            The normalized ``Decimal`` quantity, safe to submit to the
+            exchange.
+
+        Raises:
+            RuntimeError: If the quantity is zero below minQty or its
+                notional is below minNotional, or no LOT_SIZE filter is
+                available for the symbol.
+        """
+        qty = Decimal(str(quantity))
+        if qty <= Decimal("0"):
+            return qty
+
+        step_size, min_qty, min_notional = await self._get_lot_filters(symbol)
+
+        # Round DOWN to stepSize (never up).
+        if step_size > Decimal("0"):
+            qty = (qty / step_size).to_integral_value(rounding=ROUND_DOWN) * step_size
+            try:
+                qty = qty.quantize(step_size, rounding=ROUND_DOWN)
+            except (InvalidOperation, ValueError):
+                # Integer step or a huge quantity; the division-based result
+                # above is already correct.
+                pass
+
+        # Below minQty -> the exchange would reject with -1113/-1111.
+        if qty < min_qty:
+            raise RuntimeError(
+                f"quantity {qty} below minQty {min_qty} for {symbol} "
+                f"(exchange would reject; Binance -1113/-1111)"
+            )
+
+        # Below minNotional -> the exchange would reject with -4164.
+        if min_notional > Decimal("0"):
+            px = price
+            if px is None:
+                try:
+                    px = await self.get_mark_price(symbol)
+                except Exception:
+                    px = None  # cannot verify notional; minQty check still applied
+            if px is not None and px > Decimal("0"):
+                notional = qty * px
+                if notional < min_notional:
+                    raise RuntimeError(
+                        f"notional {notional} (qty {qty} x mark {px}) below "
+                        f"minNotional {min_notional} for {symbol} "
+                        f"(exchange would reject; Binance -4164)"
+                    )
+
+        log.debug(
+            "quantity_normalized",
+            symbol=symbol,
+            original=str(Decimal(str(quantity))),
+            normalized=str(qty),
+            step_size=str(step_size),
+            min_qty=str(min_qty),
+            min_notional=str(min_notional),
+        )
+        return qty
+
+    async def _get_lot_filters(
+        self, symbol: str
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        """Return cached ``(step_size, min_qty, min_notional)`` for a symbol.
+
+        The full exchange info is fetched once per symbol and cached for
+        ``_exchange_info_ttl`` seconds (default 60).
+        """
+        cache: dict[str, tuple[float, tuple[Decimal, Decimal, Decimal]]]
+        if not hasattr(self, "_exchange_info_cache"):
+            self._exchange_info_cache = {}
+        cache = self._exchange_info_cache
+        ttl = float(getattr(self, "_exchange_info_ttl", 60))
+
+        now = time.monotonic()
+        cached = cache.get(symbol)
+        if cached is not None and (now - cached[0]) < ttl:
+            return cached[1]
+
+        info = await self.get_exchange_info()
+        step = min_qty = min_notional = Decimal("0")
+        found = False
+        for s in info.get("symbols", []):
+            if s.get("symbol") != symbol:
+                continue
+            for f in s.get("filters", []):
+                ftype = f.get("filterType")
+                if ftype == "LOT_SIZE":
+                    step = Decimal(str(f.get("stepSize", "0")))
+                    min_qty = Decimal(str(f.get("minQty", "0")))
+                    found = True
+                elif ftype == "MIN_NOTIONAL":
+                    min_notional = Decimal(str(f.get("notional", "0")))
+            break
+
+        if not found:
+            raise RuntimeError(
+                f"no LOT_SIZE filter found for {symbol} in exchange info"
+            )
+
+        result = (step, min_qty, min_notional)
+        cache[symbol] = (now, result)
+        return result
 
     @abstractmethod
     async def get_server_time(self) -> int:

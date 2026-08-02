@@ -151,6 +151,13 @@ class OrderGateway:
             client_order_id=client_order_id,
             reduce_only=order_request.reduce_only,
             post_only=order_request.post_only,
+            # Preserve conditional-order fields set by the execution engine
+            # (workingType / priceProtect on TP-SL brackets, positionSide in
+            # hedge mode).  These were previously dropped here, so the SL's
+            # MARK_PRICE trigger and priceProtect never reached the API.
+            working_type=order_request.working_type,
+            position_side=order_request.position_side,
+            price_protect=order_request.price_protect,
         )
 
         # 2. Prepare confirmation event

@@ -60,6 +60,19 @@ ai:
   rotation:
     enabled: true
     retry_sleep_seconds: 30
+  groq:
+    token_budget:
+      enabled: true
+      max_tokens_per_day: 500000
+      window_seconds: 86400
+  validator:
+    gate_mode: "warn"
+    min_confidence_to_trade: 0.0
+  metrics:
+    enabled: true
+    interval_cycles: 1
+    min_resolved: 5
+    only_directional: true
 
 monitoring:
   health_server:

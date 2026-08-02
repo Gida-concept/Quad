@@ -168,11 +168,20 @@ class PositionSizer:
             type=action.type,
             strategy=action.strategy,
             symbol=action.symbol,
+            # Preserve the contract (the symbol may be empty on paths that
+            # only populate ``contract``, e.g. close-all / TradingView / some
+            # strategy actions).  Without this the sized action would lose the
+            # contract and the order would be built with an empty symbol.
+            contract=action.contract,
             quantity=sized_qty.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             price=action.price,
             reason=action.reason,
             confidence=action.confidence,
             risk_checked=action.risk_checked,
+            side=action.side,
+            order_type=action.order_type,
+            stop_loss_price=action.stop_loss_price,
+            take_profit_price=action.take_profit_price,
             metadata={
                 **action.metadata,
                 "sizing_kelly_fraction": self._kelly_multiplier,
