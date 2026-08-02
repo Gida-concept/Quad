@@ -1474,7 +1474,7 @@ class QuadOrchestrator:
                     timestamp=int(time.time()),
                     strategy=decision.get("strategy", "ai_default"),
                     action=decision.get("action", "HOLD"),
-                    contract_symbol=decision.get("contract", ""),
+                    symbol=decision.get("contract", ""),
                     reason=decision.get("reasoning", "")[:500],
                     risk_passed=1 if decision.get("action") in ("ENTER", "EXIT") else 0,
                     executed=0,
