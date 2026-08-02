@@ -323,6 +323,7 @@ class GroqClient:
         temperature: float = _DEFAULT_TEMPERATURE,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         model: str | None = None,
+        json_mode: bool = False,
     ) -> str:
         """Send a chat completion request to Groq.
 
@@ -341,6 +342,10 @@ class GroqClient:
             Maximum tokens in the response.
         model:
             Override the default model for this request.
+        json_mode:
+            If True, request structured JSON output from the model via
+            ``response_format={"type": "json_object"}``.  Use for
+            structured decisions that must parse as JSON.
 
         Returns
         -------
@@ -387,11 +392,16 @@ class GroqClient:
                 # Check rate limit before making the request
                 await self._check_rate_limit()
 
-                completion = await self._client.chat.completions.create(
+                completion_kwargs = dict(
                     model=active_model,
                     messages=msgs,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                )
+                if json_mode:
+                    completion_kwargs["response_format"] = {"type": "json_object"}
+                completion = await self._client.chat.completions.create(
+                    **completion_kwargs
                 )
                 self._total_requests += 1
                 self._request_timestamps.append(time.time())
@@ -501,6 +511,7 @@ class GroqClient:
             user=user_prompt,
             temperature=effective_temperature,
             max_tokens=effective_max_tokens,
+            json_mode=True,
         )
 
         return self._parse_trading_decision(raw)

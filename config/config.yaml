@@ -55,6 +55,7 @@ ai:
   timeframes:
     - "1h"
   candle_count: 150
+  max_tokens: 4096
 
 monitoring:
   health_server:

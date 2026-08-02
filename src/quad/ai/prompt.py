@@ -45,9 +45,10 @@ You MUST respond with valid JSON only. No markdown, no explanation outside the J
   "reasoning": "Brief explanation of market conditions and decision logic",
   "action": "ENTER" | "EXIT" | "HOLD" | "adjust_stop" | "reduce_position",
   "side": "buy" or "sell" (use buy for opening long or closing short; use sell for opening short or closing long),
-  "symbol": "BTCUSDT" or null,
+  "contract": "BTCUSDT" or null,
   "quantity": 0.001-10 or null,
-  "price": 0.0 or null (limit price),
+  "order_type": "MARKET" or "LIMIT",
+  "limit_price": 0.0 or null (limit price; use null for market orders),
   "strategy": "trend_following" | null,
   "confidence": 0.0-1.0,
   "risk_checks": {
