@@ -112,11 +112,17 @@ class QuadBotJobs:
 
         if self._orchestrator:
             try:
-                pos_data = getattr(self._orchestrator, "positions", None)
-                if callable(pos_data):
-                    pos_data = pos_data()
-                if isinstance(pos_data, list):
-                    position_count = len(pos_data)
+                # The orchestrator exposes no ``positions`` attribute; read
+                # live positions from the exchange adapter (same pattern as
+                # ``cmd_status``).  Previously the count was always 0.
+                exchange_adapter = getattr(
+                    self._orchestrator, "_exchange_adapter", None
+                )
+                if exchange_adapter is not None:
+                    positions = await exchange_adapter.get_positions()
+                    position_count = (
+                        len(positions) if isinstance(positions, list) else 0
+                    )
             except Exception as exc:
                 self._log.warning("job_status_positions_error", error=str(exc))
 
@@ -198,11 +204,16 @@ class QuadBotJobs:
 
         if self._orchestrator:
             try:
-                pos_data = getattr(self._orchestrator, "positions", None)
-                if callable(pos_data):
-                    pos_data = pos_data()
-                if isinstance(pos_data, list):
-                    position_count = len(pos_data)
+                # Read live positions from the exchange adapter (the
+                # orchestrator exposes no ``positions`` attribute).
+                exchange_adapter = getattr(
+                    self._orchestrator, "_exchange_adapter", None
+                )
+                if exchange_adapter is not None:
+                    positions = await exchange_adapter.get_positions()
+                    position_count = (
+                        len(positions) if isinstance(positions, list) else 0
+                    )
             except Exception as exc:
                 self._log.warning("job_daily_positions_error", error=str(exc))
 
