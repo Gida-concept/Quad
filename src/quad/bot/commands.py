@@ -7,6 +7,7 @@ format the response as Telegram markdown messages.
 
 from __future__ import annotations
 
+import html as _html
 import json as _json
 import re as _re
 import time as _time
@@ -1772,8 +1773,11 @@ class QuadBotCommands:
                 if app is not None:
                     await app.bot.send_message(
                         chat_id=self._notification_chat_id,
-                        text=f"⚠️ Bot Error:\n`{context.error}`",
-                        parse_mode="Markdown",
+                        text=(
+                            "⚠️ <b>Bot Error</b>:\n"
+                            f"<code>{_html.escape(str(context.error))}</code>"
+                        ),
+                        parse_mode="HTML",
                     )
             except Exception as exc:
                 self._log.warning("error_notification_failed", error=str(exc))

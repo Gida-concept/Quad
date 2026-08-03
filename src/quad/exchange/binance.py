@@ -133,6 +133,18 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             (default 5000).
     """
 
+    # Conditional order types that Binance requires via the Algo Order API
+    # (``POST /fapi/v1/algoOrder``).  Sending these to ``POST /fapi/v1/order``
+    # is rejected with -4120 ("Order type not supported for this endpoint.
+    # Please use the Algo Order API endpoints instead.").
+    _ALGO_ORDER_TYPES = frozenset({
+        "STOP_MARKET",
+        "TAKE_PROFIT_MARKET",
+        "STOP",
+        "TAKE_PROFIT",
+        "TRAILING_STOP_MARKET",
+    })
+
     def __init__(
         self,
         api_key: str = "",
@@ -185,6 +197,12 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         self._used_orders: int = 0
         self._rate_limit_paused: bool = False
         self._rate_limit_pause_until: float = 0.0
+
+        # Algo (conditional) order IDs placed via ``POST /fapi/v1/algoOrder``
+        # (TP/SL brackets).  These use a per-symbol ``algoId`` sequence that is
+        # distinct from regular ``orderId`` values, so cancel / status queries
+        # must be routed to the algo endpoints.
+        self._algo_order_ids: set[int] = set()
 
         # HTTP session
         self._session: aiohttp.ClientSession | None = None
@@ -532,6 +550,12 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
         await self._wait_if_rate_limited()
 
+        # Conditional (TP/SL bracket) order types must go through the Algo
+        # Order API -- Binance rejects them on ``POST /fapi/v1/order`` with
+        # -4120 and points to the algo endpoints instead.
+        if request.order_type.upper() in self._ALGO_ORDER_TYPES:
+            return await self._place_algo_order(request)
+
         params: dict[str, Any] = {
             "symbol": request.symbol,
             "side": request.side.upper(),
@@ -593,6 +617,79 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         )
         return result
 
+    async def _place_algo_order(self, request: OrderRequest) -> OrderResult:
+        """Place a TP/SL bracket as a conditional algo order.
+
+        Binance's Algo Order API (``POST /fapi/v1/algoOrder``) is the required
+        home for conditional order types (``STOP_MARKET`` / ``TAKE_PROFIT_MARKET``
+        and friends) under ``algoType=CONDITIONAL``.  Conditional orders are
+        identified by a per-symbol ``algoId`` (distinct from regular
+        ``orderId`` values) and use ``triggerPrice`` instead of ``stopPrice``.
+        """
+        await self._wait_if_rate_limited()
+
+        quantity = await self.normalize_quantity(request.symbol, request.quantity)
+
+        params: dict[str, Any] = {
+            "algoType": "CONDITIONAL",
+            "symbol": request.symbol,
+            "side": request.side.upper(),
+            "type": request.order_type.upper(),
+            "quantity": str(quantity),
+        }
+        if request.stop_price is not None:
+            params["triggerPrice"] = str(request.stop_price)
+        if request.time_in_force:
+            params["timeInForce"] = request.time_in_force.upper()
+        if request.reduce_only:
+            params["reduceOnly"] = "true"
+        if request.position_side:
+            params["positionSide"] = request.position_side.upper()
+        if request.working_type:
+            params["workingType"] = request.working_type
+        if request.price_protect:
+            params["priceProtect"] = "true"
+        if request.client_order_id:
+            # clientAlgoId regex: ^[.A-Z:/a-z0-9_-]{1,36}$ (UUIDs qualify).
+            params["clientAlgoId"] = request.client_order_id
+        params["newOrderRespType"] = self._binance_config["new_order_resp_type"]
+
+        data = await self._request("POST", "/fapi/v1/algoOrder", data=params)
+
+        algo_id = int(data.get("algoId", 0))
+        if algo_id:
+            self._algo_order_ids.add(algo_id)
+        status = data.get("algoStatus", "NEW")
+
+        result = OrderResult(
+            order_id=algo_id,
+            client_order_id=data.get("clientAlgoId", request.client_order_id),
+            symbol=data.get("symbol", request.symbol),
+            side=data.get("side", request.side),
+            order_type=data.get("orderType", request.order_type),
+            quantity=Decimal(str(data.get("quantity", str(quantity)))),
+            filled_qty=Decimal(str(data.get("executedQty", "0"))),
+            price=(
+                Decimal(str(data.get("price", "0")))
+                if data.get("price") not in (None, "", "0")
+                else request.price
+            ),
+            status=status,
+        )
+
+        self._log.info(
+            "algo_order_placed",
+            algo_id=algo_id,
+            symbol=request.symbol,
+            side=request.side,
+            order_type=request.order_type,
+            status=status,
+            trigger_price=(
+                str(request.stop_price) if request.stop_price is not None else None
+            ),
+        )
+        return result
+
     async def cancel_order(self, order_id: int) -> bool:
         """Cancel an order on Binance Futures.
 
@@ -605,6 +702,17 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             ``True`` if the cancellation was accepted.
         """
         try:
+            if order_id in self._algo_order_ids:
+                params: dict[str, Any] = {"algoId": order_id}
+                data = await self._request(
+                    "DELETE", "/fapi/v1/algoOrder", data=params
+                )
+                status = data.get("algoStatus", "")
+                self._log.info(
+                    "algo_order_cancelled", algo_id=order_id, status=status
+                )
+                self._algo_order_ids.discard(order_id)
+                return True
             params: dict[str, Any] = {
                 "orderId": order_id,
             }
@@ -631,6 +739,9 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         Raises:
             ValueError: If the order is not found.
         """
+        if order_id in self._algo_order_ids:
+            return await self._get_algo_order_status(order_id)
+
         params: dict[str, Any] = {"orderId": order_id}
         data = await self._request("GET", "/fapi/v1/order", data=params)
 
@@ -639,7 +750,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             client_order_id=data.get("clientOrderId", ""),
             symbol=data.get("symbol", ""),
             side=data.get("side", ""),
-            type=data.get("type", ""),
+            order_type=data.get("type", ""),
             quantity=Decimal(str(data.get("origQty", "0"))),
             filled_qty=Decimal(str(data.get("executedQty", "0"))),
             price=(
@@ -657,6 +768,42 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             price_protect=data.get("priceProtect", False),
         )
         return order
+
+    async def _get_algo_order_status(self, algo_id: int) -> Order:
+        """Query a conditional (algo) order status.
+
+        Calls ``GET /fapi/v1/algoOrder`` -- the algo counterpart of
+        ``get_order_status`` for TP/SL brackets.
+        """
+        params: dict[str, Any] = {"algoId": algo_id}
+        data = await self._request("GET", "/fapi/v1/algoOrder", data=params)
+
+        return Order(
+            id=int(data.get("algoId", algo_id)),
+            client_order_id=data.get("clientAlgoId", ""),
+            symbol=data.get("symbol", ""),
+            side=data.get("side", ""),
+            order_type=data.get("orderType", ""),
+            quantity=Decimal(str(data.get("quantity", "0"))),
+            filled_qty=Decimal(str(data.get("executedQty", "0"))),
+            price=(
+                Decimal(str(data.get("price", "0")))
+                if data.get("price") not in (None, "", "0")
+                else None
+            ),
+            stop_price=(
+                Decimal(str(data.get("triggerPrice", "0")))
+                if data.get("triggerPrice") not in (None, "", "0")
+                else None
+            ),
+            status=data.get("algoStatus", ""),
+            time_in_force=data.get("timeInForce", "GTC"),
+            created_at=int(data.get("createTime", 0)),
+            updated_at=int(data.get("updateTime", 0)),
+            working_type=data.get("workingType", ""),
+            position_side=data.get("positionSide", ""),
+            price_protect=bool(data.get("priceProtect", False)),
+        )
 
     async def get_open_orders(
         self, symbol: str | None = None
@@ -686,7 +833,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                     client_order_id=entry.get("clientOrderId", ""),
                     symbol=entry.get("symbol", ""),
                     side=entry.get("side", ""),
-                    type=entry.get("type", ""),
+                    order_type=entry.get("type", ""),
                     quantity=Decimal(str(entry.get("origQty", "0"))),
                     filled_qty=Decimal(str(entry.get("executedQty", "0"))),
                     price=(
@@ -702,6 +849,56 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                     working_type=entry.get("workingType", ""),
                     position_side=entry.get("positionSide", ""),
                     price_protect=entry.get("priceProtect", False),
+                )
+            )
+
+        # Merge open conditional (algo) orders so TP/SL brackets are visible to
+        # the gateway / reconciler and can be cancelled or queried.  Best
+        # effort: if the endpoint is unavailable, regular orders still work.
+        try:
+            algo_params: dict[str, Any] = {}
+            if symbol:
+                algo_params["symbol"] = symbol
+            algo_data = await self._request(
+                "GET", "/fapi/v1/openAlgoOrders", data=algo_params
+            )
+        except Exception as exc:
+            self._log.debug(
+                "algo_open_orders_query_skipped",
+                error=str(exc),
+            )
+            algo_data = []
+
+        for entry in algo_data if isinstance(algo_data, list) else []:
+            algo_id = int(entry.get("algoId", 0))
+            if algo_id:
+                self._algo_order_ids.add(algo_id)
+            orders.append(
+                Order(
+                    id=algo_id,
+                    client_order_id=entry.get("clientAlgoId", ""),
+                    symbol=entry.get("symbol", ""),
+                    side=entry.get("side", ""),
+                    order_type=entry.get("orderType", ""),
+                    quantity=Decimal(str(entry.get("quantity", "0"))),
+                    filled_qty=Decimal(str(entry.get("executedQty", "0"))),
+                    price=(
+                        Decimal(str(entry.get("price", "0")))
+                        if entry.get("price") not in (None, "", "0")
+                        else None
+                    ),
+                    stop_price=(
+                        Decimal(str(entry.get("triggerPrice", "0")))
+                        if entry.get("triggerPrice") not in (None, "", "0")
+                        else None
+                    ),
+                    status=entry.get("algoStatus", ""),
+                    time_in_force=entry.get("timeInForce", "GTC"),
+                    created_at=int(entry.get("createTime", 0)),
+                    updated_at=int(entry.get("updateTime", 0)),
+                    working_type=entry.get("workingType", ""),
+                    position_side=entry.get("positionSide", ""),
+                    price_protect=bool(entry.get("priceProtect", False)),
                 )
             )
         return orders

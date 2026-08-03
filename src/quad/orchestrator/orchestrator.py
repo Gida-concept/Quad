@@ -19,6 +19,7 @@ Singleton pattern — exactly one orchestrator per process.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import os
 import signal
 import sys
@@ -2312,19 +2313,20 @@ class QuadOrchestrator:
                 "ADJUST": "\U0001f7e1",
                 "ROLL": "\U0001f504",
             }.get(action_type, "⚪")
+            esc = _html.escape
             msg = (
-                f"{emoji} *{action_type}* | {strategy}\n"
-                f"Contract: `{contract}`\n"
-                f"Side: {side} | Qty: {quantity}\n"
-                f"Price: {price or 'MARKET'}\n"
+                f"{emoji} <b>{esc(action_type)}</b> | {esc(strategy)}\n"
+                f"Contract: <code>{esc(contract)}</code>\n"
+                f"Side: {esc(side)} | Qty: {esc(quantity)}\n"
+                f"Price: {esc(price or 'MARKET')}\n"
             )
             if pnl:
-                msg += f"PnL: {pnl}\n"
-            msg += f"Reason: {reason}"
+                msg += f"PnL: {esc(pnl)}\n"
+            msg += f"Reason: {esc(reason)}"
             await self._telegram_bot.send_message(
                 chat_id=self._telegram_chat_id,
                 text=msg,
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except Exception as exc:
             self._log.warning("telegram_notify_failed", error=str(exc))
@@ -2336,16 +2338,17 @@ class QuadOrchestrator:
         if not self._telegram_bot or not self._telegram_chat_id:
             return
         try:
+            esc = _html.escape
             msg = (
-                f"\U0001f6a8 *Circuit Breaker Triggered*\n"
-                f"Name: `{name}`\n"
-                f"Tier: {tier}\n"
-                f"Reason: {reason}"
+                f"\U0001f6a8 <b>Circuit Breaker Triggered</b>\n"
+                f"Name: <code>{esc(name)}</code>\n"
+                f"Tier: {esc(tier)}\n"
+                f"Reason: {esc(reason)}"
             )
             await self._telegram_bot.send_message(
                 chat_id=self._telegram_chat_id,
                 text=msg,
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except Exception as exc:
             self._log.warning("telegram_cb_notify_failed", error=str(exc))

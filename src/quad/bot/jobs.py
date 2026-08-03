@@ -72,6 +72,17 @@ class QuadBotJobs:
             return True
         except Exception as exc:
             self._log.warning("job_send_failed", error=str(exc))
+        # Markdown can fail on dynamic content (e.g. strategy names, AI text);
+        # fall back to a plain-text send so scheduled notifications still go out.
+        try:
+            await context.bot.send_message(
+                chat_id=self._notification_chat_id,
+                text=text,
+                parse_mode=None,
+            )
+            return True
+        except Exception as exc:
+            self._log.warning("job_send_failed_plain", error=str(exc))
             return False
 
     # ------------------------------------------------------------------
