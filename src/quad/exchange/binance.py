@@ -770,7 +770,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             "hedge" if dual position side is enabled, else "one_way".
         """
         data = await self._request(
-            "GET", "/fapi/v1/positionSide/dual", signed=False,
+            "GET", "/fapi/v1/positionSide/dual",
         )
         if isinstance(data, bool):
             return "hedge" if data else "one_way"

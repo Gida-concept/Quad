@@ -62,6 +62,10 @@ class ExecutionEngine:
     ) -> None:
         self._log = structlog.get_logger(__name__)
         self._config = config or {}
+        # The adapter is read directly by the dry-run guard (``execute`` /
+        # ``execute_twap``) and the quantity-normalization helpers, so it must
+        # be stored on the instance as well as passed to the sub-components.
+        self._exchange_adapter: ExchangeAdapter = exchange_adapter
 
         self._gateway = OrderGateway(exchange_adapter, config=self._config)
         # Build the twap sub-config: TwapSlicer expects flat keys from

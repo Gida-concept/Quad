@@ -473,11 +473,21 @@ class QuadOrchestrator:
                     margin_mode=margin_mode,
                 )
             except Exception as exc:
-                self._log.warning(
-                    "account_setup_margin_mode_failed",
-                    symbol=symbol,
-                    error=str(exc),
-                )
+                if _is_margin_mode_already_set(exc):
+                    # Binance -4046 "No need to change margin type." — the
+                    # symbol is already in the requested margin mode, so the
+                    # call is a benign no-op.  Log at info, not a warning.
+                    self._log.info(
+                        "account_setup_margin_mode_already",
+                        symbol=symbol,
+                        margin_mode=margin_mode,
+                    )
+                else:
+                    self._log.warning(
+                        "account_setup_margin_mode_failed",
+                        symbol=symbol,
+                        error=str(exc),
+                    )
 
         # Position mode sync
         try:
@@ -2558,3 +2568,15 @@ def _dot_get(d: dict[str, Any], key: str, default: Any = None) -> Any:
         else:
             return default
     return current
+
+
+def _is_margin_mode_already_set(exc: Exception) -> bool:
+    """Whether an exception is Binance's -4046 "no need to change margin type".
+
+    ``POST /fapi/v1/marginType`` returns HTTP 400 with code ``-4046`` when the
+    symbol is already in the requested margin mode.  The adapter raises this as
+    an ``ExchangeOrderError``; the orchestrator treats it as a benign no-op
+    (the desired mode is already active) rather than a setup failure.
+    """
+    text = str(exc)
+    return "-4046" in text and "No need to change margin type" in text

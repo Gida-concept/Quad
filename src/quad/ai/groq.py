@@ -80,6 +80,14 @@ exactly this wall (``429 tokens per day: Limit 100000, used 97364``)."""
 _TOKEN_CHARS_PER_TOKEN = 4
 """Chars-per-token heuristic for dependency-light token estimation."""
 
+_RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
+"""Matches Groq 429 bodies: ``... Please try again in 21.84s.``
+
+The per-minute (TPM) and per-day token quotas both report the
+server-computed wait this way; honouring it lets a retry land after the
+token bucket refills instead of burning retries on an early resend.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Safe JSON parsing for LLM responses
@@ -449,6 +457,42 @@ class GroqClient:
     # Rate limiter
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _extract_retry_after(exc: RateLimitError) -> float | None:
+        """Extract the server-recommended retry delay from a Groq 429.
+
+        Groq 429 bodies carry ``... Please try again in 21.84s.`` for both
+        the per-minute (TPM) and per-day token quotas.  ``APIStatusError``
+        surfaces the parsed JSON body as ``exc.body``; some proxies set the
+        standard ``Retry-After`` header instead, which is honoured as a
+        fallback.
+
+        Returns the wait in seconds, or ``None`` when no usable value is
+        present so the caller can fall back to its exponential backoff.
+        """
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            message = str(body.get("message", ""))
+            if not message and isinstance(body.get("error"), dict):
+                message = str(body["error"].get("message", ""))
+        else:
+            message = str(body or "")
+        match = _RETRY_AFTER_RE.search(message)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+
+        headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if raw:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+        return None
+
     def _prune_timestamps(self, now: float | None = None) -> None:
         """Remove timestamps outside the sliding window."""
         if now is None:
@@ -616,14 +660,26 @@ class GroqClient:
             except RateLimitError as exc:
                 self._total_retries += 1
                 self._last_rate_limit = asyncio.get_event_loop().time()
-                wait = self._base_backoff * (2 ** (attempt - 1)) + (
-                    hash(str(exc)) % 50
-                ) / 100.0  # jitter
+                # Groq 429s carry the server-computed wait (``retry_after``),
+                # e.g. a TPM refusal with "Please try again in 21.84s."  Prefer
+                # it over the exponential backoff so the retry lands after the
+                # token bucket refills; the local estimate (chars/4) is far
+                # below the true TPM quota, so a fixed backoff would resend too
+                # early and burn every retry.
+                retry_after = self._extract_retry_after(exc)
+                base_wait = self._base_backoff * (2 ** (attempt - 1))
+                wait = (
+                    max(retry_after, base_wait)
+                    if retry_after is not None
+                    else base_wait
+                )
+                wait += (hash(str(exc)) % 50) / 100.0  # jitter
 
                 self._log.warning(
                     "groq_rate_limited",
                     attempt=attempt,
                     wait_s=round(wait, 2),
+                    retry_after_s=retry_after,
                     max_retries=self._max_retries,
                 )
 
