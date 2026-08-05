@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -89,7 +88,7 @@ class TwapSlicer:
         qty = order_request.quantity
         parent_id = order_request.client_order_id or "twap"
 
-        if qty <= Decimal("0"):
+        if qty <= Decimal(0):
             self._log.warning(
                 "twap_plan_zero_quantity",
                 client_order_id=parent_id,
@@ -179,7 +178,7 @@ class TwapSlicer:
 
         interval = window / len(slices)
         results: list[OrderResult] = []
-        total_filled = Decimal("0")
+        total_filled = Decimal(0)
         start_time = time.monotonic()
 
         for i, slice_req in enumerate(slices):
@@ -208,7 +207,7 @@ class TwapSlicer:
                 fill_frac = (
                     total_filled / order_request.quantity
                     if order_request.quantity > 0
-                    else Decimal("1")
+                    else Decimal(1)
                 )
 
                 if (
@@ -216,7 +215,7 @@ class TwapSlicer:
                     and fill_frac < Decimal("0.5")
                 ):
                     remaining = order_request.quantity - total_filled
-                    if remaining > Decimal("0"):
+                    if remaining > Decimal(0):
                         self._log.info(
                             "twap_urgency_triggered",
                             time_frac=round(time_frac, 3),
@@ -264,8 +263,8 @@ class TwapSlicer:
 
 # Re-export OrderResult so callers don't need a separate import
 __all__ = [
-    "TwapSlicer",
     "OrderResult",
+    "TwapSlicer",
 ]
 
 

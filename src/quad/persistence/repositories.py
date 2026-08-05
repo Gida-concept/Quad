@@ -8,7 +8,7 @@ SQLite ``?`` parameter style (via automatic $N to ? conversion).
 from __future__ import annotations
 
 import time
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 import structlog
 
@@ -21,7 +21,6 @@ from .models import (
     ErrorLogModel,
     FundingPaymentModel,
     LiquidationEventModel,
-    FundingRateRecordModel,
     OptimizationRecommendationModel,
     OptimizationRunModel,
     OrderModel,
@@ -56,7 +55,7 @@ class BaseRepository(Generic[T]):
     def __init__(
         self,
         db_manager: DatabaseManager,
-        model_cls: Optional[type[T]] = None,
+        model_cls: type[T] | None = None,
         slow_query_threshold_ms: int = 500,
     ) -> None:
         self._db = db_manager
@@ -96,7 +95,7 @@ class BaseRepository(Generic[T]):
     # CRUD
     # ------------------------------------------------------------------
 
-    async def get(self, id: int) -> Optional[T]:
+    async def get(self, id: int) -> T | None:
         """Retrieve a single row by primary key."""
         t0 = time.monotonic()
         try:
@@ -240,11 +239,11 @@ class AccountRepository(BaseRepository[AccountModel]):
     def __init__(
         self,
         db_manager: DatabaseManager,
-        model_cls: Optional[type[AccountModel]] = None,
+        model_cls: type[AccountModel] | None = None,
     ) -> None:
         super().__init__(db_manager, model_cls or AccountModel)
 
-    async def get_by_exchange(self, exchange: str) -> Optional[AccountModel]:
+    async def get_by_exchange(self, exchange: str) -> AccountModel | None:
         """Return the account for a given exchange name.
 
         Uses a direct query with ``fetchrow`` since exchange is expected to be
@@ -315,7 +314,7 @@ class PositionRepository(BaseRepository[PositionModel]):
     def __init__(
         self,
         db_manager: DatabaseManager,
-        model_cls: Optional[type[PositionModel]] = None,
+        model_cls: type[PositionModel] | None = None,
     ) -> None:
         super().__init__(db_manager, model_cls or PositionModel)
 
@@ -408,7 +407,7 @@ class OrderRepository(BaseRepository[OrderModel]):
     def __init__(
         self,
         db_manager: DatabaseManager,
-        model_cls: Optional[type[OrderModel]] = None,
+        model_cls: type[OrderModel] | None = None,
     ) -> None:
         super().__init__(db_manager, model_cls or OrderModel)
 
@@ -437,8 +436,8 @@ class OrderRepository(BaseRepository[OrderModel]):
         self,
         order_id: int,
         status: str,
-        filled_qty: Optional[str] = None,
-        avg_price: Optional[str] = None,
+        filled_qty: str | None = None,
+        avg_price: str | None = None,
     ) -> None:
         """Update an order's status and optionally fill details."""
         updates: dict[str, Any] = {"status": status}
@@ -473,7 +472,7 @@ class TradeRepository(BaseRepository[TradeModel]):
     def __init__(
         self,
         db_manager: DatabaseManager,
-        model_cls: Optional[type[TradeModel]] = None,
+        model_cls: type[TradeModel] | None = None,
     ) -> None:
         super().__init__(db_manager, model_cls or TradeModel)
 
@@ -529,7 +528,7 @@ class DecisionRepository(BaseRepository[DecisionModel]):
     def __init__(
         self,
         db_manager: DatabaseManager,
-        model_cls: Optional[type[DecisionModel]] = None,
+        model_cls: type[DecisionModel] | None = None,
     ) -> None:
         super().__init__(db_manager, model_cls or DecisionModel)
 
@@ -732,11 +731,11 @@ class SessionRepository(BaseRepository[SessionModel]):
     def __init__(
         self,
         db_manager: DatabaseManager,
-        model_cls: Optional[type[SessionModel]] = None,
+        model_cls: type[SessionModel] | None = None,
     ) -> None:
         super().__init__(db_manager, model_cls or SessionModel)
 
-    async def get_latest(self) -> Optional[SessionModel]:
+    async def get_latest(self) -> SessionModel | None:
         """Return the most recently started session."""
         t0 = time.monotonic()
         try:
@@ -792,7 +791,7 @@ class PerformanceSnapshotRepository(BaseRepository[PerformanceSnapshotModel]):
     def __init__(
         self,
         db_manager: DatabaseManager,
-        model_cls: Optional[type[PerformanceSnapshotModel]] = None,
+        model_cls: type[PerformanceSnapshotModel] | None = None,
     ) -> None:
         super().__init__(db_manager, model_cls or PerformanceSnapshotModel)
 
@@ -1152,7 +1151,7 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
     ) -> None:
         super().__init__(db_manager, model_cls or StrategyStateModel)
 
-    async def get_by_strategy(self, name: str) -> Optional[StrategyStateModel]:
+    async def get_by_strategy(self, name: str) -> StrategyStateModel | None:
         """Return the state for a single strategy by name."""
         t0 = time.monotonic()
         try:

@@ -14,11 +14,9 @@ Usage:
 
 from __future__ import annotations
 
-import sys
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-
 
 # ============================================================================
 # Trading Section
@@ -284,12 +282,10 @@ class ExchangeConfig(BaseModel):
 
 class DailyLossBreakerConfig(BaseModel):
     """Daily loss circuit breaker configuration."""
-    pass
 
 
 class DrawdownBreakerConfig(BaseModel):
     """Drawdown circuit breaker configuration."""
-    pass
 
 
 class ConsecutiveLossesBreakerConfig(BaseModel):
@@ -445,7 +441,21 @@ class RiskConfig(BaseModel):
     )
     min_distance_to_liquidation_pct: float = Field(
         default=0.2, ge=0.0, le=1.0,
-        description="Minimum distance to liquidation (decimal) before blocking trades",
+        description=(
+            "Absolute cap (decimal) for the minimum distance to liquidation "
+            "before warning/blocking. The effective threshold is "
+            "min(this, liquidation_distance_fraction / leverage), so high "
+            "leverage positions are judged against their real ~1/leverage "
+            "distance to liquidation instead of a flat percentage."
+        ),
+    )
+    liquidation_distance_fraction: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description=(
+            "Fraction of the theoretical 1/leverage distance-to-liquidation "
+            "at which a position is considered near liquidation. Lower = "
+            "warn/block closer to liquidation (e.g. 0.5 at 50x -> 1%)."
+        ),
     )
     funding_rate_periods: int = Field(
         default=3, ge=1,

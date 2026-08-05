@@ -16,10 +16,10 @@ TradingViewWebhook
 from __future__ import annotations
 
 from .parser import parse_alert
-from .signals import convert_to_action, TradingViewSignal
+from .signals import TradingViewSignal, convert_to_action
 
 __all__ = [
-    "parse_alert",
-    "convert_to_action",
     "TradingViewSignal",
+    "convert_to_action",
+    "parse_alert",
 ]

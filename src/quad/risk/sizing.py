@@ -12,14 +12,14 @@ when the config system is properly set up.
 
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 import structlog
 
+from quad.persistence.database import DatabaseManager
 from quad.types.risk import Action
 from quad.types.strategy import StrategyContext
-from quad.persistence.database import DatabaseManager
 
 
 class PositionSizer:
@@ -126,10 +126,10 @@ class PositionSizer:
         avg_loss = Decimal(str(params.get("avg_loss", "0")))
 
         portfolio_value = (
-            context.account.total_usdt if context.account else Decimal("0")
+            context.account.total_usdt if context.account else Decimal(0)
         )
 
-        if win_rate <= 0 or avg_win <= Decimal("0") or avg_loss <= Decimal("0"):
+        if win_rate <= 0 or avg_win <= Decimal(0) or avg_loss <= Decimal(0):
             # Fall back to default fraction
             self._log.debug(
                 "using_default_kelly_fraction",
@@ -143,17 +143,16 @@ class PositionSizer:
             sized_qty = self._adjusted_kelly(kelly_f, portfolio_value)
 
         # Cap at the original requested quantity (don't oversize)
-        if action.quantity > Decimal("0") and sized_qty > action.quantity:
+        if action.quantity > Decimal(0) and sized_qty > action.quantity:
             sized_qty = action.quantity
 
         # Ensure non-negative
-        if sized_qty < Decimal("0"):
-            sized_qty = Decimal("0")
+        sized_qty = max(sized_qty, Decimal(0))
 
         # TP/SL size cap: ensure position isn't larger than what the bracket
         # stop-loss can protect given the trade capital
         tp_sl_max = self._max_size_from_tp_sl(action, portfolio_value)
-        if sized_qty > tp_sl_max and tp_sl_max > Decimal("0"):
+        if sized_qty > tp_sl_max > Decimal(0):
             sized_qty = tp_sl_max
 
         self._log.debug(
@@ -223,7 +222,7 @@ class PositionSizer:
         """
         if win_rate <= 0.0 or win_rate >= 1.0:
             return 0.0
-        if avg_win <= Decimal("0") or avg_loss <= Decimal("0"):
+        if avg_win <= Decimal(0) or avg_loss <= Decimal(0):
             return 0.0
 
         # Compute payout ratio b = avg_win / avg_loss
@@ -264,8 +263,8 @@ class PositionSizer:
         Decimal
             Adjusted position size in USD notional value.
         """
-        if portfolio_value <= Decimal("0"):
-            return Decimal("0")
+        if portfolio_value <= Decimal(0):
+            return Decimal(0)
 
         # Step 1 & 2: Fractional Kelly amount
         fraction = Decimal(str(self._kelly_multiplier))
@@ -273,22 +272,19 @@ class PositionSizer:
 
         # Step 3: Leverage adjustment (leverage multiplies exposure)
         leverage = Decimal(str(self._max_leverage))
-        if leverage > Decimal("1"):
+        if leverage > Decimal(1):
             size = size / leverage
 
         # Step 4: Cap at percentage of portfolio
         max_pct = Decimal(str(self._max_pos_pct))
         pct_cap = max_pct * portfolio_value
-        if size > pct_cap:
-            size = pct_cap
+        size = min(size, pct_cap)
 
         # Step 5: Cap at absolute USD limit
-        if size > self._max_pos_usd:
-            size = self._max_pos_usd
+        size = min(size, self._max_pos_usd)
 
         # Step 6: Never exceed 100% of portfolio
-        if size > portfolio_value:
-            size = portfolio_value
+        size = min(size, portfolio_value)
 
         # Step 7: Minimum position size check
         if size < self._min_pos_usd:
@@ -299,7 +295,7 @@ class PositionSizer:
             )
             size = self._default_size(portfolio_value)
 
-        return max(size, Decimal("0"))
+        return max(size, Decimal(0))
 
     def _default_size(self, portfolio_value: Decimal) -> Decimal:
         """Compute default position size when no historical data is available.
@@ -309,19 +305,17 @@ class PositionSizer:
 
         Returns the size as a USD notional value.
         """
-        if portfolio_value <= Decimal("0"):
-            return Decimal("0")
+        if portfolio_value <= Decimal(0):
+            return Decimal(0)
 
         default_pct = Decimal(str(self._default_fraction))
         size = default_pct * portfolio_value
 
-        if size > self._max_pos_usd:
-            size = self._max_pos_usd
+        size = min(size, self._max_pos_usd)
 
-        if size < self._min_pos_usd:
-            size = self._min_pos_usd
+        size = max(size, self._min_pos_usd)
 
-        return max(size, Decimal("0"))
+        return max(size, Decimal(0))
 
     # ------------------------------------------------------------------
     # TP/SL-aware sizing

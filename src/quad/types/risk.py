@@ -13,14 +13,13 @@ from typing import Any, Literal
 
 from quad.types.domain import FuturesPositionSide, MarginType
 
-
 __all__ = [
-    "RiskStatus",
-    "CircuitBreakerStatus",
-    "RiskResult",
-    "FuturesRiskMetadata",
     "Action",
     "ActionType",
+    "CircuitBreakerStatus",
+    "FuturesRiskMetadata",
+    "RiskResult",
+    "RiskStatus",
 ]
 
 # Canonical action type constants (single source of truth)
@@ -56,13 +55,13 @@ class CircuitBreakerStatus:
 class RiskStatus:
     """Aggregated risk status snapshot for the trading system."""
 
-    drawdown_percent: Decimal = Decimal("0")
+    drawdown_percent: Decimal = Decimal(0)
     """Current drawdown from peak as a decimal (e.g. 0.05 for 5%)."""
 
-    daily_pnl: Decimal = Decimal("0")
+    daily_pnl: Decimal = Decimal(0)
     """Realized PnL for the current trading day."""
 
-    daily_loss_limit: Decimal = Decimal("0")
+    daily_loss_limit: Decimal = Decimal(0)
     """Maximum allowable daily loss."""
 
     circuit_breakers: dict[str, CircuitBreakerStatus] = field(default_factory=dict)
@@ -113,7 +112,7 @@ class Action:
     type: ActionType = "HOLD"
     strategy: str = ""
     symbol: str = ""
-    quantity: Decimal = Decimal("0")
+    quantity: Decimal = Decimal(0)
     price: Decimal | None = None
     reason: str = ""
     confidence: float = 1.0
@@ -138,16 +137,12 @@ class Action:
             if self.type in ("open_long", "close_short", "ENTER"):
                 if self.type == "ENTER":
                     self.side = "BUY"  # default: open long
-                elif self.type == "open_long":
-                    self.side = "BUY"
-                elif self.type == "close_short":
+                elif self.type == "open_long" or self.type == "close_short":
                     self.side = "BUY"
             elif self.type in ("open_short", "close_long", "EXIT"):
                 if self.type == "EXIT":
                     self.side = "SELL"  # default: close long
-                elif self.type == "open_short":
-                    self.side = "SELL"
-                elif self.type == "close_long":
+                elif self.type == "open_short" or self.type == "close_long":
                     self.side = "SELL"
             elif self.type in ("set_stop_loss", "set_take_profit"):
                 self.side = "SELL"

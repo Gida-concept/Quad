@@ -18,8 +18,9 @@ import copy
 import os
 import re
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 import yaml
@@ -389,7 +390,7 @@ class ConfigManager:
         for cb in callbacks:
             try:
                 cb(key, old_value, new_value)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "config_callback_error",
                     key=key,

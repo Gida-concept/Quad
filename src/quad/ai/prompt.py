@@ -8,7 +8,6 @@ within token limits while preserving decision-critical information.
 from __future__ import annotations
 
 import time
-from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -353,8 +352,12 @@ def build_trading_prompt(
     sections.append(f"Max Portfolio Risk: {risk_cfg.get('max_portfolio_risk_pct')}%")
     sections.append(f"Max Daily Loss: ${risk_cfg.get('max_daily_loss_usd'):,.2f}")
     sections.append(f"Max Leverage: {trading_cfg.get('max_leverage')}x")
-    min_dist = trading_cfg.get('min_distance_to_liquidation_pct', 0.1)
-    sections.append(f"Min Distance to Liquidation: {min_dist * 100:.0f}%")
+    min_dist = float(risk_cfg.get("min_distance_to_liquidation_pct", 0.2))
+    liq_fraction = float(risk_cfg.get("liquidation_distance_fraction", 0.5))
+    sections.append(
+        f"Min Distance to Liquidation: {min_dist * 100:.0f}% cap "
+        f"(warn within {liq_fraction:.0%} of the 1/leverage distance)"
+    )
     max_funding = trading_cfg.get('max_funding_rate_cost', 0.01)
     sections.append(f"Max Funding Rate Cost: {max_funding * 100:.2f}%")
     sections.append(f"Max Drawdown: {risk_cfg.get('max_drawdown_pct')}%")

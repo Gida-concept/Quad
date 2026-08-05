@@ -35,9 +35,9 @@ class FuturesPositionTracker:
 
         # Cached exposure data
         self._notional_exposure: dict[str, Decimal] = {}
-        self._avg_leverage: Decimal = Decimal("0")
+        self._avg_leverage: Decimal = Decimal(0)
         self._liquidation_risk: list[dict[str, Any]] = []
-        self._margin_utilization: Decimal = Decimal("0")
+        self._margin_utilization: Decimal = Decimal(0)
         self._funding_rate_snapshots: dict[str, list[Decimal]] = {}
         self._last_report: dict[str, Any] = {}
 
@@ -72,8 +72,8 @@ class FuturesPositionTracker:
         # 1. Per-symbol notional exposure
         # ------------------------------------------------------------------
         notional_per_symbol: dict[str, Decimal] = {}
-        total_notional = Decimal("0")
-        total_margin = Decimal("0")
+        total_notional = Decimal(0)
+        total_margin = Decimal(0)
 
         for pos in positions:
             symbol = pos.symbol
@@ -81,7 +81,7 @@ class FuturesPositionTracker:
             mark_price = Decimal(str(pos.mark_price))
             notional = size * mark_price
             notional_per_symbol[symbol] = (
-                notional_per_symbol.get(symbol, Decimal("0")) + notional
+                notional_per_symbol.get(symbol, Decimal(0)) + notional
             )
             total_notional += notional
             total_margin += Decimal(str(pos.margin))
@@ -91,12 +91,12 @@ class FuturesPositionTracker:
         # ------------------------------------------------------------------
         # 2. Aggregated leverage
         # ------------------------------------------------------------------
-        if account and account.total_wallet_balance > Decimal("0"):
+        if account and account.total_wallet_balance > Decimal(0):
             self._avg_leverage = (
                 total_notional / account.total_wallet_balance
             ).quantize(Decimal("0.01"))
         else:
-            self._avg_leverage = Decimal("0")
+            self._avg_leverage = Decimal(0)
 
         # ------------------------------------------------------------------
         # 3. Liquidation monitoring
@@ -124,12 +124,12 @@ class FuturesPositionTracker:
         # ------------------------------------------------------------------
         # 4. Margin utilization
         # ------------------------------------------------------------------
-        if account and account.total_wallet_balance > Decimal("0"):
+        if account and account.total_wallet_balance > Decimal(0):
             self._margin_utilization = (
                 total_margin / account.total_wallet_balance
             ).quantize(Decimal("0.0001"))
         else:
-            self._margin_utilization = Decimal("0")
+            self._margin_utilization = Decimal(0)
 
         # ------------------------------------------------------------------
         # 5. Funding rate tracking
@@ -155,7 +155,7 @@ class FuturesPositionTracker:
             "total_notional_usd": str(total_notional.quantize(Decimal("0.01"))),
             "avg_leverage": str(self._avg_leverage),
             "margin_utilization_pct": str(
-                (self._margin_utilization * Decimal("100")).quantize(Decimal("0.01"))
+                (self._margin_utilization * Decimal(100)).quantize(Decimal("0.01"))
             ),
             "liquidation_risk": liquidation_risk,
             "num_positions": len(positions),

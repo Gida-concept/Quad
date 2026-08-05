@@ -23,10 +23,10 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     ConversationHandler,
-    MessageHandler,
-    filters,
 )
 from telegram.warnings import PTBUserWarning
+
+from quad.risk.gates import effective_min_liquidation_distance
 
 # ---------------------------------------------------------------------------
 # Suppress benign PTBUserWarning about per_message=False with CallbackQueryHandler
@@ -237,7 +237,7 @@ class QuadBotCommands:
         try:
             # Gather status information from subsystems
             position_count = 0
-            daily_pnl = Decimal("0")
+            daily_pnl = Decimal(0)
             circuit_breakers_active = 0
             active_strategies: list[str] = []
 
@@ -336,7 +336,7 @@ class QuadBotCommands:
 
             # Format balance info
             exchange = getattr(account, "exchange", "unknown")
-            total_usdt = getattr(account, "total_usdt", Decimal("0"))
+            total_usdt = getattr(account, "total_usdt", Decimal(0))
             balances = getattr(account, "balances", {})
 
             lines = [f"💳 *Account Balance*  |  Exchange: {exchange}\n"]
@@ -722,7 +722,6 @@ class QuadBotCommands:
 
         try:
             risk_config = self._config["risk"]
-            min_distance = float(risk_config.get("min_distance_to_liquidation_pct"))
 
             exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None) if self._orchestrator else None
             if exchange_adapter is None:
@@ -748,6 +747,12 @@ class QuadBotCommands:
                     continue
 
                 distance = abs(mark - liq) / mark
+                min_distance = float(
+                    effective_min_liquidation_distance(
+                        risk_config,
+                        getattr(pos, "leverage", None),
+                    )
+                )
                 if distance < min_distance:
                     symbol = getattr(pos, "symbol", getattr(pos, "contract_symbol", "?"))
                     raw_side = getattr(pos, "position_side", getattr(pos, "side", "?"))
@@ -1026,13 +1031,18 @@ class QuadBotCommands:
                 if exchange_adapter is not None:
                     positions = await exchange_adapter.get_positions()
                     at_risk = 0
-                    min_distance_config = float(self._config["risk"]["min_distance_to_liquidation_pct"])
                     for pos in (positions or []):
                         mark = float(getattr(pos, "mark_price", getattr(pos, "current_price", 0)))
                         liq = float(getattr(pos, "liquidation_price", 0))
                         if mark > 0 and liq > 0:
                             distance = abs(mark - liq) / mark
-                            if distance < min_distance_config:
+                            min_distance = float(
+                                effective_min_liquidation_distance(
+                                    self._config["risk"],
+                                    getattr(pos, "leverage", None),
+                                )
+                            )
+                            if distance < min_distance:
                                 at_risk += 1
                     liq_emoji = "🚨" if at_risk > 0 else "✅"
                     liq_info = f"\n*Liquidation Risk:* {liq_emoji} {at_risk} position(s) near liquidation\n"
@@ -1046,8 +1056,8 @@ class QuadBotCommands:
                 f"{liq_info}"
                 f"{funding_info}\n"
                 f"*Gates:*\n" + "\n".join(gate_lines) + "\n\n"
-                f"*Circuit Breakers:*\n" + "\n".join(cb_lines) + "\n\n"
-                f"*Exposure:*\n" + "\n".join(exposure_lines)
+                "*Circuit Breakers:*\n" + "\n".join(cb_lines) + "\n\n"
+                "*Exposure:*\n" + "\n".join(exposure_lines)
             )
             await self._safe_reply(update, msg)
 
@@ -1693,7 +1703,7 @@ class QuadBotCommands:
                                 for a in action_infos[:5]:
                                     parts.append(f"  • `{a.get('type', '?')}` {a.get('contract', '')} {a.get('side', '')}")
                             if executed:
-                                parts.append(f"\n*Execution results:*")
+                                parts.append("\n*Execution results:*")
                                 for e in executed[:5]:
                                     e_status = e.get("result", e.get("error", "submitted"))
                                     parts.append(f"  • `{e.get('action', '?')}` → {e_status}")

@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import math
 import statistics
-import time as _time
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -136,9 +134,9 @@ class BacktestEngine:
         # Simulation state
         cash: Decimal = self._starting_capital
         peak_equity: Decimal = self._starting_capital
-        max_drawdown: Decimal = Decimal("0")
-        gross_wins: Decimal = Decimal("0")
-        gross_losses: Decimal = Decimal("0")
+        max_drawdown: Decimal = Decimal(0)
+        gross_wins: Decimal = Decimal(0)
+        gross_losses: Decimal = Decimal(0)
 
         trade_id_counter = 0
         open_positions: dict[str, dict[str, Any]] = {}
@@ -201,16 +199,16 @@ class BacktestEngine:
                         cash -= trade.price * trade.quantity + trade.fee
                         if trade.pnl > 0:
                             gross_wins += trade.pnl
-                            gross_losses += Decimal("0")
+                            gross_losses += Decimal(0)
                         else:
                             gross_losses += abs(trade.pnl)
-                            gross_wins += Decimal("0")
+                            gross_wins += Decimal(0)
 
                 elif action.type == "EXIT":
                     pos = open_positions.pop(action.contract or "", None)
                     if pos is not None:
                         trade_id_counter += 1
-                        exit_price = (action.price or Decimal("0"))
+                        exit_price = (action.price or Decimal(0))
                         entry_price = pos["entry_price"]
                         quantity = pos["quantity"]
                         pnl = (exit_price - entry_price) * quantity
@@ -240,13 +238,11 @@ class BacktestEngine:
                 context=context,
             )
             total_equity = cash + positions_value
-            drawdown = (peak_equity - total_equity) / peak_equity if peak_equity > 0 else Decimal("0")
+            drawdown = (peak_equity - total_equity) / peak_equity if peak_equity > 0 else Decimal(0)
 
-            if total_equity > peak_equity:
-                peak_equity = total_equity
+            peak_equity = max(peak_equity, total_equity)
 
-            if drawdown > max_drawdown:
-                max_drawdown = drawdown
+            max_drawdown = max(max_drawdown, drawdown)
 
             equity_curve.append(
                 EquityPoint(
@@ -267,26 +263,26 @@ class BacktestEngine:
         loss_count = len(losing_trades)
         win_rate = win_count / total_trades if total_trades > 0 else 0.0
 
-        total_pnl = sum((t.pnl for t in simulated_trades), Decimal("0"))
-        total_commission = sum((t.fee for t in simulated_trades), Decimal("0"))
+        total_pnl = sum((t.pnl for t in simulated_trades), Decimal(0))
+        total_commission = sum((t.fee for t in simulated_trades), Decimal(0))
 
         avg_win = (
-            sum((t.pnl for t in winning_trades), Decimal("0")) / win_count
+            sum((t.pnl for t in winning_trades), Decimal(0)) / win_count
             if win_count > 0
-            else Decimal("0")
+            else Decimal(0)
         )
         avg_loss = (
-            sum((t.pnl for t in losing_trades), Decimal("0")) / loss_count
+            sum((t.pnl for t in losing_trades), Decimal(0)) / loss_count
             if loss_count > 0
-            else Decimal("0")
+            else Decimal(0)
         )
 
         profit_factor = float(gross_wins / gross_losses) if gross_losses > 0 else float("inf")
-        return_pct = (total_pnl / self._starting_capital) * 100 if self._starting_capital > 0 else Decimal("0")
+        return_pct = (total_pnl / self._starting_capital) * 100 if self._starting_capital > 0 else Decimal(0)
         annualised = (
-            return_pct * (Decimal("365") / Decimal(str(total_days)))
+            return_pct * (Decimal(365) / Decimal(str(total_days)))
             if total_days > 0
-            else Decimal("0")
+            else Decimal(0)
         )
 
         # Sharpe ratio (if we have enough data)
@@ -390,7 +386,7 @@ class BacktestEngine:
         else:
             fill_price -= slippage
 
-        fill_price = max(fill_price, Decimal("0"))
+        fill_price = max(fill_price, Decimal(0))
 
         # Calculate commission
         commission = fill_price * action.quantity * self._commission_pct
@@ -402,7 +398,7 @@ class BacktestEngine:
             quantity=action.quantity,
             price=fill_price,
             fee=commission,
-            pnl=Decimal("0"),  # Realised PnL calculated on EXIT
+            pnl=Decimal(0),  # Realised PnL calculated on EXIT
             timestamp=timestamp,
         )
 
@@ -418,12 +414,12 @@ class BacktestEngine:
         context: StrategyContext,
     ) -> Decimal:
         """Compute the current market value of all open positions."""
-        total = Decimal("0")
+        total = Decimal(0)
 
         for symbol, pos in open_positions.items():
-            current_price = pos.get("entry_price", Decimal("0"))
+            current_price = pos.get("entry_price", Decimal(0))
 
-            total += current_price * pos.get("quantity", Decimal("0"))
+            total += current_price * pos.get("quantity", Decimal(0))
 
         return total
 

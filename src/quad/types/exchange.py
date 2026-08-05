@@ -6,10 +6,9 @@ and other exchange-specific data structures.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from quad.types.domain import Account
-
 
 __all__ = [
     "AccountUpdate",

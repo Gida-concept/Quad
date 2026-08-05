@@ -135,7 +135,7 @@ class PriceBuffer:
                 return None
 
             prices = list(buf)[-window:]
-            total = sum(prices, Decimal("0"))
+            total = sum(prices, Decimal(0))
             return total / Decimal(str(window))
 
     async def has_data(self, symbol: str) -> bool:

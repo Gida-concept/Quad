@@ -7,9 +7,9 @@ TradingView webhook receiver (POST endpoint).
 
 from __future__ import annotations
 
-import asyncio
 import time as _time
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from aiohttp import web

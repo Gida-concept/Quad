@@ -22,6 +22,12 @@ exchange:
 risk:
   max_positions: 1
   max_leverage: 50
+  # Leverage-aware liquidation guard: the effective threshold is
+  # min(min_distance_to_liquidation_pct, liquidation_distance_fraction / leverage).
+  # At 50x isolated, liquidation sits ~2% from entry, so a flat 20% would
+  # always trip. 0.5 / 50 = 1% -> warn/block only when genuinely close.
+  min_distance_to_liquidation_pct: 0.20
+  liquidation_distance_fraction: 0.5
   per_position_sl:
     enabled: true
     type: "fixed"

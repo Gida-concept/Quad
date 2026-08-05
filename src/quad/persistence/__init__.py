@@ -24,10 +24,10 @@ from .repositories import (
 )
 
 __all__ = [
-    "DatabaseManager",
     "AccountRepository",
     "CircuitBreakerEventRepository",
     "ConfigChangeRepository",
+    "DatabaseManager",
     "DecisionRepository",
     "ErrorLogRepository",
     "FundingRepository",

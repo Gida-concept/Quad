@@ -6,16 +6,16 @@ position tracking, and a top-level RiskManager coordinating all subsystems.
 
 from __future__ import annotations
 
-from .manager import RiskManager
-from .gates import GatePipeline
 from .circuit_breakers import CircuitBreakerManager
-from .sizing import PositionSizer
 from .exposure import FuturesPositionTracker
+from .gates import GatePipeline
+from .manager import RiskManager
+from .sizing import PositionSizer
 
 __all__ = [
-    "RiskManager",
-    "GatePipeline",
     "CircuitBreakerManager",
-    "PositionSizer",
     "FuturesPositionTracker",
+    "GatePipeline",
+    "PositionSizer",
+    "RiskManager",
 ]

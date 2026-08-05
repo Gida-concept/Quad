@@ -34,12 +34,12 @@ import structlog
 from quad.config.manager import ConfigManager
 from quad.config.schema import AiConfig, QuadConfig, TradingViewWebhookConfig
 from quad.exchange.factory import create_exchange
+from quad.execution.engine import ExecutionEngine
 from quad.market_data.engine import MarketDataEngine
 from quad.persistence.database import DatabaseManager
 from quad.risk.manager import RiskManager
-from quad.execution.engine import ExecutionEngine
-from quad.strategy.factory import create_default_strategies
 from quad.strategy.base import StrategyBase
+from quad.strategy.factory import create_default_strategies
 from quad.types.strategy import StrategyContext
 
 # ---------------------------------------------------------------------------
@@ -1233,7 +1233,7 @@ class QuadOrchestrator:
                     if account is not None:
                         self._metrics.set_gauge(
                             "portfolio_value",
-                            float(getattr(account, "total_usdt", Decimal("0"))),
+                            float(getattr(account, "total_usdt", Decimal(0))),
                         )
 
                 # ----------------------------------------------------------
@@ -2062,11 +2062,11 @@ class QuadOrchestrator:
         sl_price: Decimal | None = None
         tp_price: Decimal | None = None
         if sl_cfg.get("enabled", True):
-            offset = sl_pct / Decimal("100") / leverage
-            sl_price = entry * (Decimal("1") - offset) if is_long else entry * (Decimal("1") + offset)
+            offset = sl_pct / Decimal(100) / leverage
+            sl_price = entry * (Decimal(1) - offset) if is_long else entry * (Decimal(1) + offset)
         if tp_cfg.get("enabled", True):
-            offset = tp_pct / Decimal("100") / leverage
-            tp_price = entry * (Decimal("1") + offset) if is_long else entry * (Decimal("1") - offset)
+            offset = tp_pct / Decimal(100) / leverage
+            tp_price = entry * (Decimal(1) + offset) if is_long else entry * (Decimal(1) - offset)
         return sl_price, tp_price
 
     async def _log_ai_decision(
@@ -2158,8 +2158,8 @@ class QuadOrchestrator:
         if self._db_manager is None:
             return
 
-        from quad.types.domain import PositionStatus
         from quad.persistence.repositories import DecisionRepository
+        from quad.types.domain import PositionStatus
 
         open_symbols = {
             (getattr(p, "symbol", "") or getattr(p, "contract_symbol", ""))
@@ -2217,8 +2217,7 @@ class QuadOrchestrator:
             return
 
         interval = int(metrics_cfg.get("interval_cycles", 1) or 1)
-        if interval < 1:
-            interval = 1
+        interval = max(interval, 1)
         if self._metrics_cycle_count % interval != 0:
             return
 
@@ -2524,7 +2523,7 @@ class QuadOrchestrator:
                     len(self._groq_client._request_timestamps)
                     if self._groq_client
                     else 0
-                ),  # noqa: E501
+                ),
             },
             "tradingview_webhook": {
                 "enabled": self._tv_webhook is not None,

@@ -13,10 +13,9 @@ from quad.types.domain import Account, FuturesPosition, Order, Position
 from quad.types.market import FundingRate, FuturesContract
 from quad.types.risk import RiskStatus
 
-
 __all__ = [
-    "StrategyContext",
     "HistoricalDataAccess",
+    "StrategyContext",
 ]
 
 

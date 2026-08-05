@@ -33,19 +33,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import os
+import re
 import time
 from collections import deque
 from typing import Any
 
 import structlog
-
-from groq import AsyncGroq
 from groq import (
-    APIError,
     APIConnectionError,
     APIStatusError,
+    AsyncGroq,
     RateLimitError,
 )
 
@@ -876,7 +874,6 @@ class GroqClient:
 
     async def _ensure_client(self) -> None:
         """Client is created eagerly in ``__init__``; this is a no-op."""
-        pass
 
     async def close(self) -> None:
         """Close the underlying HTTP client session.

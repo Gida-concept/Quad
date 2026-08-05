@@ -9,8 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
-
 
 __all__ = [
     "Account",
@@ -72,10 +70,10 @@ class Balance:
     asset: str
     """Asset symbol, e.g. 'USDT'."""
 
-    free: Decimal = Decimal("0")
+    free: Decimal = Decimal(0)
     """Available (unlocked) balance."""
 
-    locked: Decimal = Decimal("0")
+    locked: Decimal = Decimal(0)
     """Locked (in orders) balance."""
 
     @property
@@ -114,16 +112,16 @@ class Account:
     balances: dict[str, Balance] = field(default_factory=dict)
     """Mapping of asset symbol to Balance."""
 
-    total_usdt: Decimal = Decimal("0")
+    total_usdt: Decimal = Decimal(0)
     """Total account value in USDT terms."""
 
     timestamp: int = 0
     """Snapshot timestamp in unix milliseconds."""
 
     max_leverage: int = 1
-    total_wallet_balance: Decimal = Decimal("0")
-    total_margin_balance: Decimal = Decimal("0")
-    available_balance: Decimal = Decimal("0")
+    total_wallet_balance: Decimal = Decimal(0)
+    total_margin_balance: Decimal = Decimal(0)
+    available_balance: Decimal = Decimal(0)
     positions: list[FuturesPosition] = field(default_factory=list)
 
 
@@ -143,28 +141,28 @@ class Position:
     side: PositionSide = PositionSide.LONG
     """Position side: LONG or SHORT."""
 
-    quantity: Decimal = Decimal("0")
+    quantity: Decimal = Decimal(0)
     """Number of contracts."""
 
-    entry_price: Decimal = Decimal("0")
+    entry_price: Decimal = Decimal(0)
     """Average entry price per contract."""
 
-    current_price: Decimal = Decimal("0")
+    current_price: Decimal = Decimal(0)
     """Current mark price of the contract."""
 
-    unrealized_pnl: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal(0)
     """Unrealized profit/loss."""
 
-    realized_pnl: Decimal = Decimal("0")
+    realized_pnl: Decimal = Decimal(0)
     """Realized profit/loss from closed portions."""
 
     leverage: int = 1
     margin_type: MarginType = MarginType.ISOLATED
     position_side: FuturesPositionSide = FuturesPositionSide.LONG
-    liquidation_price: Decimal = Decimal("0")
-    initial_margin: Decimal = Decimal("0")
-    maintenance_margin: Decimal = Decimal("0")
-    funding_paid: Decimal = Decimal("0")
+    liquidation_price: Decimal = Decimal(0)
+    initial_margin: Decimal = Decimal(0)
+    maintenance_margin: Decimal = Decimal(0)
+    funding_paid: Decimal = Decimal(0)
 
     status: PositionStatus = PositionStatus.OPEN
     """Position status: OPEN, CLOSED, or LIQUIDATED."""
@@ -181,10 +179,10 @@ class Position:
     take_profit_order_id: str = ""
     """Exchange order ID for the take-profit order."""
 
-    stop_loss_price: Decimal = Decimal("0")
+    stop_loss_price: Decimal = Decimal(0)
     """Stop-loss trigger price."""
 
-    take_profit_price: Decimal = Decimal("0")
+    take_profit_price: Decimal = Decimal(0)
     """Take-profit target price."""
 
 
@@ -207,10 +205,10 @@ class Order:
     order_type: str = ""
     """Order type: LIMIT, MARKET, STOP_LOSS, etc."""
 
-    quantity: Decimal = Decimal("0")
+    quantity: Decimal = Decimal(0)
     """Requested order quantity."""
 
-    filled_qty: Decimal = Decimal("0")
+    filled_qty: Decimal = Decimal(0)
     """Quantity filled so far."""
 
     price: Decimal | None = None
@@ -249,7 +247,7 @@ class OrderRequest:
     order_type: str = ""
     """Order type: LIMIT, MARKET, STOP_LOSS, etc."""
 
-    quantity: Decimal = Decimal("0")
+    quantity: Decimal = Decimal(0)
     """Order quantity in contracts."""
 
     price: Decimal | None = None
@@ -294,10 +292,10 @@ class OrderResult:
     order_type: str = ""
     """Order type."""
 
-    quantity: Decimal = Decimal("0")
+    quantity: Decimal = Decimal(0)
     """Requested quantity."""
 
-    filled_qty: Decimal = Decimal("0")
+    filled_qty: Decimal = Decimal(0)
     """Filled quantity."""
 
     price: Decimal | None = None
@@ -329,16 +327,16 @@ class Trade:
     side: str = ""
     """Trade side: BUY or SELL."""
 
-    quantity: Decimal = Decimal("0")
+    quantity: Decimal = Decimal(0)
     """Traded quantity."""
 
-    price: Decimal = Decimal("0")
+    price: Decimal = Decimal(0)
     """Execution price."""
 
-    fee: Decimal = Decimal("0")
+    fee: Decimal = Decimal(0)
     """Trading fee."""
 
-    pnl: Decimal = Decimal("0")
+    pnl: Decimal = Decimal(0)
     """Realized profit/loss from this trade."""
 
     timestamp: int = 0

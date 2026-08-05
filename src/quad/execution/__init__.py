@@ -14,9 +14,9 @@ from .twap import TwapSlicer
 
 __all__ = [
     "ExecutionEngine",
+    "FillReconciler",
     "OrderGateway",
     "OrderRejectedError",
     "OrderTimeoutError",
     "TwapSlicer",
-    "FillReconciler",
 ]

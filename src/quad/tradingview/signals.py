@@ -117,7 +117,7 @@ class TradingViewSignal:
 
 def convert_to_action(
     parsed: dict[str, Any],
-    default_quantity: Decimal = Decimal("1"),
+    default_quantity: Decimal = Decimal(1),
 ) -> TradingViewSignal | None:
     """Convert a parsed TradingView alert into a ``TradingViewSignal``.
 

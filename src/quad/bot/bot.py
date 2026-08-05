@@ -18,17 +18,14 @@ from typing import Any
 import structlog
 from telegram import Update
 from telegram.error import Conflict, TelegramError
-from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
 )
+from telegram.request import HTTPXRequest
 
 from .commands import QuadBotCommands
 from .jobs import QuadBotJobs

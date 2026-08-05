@@ -13,7 +13,7 @@ import time
 from decimal import Decimal
 from typing import Any
 
-from quad.strategy.base import StrategyBase, ParamSpec
+from quad.strategy.base import ParamSpec, StrategyBase
 from quad.types.risk import Action
 from quad.types.strategy import StrategyContext
 

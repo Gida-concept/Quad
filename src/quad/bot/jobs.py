@@ -13,6 +13,8 @@ from typing import Any
 import structlog
 from telegram.ext import ContextTypes
 
+from quad.risk.gates import effective_min_liquidation_distance
+
 # ---------------------------------------------------------------------------
 # Logger
 # ---------------------------------------------------------------------------
@@ -97,7 +99,7 @@ class QuadBotJobs:
         """
         # Gather status
         position_count = 0
-        daily_pnl = Decimal("0")
+        daily_pnl = Decimal(0)
         circuit_breakers_active = 0
 
         if self._risk_manager:
@@ -187,7 +189,7 @@ class QuadBotJobs:
         Scheduled at the configured time (default 23:00 UTC).
         Includes daily PnL, trade count, position count, and risk status.
         """
-        daily_pnl = Decimal("0")
+        daily_pnl = Decimal(0)
         position_count = 0
         trade_count = 0
         circuit_breakers_active = 0
@@ -375,10 +377,6 @@ class QuadBotJobs:
             if exchange_adapter is None:
                 return
 
-            min_distance = float(
-                self._config["risk"]["min_distance_to_liquidation_pct"]
-            )
-
             positions = await exchange_adapter.get_positions()
             if not positions:
                 return
@@ -391,6 +389,12 @@ class QuadBotJobs:
                     continue
 
                 distance = abs(mark - liq) / mark
+                min_distance = float(
+                    effective_min_liquidation_distance(
+                        self._config["risk"],
+                        getattr(pos, "leverage", None),
+                    )
+                )
                 if distance < min_distance:
                     symbol = getattr(pos, "symbol", getattr(pos, "contract_symbol", "?"))
                     raw_side = getattr(pos, "position_side", getattr(pos, "side", "?"))

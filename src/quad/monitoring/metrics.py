@@ -99,7 +99,7 @@ class MetricsCollector:
             if labels:
                 self._counter_labels[name] = labels
 
-    def observe_histogram(self, name: str, value: int | float, labels: dict[str, str] | None = None) -> None:
+    def observe_histogram(self, name: str, value: float, labels: dict[str, str] | None = None) -> None:
         """Record a histogram observation.
 
         Old observations beyond ``max_observations`` are automatically

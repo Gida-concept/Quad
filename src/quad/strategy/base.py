@@ -7,16 +7,16 @@ for discovery and access.
 
 from __future__ import annotations
 
-import structlog
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
+
+import structlog
 
 from quad.types.domain import FuturesPositionSide
 from quad.types.risk import Action
 from quad.types.strategy import StrategyContext
-
 
 logger = structlog.get_logger(__name__)
 
@@ -59,7 +59,7 @@ class StrategyBase(ABC):
     get_description(), and get_params_spec().
     """
 
-    registry: dict[str, type["StrategyBase"]] = {}
+    registry: dict[str, type[StrategyBase]] = {}
 
     # ---- Auto-registration via __init_subclass__ ----
 
@@ -70,7 +70,7 @@ class StrategyBase(ABC):
             StrategyBase._register(cls)
 
     @classmethod
-    def _register(cls, strategy_cls: type["StrategyBase"]) -> None:
+    def _register(cls, strategy_cls: type[StrategyBase]) -> None:
         """Register a strategy class under its canonical name."""
         try:
             name = strategy_cls.get_name()
@@ -284,7 +284,7 @@ class StrategyBase(ABC):
         try:
             return Decimal(str(value))
         except (ValueError, TypeError):
-            return Decimal("0")
+            return Decimal(0)
 
     @staticmethod
     def _to_dict(obj: Any) -> dict[str, Any]:

@@ -38,7 +38,6 @@ import json
 import os
 import time
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -57,10 +56,9 @@ from quad.types.domain import (
     OrderResult,
     Position,
     PositionSide,
-    PositionStatus,
 )
 from quad.types.exchange import AccountUpdate
-from quad.types.market import FundingRate, FuturesContract
+from quad.types.market import FundingRate
 
 logger = structlog.get_logger(__name__)
 
@@ -436,7 +434,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         """
         # Get latest funding rate from premiumIndex (includes mark/ index price)
         premium = await self._request(
-            "GET", f"/fapi/v1/premiumIndex", signed=False,
+            "GET", "/fapi/v1/premiumIndex", signed=False,
             data={"symbol": symbol},
         )
         return FundingRate(
@@ -1495,7 +1493,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                 id=f"binance-{self._api_key[:8]}",
                 exchange="binance",
                 balances=account_balances,
-                total_usdt=Decimal("0"),
+                total_usdt=Decimal(0),
                 timestamp=int(data.get("E", 0)),
             )
 
@@ -1544,7 +1542,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             return None
 
         pos_amt = Decimal(str(entry.get("positionAmt", "0")))
-        if pos_amt == Decimal("0"):
+        if pos_amt == Decimal(0):
             return None
 
         side_str = "LONG" if pos_amt > 0 else "SHORT"

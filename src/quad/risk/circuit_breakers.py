@@ -12,15 +12,14 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from decimal import Decimal
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import structlog
 
 from quad.types.risk import CircuitBreakerStatus
 from quad.types.strategy import StrategyContext
-
 
 # ---------------------------------------------------------------------------
 # Internal breaker state
@@ -39,14 +38,14 @@ class _CircuitBreaker:
     auto_reset: bool = True
 
     # Tier-specific configuration
-    threshold: Decimal = Decimal("0")
-    hysteresis: Decimal = Decimal("0")
+    threshold: Decimal = Decimal(0)
+    hysteresis: Decimal = Decimal(0)
     max_consecutive: int = 0
 
     # Runtime tracking
     consecutive_losses: int = 0
     last_utc_day: int = 0
-    peak_value: Decimal = Decimal("0")
+    peak_value: Decimal = Decimal(0)
 
     # Funding rate spike tracking (FUNDING_RATE_SPIKE_BREAKER)
     funding_spike_counts: dict[str, int] = field(default_factory=dict)
@@ -129,16 +128,16 @@ class CircuitBreakerManager:
             daily_pnl = (
                 context.risk_status.daily_pnl
                 if context.risk_status
-                else Decimal("0")
+                else Decimal(0)
             )
             drawdown_pct = (
                 context.risk_status.drawdown_percent
                 if context.risk_status
-                else Decimal("0")
+                else Decimal(0)
             )
 
             portfolio_value = (
-                context.account.total_usdt if context.account else Decimal("0")
+                context.account.total_usdt if context.account else Decimal(0)
             )
 
             self._check_daily_loss(daily_pnl)
@@ -161,23 +160,22 @@ class CircuitBreakerManager:
         """
         async with self._lock:
             portfolio_value = (
-                context.account.total_usdt if context.account else Decimal("0")
+                context.account.total_usdt if context.account else Decimal(0)
             )
             daily_pnl = (
                 context.risk_status.daily_pnl
                 if context.risk_status
-                else Decimal("0")
+                else Decimal(0)
             )
             drawdown_pct = (
                 context.risk_status.drawdown_percent
                 if context.risk_status
-                else Decimal("0")
+                else Decimal(0)
             )
 
             # Update peak for drawdown calculation
             dd_breaker = self._breakers[DRAWDOWN_BREAKER]
-            if portfolio_value > dd_breaker.peak_value:
-                dd_breaker.peak_value = portfolio_value
+            dd_breaker.peak_value = max(dd_breaker.peak_value, portfolio_value)
 
             # Track consecutive losses from trades in context
             self._update_consecutive_losses(context)
@@ -330,8 +328,7 @@ class CircuitBreakerManager:
         max_dd_dec = Decimal(str(max_dd))
 
         # Update peak
-        if portfolio_value > breaker.peak_value:
-            breaker.peak_value = portfolio_value
+        breaker.peak_value = max(breaker.peak_value, portfolio_value)
 
         if breaker.active:
             # Auto-reset: drawdown recovered to (max_dd - hysteresis)
@@ -387,7 +384,6 @@ class CircuitBreakerManager:
 
     def _check_kill_switch(self) -> None:
         """Tier 4: Only manual reset. No auto-reset logic needed here."""
-        pass
 
     def _check_liquidation_cascade(self, context: StrategyContext) -> None:
         """Tier 1: Flag if any position is dangerously close to liquidation.
@@ -551,15 +547,14 @@ class CircuitBreakerManager:
         daily_pnl = (
             context.risk_status.daily_pnl
             if context.risk_status
-            else Decimal("0")
+            else Decimal(0)
         )
 
-        if daily_pnl < Decimal("0"):
+        if daily_pnl < Decimal(0):
             if breaker.consecutive_losses < 100:  # prevent overflow
                 breaker.consecutive_losses += 1
         else:
-            if breaker.consecutive_losses > 0:
-                breaker.consecutive_losses = 0
+            breaker.consecutive_losses = min(breaker.consecutive_losses, 0)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -580,14 +575,14 @@ class CircuitBreakerManager:
                 tier=1,
                 auto_reset=True,
                 threshold=Decimal(str(self._cfg["max_daily_loss_usd"])),
-                hysteresis=Decimal("0"),
+                hysteresis=Decimal(0),
             ),
             DRAWDOWN_BREAKER: _CircuitBreaker(
                 name=DRAWDOWN_BREAKER,
                 tier=2,
                 auto_reset=True,
                 threshold=Decimal(str(self._cfg["max_drawdown_pct"])),
-                hysteresis=Decimal("5"),  # 5% hysteresis for recovery
+                hysteresis=Decimal(5),  # 5% hysteresis for recovery
             ),
             CONSECUTIVE_LOSS_BREAKER: _CircuitBreaker(
                 name=CONSECUTIVE_LOSS_BREAKER,

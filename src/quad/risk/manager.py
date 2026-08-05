@@ -12,14 +12,14 @@ from typing import Any
 
 import structlog
 
+from quad.persistence.database import DatabaseManager
 from quad.types.risk import Action, RiskResult, RiskStatus
 from quad.types.strategy import StrategyContext
-from quad.persistence.database import DatabaseManager
 
-from .gates import GatePipeline
 from .circuit_breakers import CircuitBreakerManager
-from .sizing import PositionSizer
 from .exposure import FuturesPositionTracker
+from .gates import GatePipeline
+from .sizing import PositionSizer
 
 
 class RiskManager:
@@ -182,9 +182,9 @@ class RiskManager:
         cb_status = self._breakers.status()
         gate_status = self._gates.get_gate_status()
 
-        drawdown = Decimal("0")
-        daily_pnl = Decimal("0")
-        daily_loss_limit = Decimal("500")
+        drawdown = Decimal(0)
+        daily_pnl = Decimal(0)
+        daily_loss_limit = Decimal(500)
 
         return RiskStatus(
             drawdown_percent=drawdown,

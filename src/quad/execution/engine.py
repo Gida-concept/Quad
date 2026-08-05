@@ -565,7 +565,7 @@ class ExecutionEngine:
           order the exchange would reject (-1113 / -1111 / -4164).
         """
         qty = action.quantity
-        if qty is None or qty <= Decimal("0"):
+        if qty is None or qty <= Decimal(0):
             raise RuntimeError(
                 f"order quantity is zero/negative after sizing ({qty}); refusing"
             )
@@ -573,7 +573,7 @@ class ExecutionEngine:
         # The pre-cap (original requested quantity before risk sizing) may be
         # passed explicitly (engine-evaluated paths) or recorded upstream by
         # the orchestrator on a pre-sized action (AI path).
-        if pre_cap is None or pre_cap <= Decimal("0"):
+        if pre_cap is None or pre_cap <= Decimal(0):
             raw_pre_cap = action.metadata.get("pre_size_quantity")
             if raw_pre_cap is not None:
                 try:
@@ -584,16 +584,16 @@ class ExecutionEngine:
         symbol = action.contract or action.symbol
         try:
             return await self._exchange_adapter.normalize_quantity(symbol, qty)
-        except Exception as exc:
+        except Exception:
             # Floor a sub-minQty sized quantity up to minQty, but only when it
             # does not exceed the pre-cap (the original requested quantity).
-            if pre_cap is not None and pre_cap > Decimal("0"):
+            if pre_cap is not None and pre_cap > Decimal(0):
                 try:
                     filters = await self._exchange_adapter.get_symbol_filters(symbol)
-                    min_qty = filters.get("min_qty", Decimal("0"))
+                    min_qty = filters.get("min_qty", Decimal(0))
                 except Exception:
-                    min_qty = Decimal("0")
-                if min_qty > Decimal("0") and min_qty <= pre_cap:
+                    min_qty = Decimal(0)
+                if min_qty > Decimal(0) and min_qty <= pre_cap:
                     self._log.info(
                         "order_quantity_floored_to_min_qty",
                         symbol=symbol,

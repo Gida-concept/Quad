@@ -10,14 +10,19 @@ from __future__ import annotations
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import aiosqlite
 import structlog
 
-from .models import ALL_MODELS, INDEX_DEFINITIONS, SCHEMA_MIGRATIONS, SCHEMA_VERSION, SCHEMA_VERSION_TABLE_DDL
+from .models import (
+    ALL_MODELS,
+    INDEX_DEFINITIONS,
+    SCHEMA_MIGRATIONS,
+    SCHEMA_VERSION,
+    SCHEMA_VERSION_TABLE_DDL,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -305,32 +310,31 @@ class DatabaseManager:
         pool = self._pool
         assert pool is not None
 
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                # Create schema version table first (needed by migrate)
-                await conn.execute(SCHEMA_VERSION_TABLE_DDL)
-                self._log.debug("schema_version_table_ensured")
+        async with pool.acquire() as conn, conn.transaction():
+            # Create schema version table first (needed by migrate)
+            await conn.execute(SCHEMA_VERSION_TABLE_DDL)
+            self._log.debug("schema_version_table_ensured")
 
-                # Create tables
-                for model_cls in ALL_MODELS:
-                    ddl = model_cls.create_table_ddl()
-                    try:
-                        await conn.execute(ddl)
-                        self._log.debug("table_created", table=model_cls.__tablename__)
-                    except Exception:
-                        self._log.exception(
-                            "table_create_failed",
-                            table=model_cls.__tablename__,
-                        )
-                        raise
+            # Create tables
+            for model_cls in ALL_MODELS:
+                ddl = model_cls.create_table_ddl()
+                try:
+                    await conn.execute(ddl)
+                    self._log.debug("table_created", table=model_cls.__tablename__)
+                except Exception:
+                    self._log.exception(
+                        "table_create_failed",
+                        table=model_cls.__tablename__,
+                    )
+                    raise
 
-                # Create indexes
-                for idx_ddl in INDEX_DEFINITIONS:
-                    try:
-                        await conn.execute(idx_ddl)
-                    except Exception:
-                        self._log.exception("index_create_failed", index=idx_ddl)
-                        raise
+            # Create indexes
+            for idx_ddl in INDEX_DEFINITIONS:
+                try:
+                    await conn.execute(idx_ddl)
+                except Exception:
+                    self._log.exception("index_create_failed", index=idx_ddl)
+                    raise
 
         self._log.info(
             "initialized",

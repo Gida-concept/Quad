@@ -60,8 +60,8 @@ class MockAdapter(ExchangeAdapter):
         self._account: Account = account or Account(
             id="mock-account",
             exchange="mock",
-            balances={"USDT": Balance(asset="USDT", free=Decimal("100000"))},
-            total_usdt=Decimal("100000"),
+            balances={"USDT": Balance(asset="USDT", free=Decimal(100000))},
+            total_usdt=Decimal(100000),
             timestamp=0,
         )
         self._positions: list[Position] = positions or []
@@ -141,8 +141,8 @@ class MockAdapter(ExchangeAdapter):
             symbol=symbol,
             funding_rate=Decimal("0.0001"),
             next_funding_time=0,
-            mark_price=Decimal("50000"),
-            index_price=Decimal("50000"),
+            mark_price=Decimal(50000),
+            index_price=Decimal(50000),
         )
 
     async def get_mark_price(self, symbol: str) -> Decimal:
@@ -158,7 +158,7 @@ class MockAdapter(ExchangeAdapter):
         mp = self._futures_data.get("mark_prices", {}).get(symbol)
         if mp is not None:
             return Decimal(str(mp))
-        return Decimal("50000")
+        return Decimal(50000)
 
     # ------------------------------------------------------------------
     # REST — Order Management
@@ -191,7 +191,7 @@ class MockAdapter(ExchangeAdapter):
             fills.append(
                 {
                     "qty": str(request.quantity),
-                    "price": str(request.price or Decimal("0")),
+                    "price": str(request.price or Decimal(0)),
                     "commission": "0",
                     "commissionAsset": "USDT",
                 }
@@ -204,7 +204,7 @@ class MockAdapter(ExchangeAdapter):
             side=request.side,
             order_type=request.order_type,
             quantity=request.quantity,
-            filled_qty=request.quantity if status == "FILLED" else Decimal("0"),
+            filled_qty=request.quantity if status == "FILLED" else Decimal(0),
             price=request.price,
             status=status,
             time_in_force=request.time_in_force,

@@ -6,17 +6,13 @@ Built on Typer.  Most commands are async and use asyncio.run() internally.
 
 from __future__ import annotations
 
-import asyncio
 import time as _time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 import typer
-
-from quad.types.domain import Position, Trade
-from quad.types.risk import Action, RiskStatus
 
 # ---------------------------------------------------------------------------
 # Logger
@@ -199,6 +195,7 @@ def risk(
     print(f"  Max Daily Loss:            ${risk_config['max_daily_loss_usd']}")
     print(f"  Max Drawdown:              {risk_config['max_drawdown_pct']}%")
     print(f"  Min Liquidation Distance:  {float(risk_config['min_distance_to_liquidation_pct']):.0%}")
+    print(f"  Liquidation Warn Fraction: {float(risk_config.get('liquidation_distance_fraction', 0.5)):.0%} of 1/leverage distance")
     print(f"  Max Funding Rate Cost:     {float(risk_config['max_funding_rate_cost']):.4%}")
     print(f"  Max Position Concentration: {risk_config['max_position_concentration']:.0%}")
     print("=" * 50)

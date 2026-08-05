@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -103,7 +102,6 @@ class MarketContext:
 
 async def close_http_session() -> None:
     """No-op kept for backward compatibility."""
-    pass
 
 
 async def _fetch_klines(
@@ -370,7 +368,7 @@ async def collect_market_context(
             try:
                 contract = FuturesContract(
                     symbol=pair,
-                    mark_price=Decimal(str(mp)) if mp else Decimal("0"),
+                    mark_price=Decimal(str(mp)) if mp else Decimal(0),
                     last_price=Decimal(str(ticker.get("lastPrice", 0))),
                     volume_24h=Decimal(str(ticker.get("volume", 0))),
                     price_change_24h=Decimal(str(ticker.get("priceChange", 0))),

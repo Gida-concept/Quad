@@ -9,11 +9,35 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 
 import structlog
 
 VERSION = "0.1.0"
+
+
+class _TokenRedactionFilter(logging.Filter):
+    """Redact Telegram bot tokens from emitted log records.
+
+    python-telegram-bot's httpx/httpcore transport logs the full request
+    URL at INFO, which includes the bot token in the path
+    (``/bot<token>/<method>``).  This filter scrubs any ``/bot<id>:<secret>``
+    pattern from the formatted message before it reaches stdout.
+    """
+
+    _TOKEN_RE = re.compile(r"/bot\d{5,}:[A-Za-z0-9_-]{20,}")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+            if "bot" in message and self._TOKEN_RE.search(message):
+                record.msg = self._TOKEN_RE.sub("/bot***REDACTED***", message)
+                record.args = ()
+        except Exception:
+            # Redaction must never break logging.
+            pass
+        return True
 
 
 def _configure_logging() -> None:
@@ -58,6 +82,14 @@ def _configure_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
+    # Silent HTTP client loggers that emit full request URLs at INFO.
+    # httpx/httpcore (used by python-telegram-bot and the Groq SDK) log
+    # ``HTTP Request: POST https://api.telegram.org/bot<token>/...`` which
+    # leaks the bot token into every log line.  Keep them at WARNING+; the
+    # redaction filter below is defense in depth for any other logger.
+    for _noisy_logger in ("httpx", "httpcore"):
+        logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
     # Explicitly attach a StreamHandler to the root logger so INFO+ records
     # reach stdout. structlog's stdlib LoggerFactory delegates to the stdlib
     # ``logging`` module, but without a handler stdlib only has the
@@ -72,6 +104,7 @@ def _configure_logging() -> None:
     handler = logging.StreamHandler(stream=sys.stdout)
     handler.setLevel(log_level)
     handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(_TokenRedactionFilter())
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
     root_logger.addHandler(handler)

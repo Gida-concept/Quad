@@ -7,16 +7,21 @@ for creating and discovering strategy instances.
 
 from __future__ import annotations
 
-from quad.strategy.base import StrategyBase, StrategyRegistry, ParamSpec
-from quad.strategy.factory import get_strategy, list_strategies, create_default_strategies
-from quad.strategy.trend_following import TrendFollowingStrategy  # noqa: F401  # side-effect import to trigger __init_subclass__ registration
-
+from quad.strategy.base import ParamSpec, StrategyBase, StrategyRegistry
+from quad.strategy.factory import (
+    create_default_strategies,
+    get_strategy,
+    list_strategies,
+)
+from quad.strategy.trend_following import (
+    TrendFollowingStrategy,  # noqa: F401  # side-effect import to trigger __init_subclass__ registration
+)
 
 __all__ = [
+    "ParamSpec",
     "StrategyBase",
     "StrategyRegistry",
-    "ParamSpec",
+    "create_default_strategies",
     "get_strategy",
     "list_strategies",
-    "create_default_strategies",
 ]

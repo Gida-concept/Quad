@@ -78,7 +78,7 @@ async def analyze_market(
     if positions:
         pos_count = len(positions)
         pos_pnl = sum(
-            float(getattr(p, "unrealized_pnl", Decimal("0")))
+            float(getattr(p, "unrealized_pnl", Decimal(0)))
             for p in positions
         )
         position_summary = (

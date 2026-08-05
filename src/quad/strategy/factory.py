@@ -13,7 +13,6 @@ import structlog
 
 from quad.strategy.base import StrategyBase, StrategyRegistry
 
-
 logger = structlog.get_logger(__name__)
 
 

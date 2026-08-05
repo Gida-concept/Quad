@@ -13,26 +13,25 @@ import asyncio
 import copy
 import json
 import time
-from decimal import Decimal
 from typing import Any
 
 import structlog
 
-from quad.config.schema import AiConfig, QuadConfig
 from quad.ai.groq import GroqClient
 from quad.ai.prompt import build_optimization_prompt
+from quad.config.schema import QuadConfig
 from quad.persistence.models import (
     ConfigChangeModel,
-    OptimizationRunModel,
     OptimizationRecommendationModel,
+    OptimizationRunModel,
 )
 from quad.persistence.repositories import (
     ConfigChangeRepository,
     DecisionRepository,
-    TradeRepository,
-    PerformanceSnapshotRepository,
-    OptimizationRunRepository,
     OptimizationRecommendationRepository,
+    OptimizationRunRepository,
+    PerformanceSnapshotRepository,
+    TradeRepository,
 )
 
 logger = structlog.get_logger(__name__)

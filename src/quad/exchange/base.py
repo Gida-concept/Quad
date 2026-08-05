@@ -11,22 +11,19 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
-from typing import Any
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
 import structlog
 
 from quad.types.domain import (
     Account,
-    FuturesPosition,
-    FuturesPositionSide,
     Order,
     OrderRequest,
     OrderResult,
     Position,
 )
 from quad.types.exchange import AccountUpdate
-from quad.types.market import FundingRate, FuturesContract
+from quad.types.market import FundingRate
 
 log = structlog.get_logger(__name__)
 
@@ -293,13 +290,13 @@ class ExchangeAdapter(ABC):
                 available for the symbol.
         """
         qty = Decimal(str(quantity))
-        if qty <= Decimal("0"):
+        if qty <= Decimal(0):
             return qty
 
         step_size, min_qty, min_notional = await self._get_lot_filters(symbol)
 
         # Round DOWN to stepSize (never up).
-        if step_size > Decimal("0"):
+        if step_size > Decimal(0):
             qty = (qty / step_size).to_integral_value(rounding=ROUND_DOWN) * step_size
             try:
                 qty = qty.quantize(step_size, rounding=ROUND_DOWN)
@@ -316,14 +313,14 @@ class ExchangeAdapter(ABC):
             )
 
         # Below minNotional -> the exchange would reject with -4164.
-        if min_notional > Decimal("0"):
+        if min_notional > Decimal(0):
             px = price
             if px is None:
                 try:
                     px = await self.get_mark_price(symbol)
                 except Exception:
                     px = None  # cannot verify notional; minQty check still applied
-            if px is not None and px > Decimal("0"):
+            if px is not None and px > Decimal(0):
                 notional = qty * px
                 if notional < min_notional:
                     raise RuntimeError(
@@ -363,7 +360,7 @@ class ExchangeAdapter(ABC):
             return cached[1]
 
         info = await self.get_exchange_info()
-        step = min_qty = min_notional = Decimal("0")
+        step = min_qty = min_notional = Decimal(0)
         found = False
         for s in info.get("symbols", []):
             if s.get("symbol") != symbol:

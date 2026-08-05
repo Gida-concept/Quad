@@ -60,8 +60,9 @@ read are ``predicted_direction``, ``confidence``, and ``outcome``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
 #: Outcomes that count as a resolved directional bet (used in every metric).
 _DIRECTIONAL_OUTCOMES: frozenset[str] = frozenset({"win", "loss"})

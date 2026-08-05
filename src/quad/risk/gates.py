@@ -11,13 +11,13 @@ and correlation checks.
 
 from __future__ import annotations
 
-import structlog
 from decimal import Decimal
 from typing import Any
 
+import structlog
+
 from quad.types.risk import Action, RiskResult
 from quad.types.strategy import StrategyContext
-
 
 # ---------------------------------------------------------------------------
 # Gate names (constants for consistency)
@@ -44,6 +44,31 @@ ALL_GATES = [
     POSITION_CONCENTRATION_GATE,
     CORRELATION_GATE,
 ]
+
+
+def effective_min_liquidation_distance(
+    risk_cfg: dict[str, Any],
+    leverage: int | None = None,
+) -> Decimal:
+    """Return the leverage-aware minimum distance-to-liquidation threshold.
+
+    A flat percentage threshold is wrong for leveraged isolated positions:
+    at Nx leverage the liquidation price sits roughly ``1/N`` away from the
+    entry price (plus maintenance margin), so a 20% threshold trips
+    permanently at 50x where the real distance is only ~2%.
+
+    The effective threshold is the smaller of:
+    - ``min_distance_to_liquidation_pct`` — the configured absolute cap, and
+    - ``liquidation_distance_fraction / leverage`` — a fraction of the raw
+      ``1/leverage`` distance to liquidation (default 0.5 → warn/block when
+      the position is within half of its theoretical liquidation distance).
+
+    When no leverage is known the configured cap is used unchanged.
+    """
+    configured = Decimal(str(risk_cfg.get("min_distance_to_liquidation_pct", 0.2)))
+    fraction = Decimal(str(risk_cfg.get("liquidation_distance_fraction", 0.5)))
+    lev = max(1, int(leverage or 1))
+    return min(configured, fraction / Decimal(lev))
 
 # ---------------------------------------------------------------------------
 # Helper: identify entry actions
@@ -205,9 +230,9 @@ class GatePipeline:
         """Gate: reject if total notional exposure exceeds portfolio risk %."""
         max_risk_pct = Decimal(str(self._cfg["max_portfolio_risk_pct"]))
         portfolio_value = (
-            context.account.total_usdt if context.account else Decimal("0")
+            context.account.total_usdt if context.account else Decimal(0)
         )
-        if portfolio_value <= Decimal("0"):
+        if portfolio_value <= Decimal(0):
             return RiskResult(
                 passed=True,
                 gate=PORTFOLIO_RISK_GATE,
@@ -215,7 +240,7 @@ class GatePipeline:
             )
 
         # Sum absolute notional values from existing futures positions
-        total_notional = Decimal("0")
+        total_notional = Decimal(0)
         for pos in context.futures_positions or []:
             size = Decimal(str(abs(pos.size)))
             mark_price = Decimal(str(pos.mark_price))
@@ -226,7 +251,7 @@ class GatePipeline:
             proposed_notional = abs(action.quantity)
             total_notional += proposed_notional
 
-        risk_pct = (total_notional / portfolio_value) * Decimal("100")
+        risk_pct = (total_notional / portfolio_value) * Decimal(100)
 
         if risk_pct > max_risk_pct:
             return RiskResult(
@@ -257,7 +282,7 @@ class GatePipeline:
         daily_pnl = (
             context.risk_status.daily_pnl
             if context.risk_status
-            else Decimal("0")
+            else Decimal(0)
         )
 
         if daily_pnl < -max_loss:
@@ -287,7 +312,7 @@ class GatePipeline:
         current_dd = (
             context.risk_status.drawdown_percent
             if context.risk_status
-            else Decimal("0")
+            else Decimal(0)
         )
 
         if current_dd > max_dd_pct:
@@ -323,12 +348,15 @@ class GatePipeline:
         If distance < min_distance_to_liquidation_pct, the position is
         considered at risk and no new trades are permitted.
         """
-        min_distance = Decimal(str(self._cfg["min_distance_to_liquidation_pct"]))
-
         near_liquidation: list[dict[str, Any]] = []
         for pos in context.futures_positions or []:
             if pos.liquidation_price <= 0 or pos.mark_price <= 0:
                 continue
+
+            min_distance = effective_min_liquidation_distance(
+                self._cfg,
+                getattr(pos, "leverage", None),
+            )
 
             if pos.position_side.value == "long":
                 distance = (
@@ -358,7 +386,7 @@ class GatePipeline:
                 ),
                 details={
                     "near_liquidation": near_liquidation,
-                    "min_distance_pct": str(min_distance * Decimal("100")),
+                    "min_distance_pct": str(min_distance * Decimal(100)),
                 },
             )
         return RiskResult(
@@ -388,7 +416,7 @@ class GatePipeline:
             )
 
         position_value = abs(action.quantity)
-        if position_value <= Decimal("0"):
+        if position_value <= Decimal(0):
             return RiskResult(
                 passed=True,
                 gate=FUNDING_RATE_COST_GATE,
@@ -405,7 +433,7 @@ class GatePipeline:
             )
 
         funding_rate = abs(Decimal(str(fr_entry.funding_rate)))
-        if funding_rate <= Decimal("0"):
+        if funding_rate <= Decimal(0):
             return RiskResult(
                 passed=True,
                 gate=FUNDING_RATE_COST_GATE,
@@ -461,9 +489,9 @@ class GatePipeline:
         wallet_balance = (
             context.account.total_wallet_balance
             if context.account
-            else Decimal("0")
+            else Decimal(0)
         )
-        if wallet_balance <= Decimal("0"):
+        if wallet_balance <= Decimal(0):
             return RiskResult(
                 passed=True,
                 gate=LEVERAGE_LIMIT_GATE,
@@ -471,7 +499,7 @@ class GatePipeline:
             )
 
         # Compute current total notional
-        total_notional = Decimal("0")
+        total_notional = Decimal(0)
         for pos in context.futures_positions or []:
             size = Decimal(str(abs(pos.size)))
             mark_price = Decimal(str(pos.mark_price))
@@ -517,9 +545,9 @@ class GatePipeline:
         """
         max_conc = Decimal(str(self._cfg["max_position_concentration"]))
         portfolio_value = (
-            context.account.total_usdt if context.account else Decimal("0")
+            context.account.total_usdt if context.account else Decimal(0)
         )
-        if portfolio_value <= Decimal("0"):
+        if portfolio_value <= Decimal(0):
             return RiskResult(
                 passed=True,
                 gate=POSITION_CONCENTRATION_GATE,
@@ -534,14 +562,14 @@ class GatePipeline:
             mark_price = Decimal(str(pos.mark_price))
             notional = size * mark_price
             notional_by_symbol[sym] = (
-                notional_by_symbol.get(sym, Decimal("0")) + notional
+                notional_by_symbol.get(sym, Decimal(0)) + notional
             )
 
         # Add proposed position notional for entry actions
         target_symbol = action.symbol
-        if _is_entry(action.type) and action.quantity > Decimal("0"):
+        if _is_entry(action.type) and action.quantity > Decimal(0):
             notional_by_symbol[target_symbol] = (
-                notional_by_symbol.get(target_symbol, Decimal("0"))
+                notional_by_symbol.get(target_symbol, Decimal(0))
                 + abs(action.quantity)
             )
 
@@ -550,12 +578,12 @@ class GatePipeline:
         violations: list[dict[str, Any]] = []
         for sym, notional in notional_by_symbol.items():
             if notional > limit_value:
-                conc_pct = (notional / portfolio_value) * Decimal("100")
+                conc_pct = (notional / portfolio_value) * Decimal(100)
                 violations.append({
                     "symbol": sym,
                     "notional": str(notional.quantize(Decimal("0.01"))),
                     "concentration_pct": str(conc_pct.quantize(Decimal("0.01"))),
-                    "limit_pct": str((max_conc * Decimal("100")).quantize(Decimal("0.01"))),
+                    "limit_pct": str((max_conc * Decimal(100)).quantize(Decimal("0.01"))),
                 })
 
         if violations:
@@ -582,9 +610,9 @@ class GatePipeline:
         """
         threshold_pct = Decimal(str(self._cfg["correlation_threshold_pct"]))
         portfolio_value = (
-            context.account.total_usdt if context.account else Decimal("0")
+            context.account.total_usdt if context.account else Decimal(0)
         )
-        if portfolio_value <= Decimal("0"):
+        if portfolio_value <= Decimal(0):
             return RiskResult(
                 passed=True,
                 gate=CORRELATION_GATE,
@@ -600,22 +628,22 @@ class GatePipeline:
             mark_price = Decimal(str(pos.mark_price))
             notional = size * mark_price
             notional_by_quote[quote] = (
-                notional_by_quote.get(quote, Decimal("0")) + notional
+                notional_by_quote.get(quote, Decimal(0)) + notional
             )
 
         # Add proposed position for entry actions
-        if _is_entry(action.type) and action.quantity > Decimal("0") and action.symbol:
+        if _is_entry(action.type) and action.quantity > Decimal(0) and action.symbol:
             quote = action.symbol[-4:] if len(action.symbol) >= 4 else action.symbol
             notional_by_quote[quote] = (
-                notional_by_quote.get(quote, Decimal("0"))
+                notional_by_quote.get(quote, Decimal(0))
                 + abs(action.quantity)
             )
 
-        threshold_value = threshold_pct / Decimal("100") * portfolio_value
+        threshold_value = threshold_pct / Decimal(100) * portfolio_value
         violations: list[dict[str, Any]] = []
         for quote, notional in notional_by_quote.items():
             if notional > threshold_value:
-                pct = (notional / portfolio_value) * Decimal("100")
+                pct = (notional / portfolio_value) * Decimal(100)
                 violations.append({
                     "quote_asset": quote,
                     "total_notional": str(notional.quantize(Decimal("0.01"))),

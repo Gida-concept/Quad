@@ -13,12 +13,12 @@ from __future__ import annotations
 
 from quad.exchange.base import ExchangeAdapter
 from quad.exchange.binance import BinanceFuturesAdapter
-from quad.exchange.mock import MockAdapter
 from quad.exchange.factory import create_exchange
+from quad.exchange.mock import MockAdapter
 
 __all__ = [
-    "ExchangeAdapter",
     "BinanceFuturesAdapter",
+    "ExchangeAdapter",
     "MockAdapter",
     "create_exchange",
 ]

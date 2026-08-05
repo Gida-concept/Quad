@@ -446,7 +446,6 @@ class MarketDataEngine:
         end:
             Inclusive end of the query window.
         """
-        from datetime import datetime
 
         if self._historical is None:
             self._log.warning("historical_provider_not_available")
@@ -517,7 +516,7 @@ class MarketDataEngine:
             # Feed close price into the price buffer
             if self._buffer is not None:
                 close_price = Decimal(str(item.get("c", "0")))
-                if close_price > Decimal("0"):
+                if close_price > Decimal(0):
                     await self._buffer.append(symbol, close_price)
 
     async def _handle_book_ticker(self, message: dict) -> None:

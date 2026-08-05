@@ -21,7 +21,6 @@ from __future__ import annotations
 import time
 from collections import deque
 from datetime import datetime
-from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -127,18 +126,7 @@ class FillReconciler:
                 if ex_order.status == "FILLED" and order.status in (
                     "NEW",
                     "PARTIALLY_FILLED",
-                ):
-                    disc = self._record_discrepancy(
-                        "MISSED_FILL",
-                        order,
-                        ex_order.status,
-                        now_ms,
-                        details={
-                            "exchange_filled_qty": str(ex_order.filled_qty),
-                        },
-                    )
-                    discrepancies.append(disc)
-                elif ex_order.status == "PARTIALLY_FILLED" and order.status in (
+                ) or ex_order.status == "PARTIALLY_FILLED" and order.status in (
                     "NEW",
                 ):
                     disc = self._record_discrepancy(
