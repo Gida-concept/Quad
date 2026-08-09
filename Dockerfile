@@ -1,5 +1,5 @@
 # =============================================================================
-# Dockerfile — Quad Options Trading Bot
+# Dockerfile — Quad USD-M Futures Trading Bot
 #
 # Multi-stage build:
 #   Stage 1 (builder): Install build dependencies, pip install requirements
@@ -75,7 +75,7 @@ VOLUME ["/app/data", "/app/config", "/app/logs"]
 # Health check — verifies that the HTTP health server is responsive
 # The health server listens on port 9090 by default (configurable via QUAD_HEALTH_PORT)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:9090/health || exit 1
+    CMD curl -f http://localhost:${QUAD_HEALTH_PORT:-9090}/health || exit 1
 
 # Default command: run the quad module entry point
 # Override with `quad` CLI by passing: ["quad", "start"]

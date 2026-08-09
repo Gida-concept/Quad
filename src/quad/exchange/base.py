@@ -159,9 +159,7 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
-    async def get_open_orders(
-        self, symbol: str | None = None
-    ) -> list[Order]:
+    async def get_open_orders(self, symbol: str | None = None) -> list[Order]:
         """Get all currently open orders.
 
         Args:
@@ -340,9 +338,7 @@ class ExchangeAdapter(ABC):
         )
         return qty
 
-    async def _get_lot_filters(
-        self, symbol: str
-    ) -> tuple[Decimal, Decimal, Decimal]:
+    async def _get_lot_filters(self, symbol: str) -> tuple[Decimal, Decimal, Decimal]:
         """Return cached ``(step_size, min_qty, min_notional)`` for a symbol.
 
         The full exchange info is fetched once per symbol and cached for
@@ -350,7 +346,9 @@ class ExchangeAdapter(ABC):
         """
         cache: dict[str, tuple[float, tuple[Decimal, Decimal, Decimal]]]
         if not hasattr(self, "_exchange_info_cache"):
-            self._exchange_info_cache = {}
+            self._exchange_info_cache: dict[
+                str, tuple[float, tuple[Decimal, Decimal, Decimal]]
+            ] = {}
         cache = self._exchange_info_cache
         ttl = float(getattr(self, "_exchange_info_ttl", 60))
 

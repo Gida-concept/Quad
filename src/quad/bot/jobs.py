@@ -159,9 +159,7 @@ class QuadBotJobs:
         try:
             rs = await self._risk_manager.get_status()
             active_breakers = {
-                name: cb
-                for name, cb in rs.circuit_breakers.items()
-                if cb.active
+                name: cb for name, cb in rs.circuit_breakers.items() if cb.active
             }
 
             if not active_breakers:
@@ -224,7 +222,9 @@ class QuadBotJobs:
         if db and db.is_connected:
             try:
                 async with db.pool.acquire() as conn:
-                    trade_count = await conn.fetchval("SELECT COUNT(*) FROM trades") or 0
+                    trade_count = (
+                        await conn.fetchval("SELECT COUNT(*) FROM trades") or 0
+                    )
             except Exception as exc:
                 self._log.warning("job_daily_trade_count_error", error=str(exc))
 
@@ -321,7 +321,9 @@ class QuadBotJobs:
             )
             await self._send_if_configured(context, msg)
 
-    async def job_funding_rate_countdown(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def job_funding_rate_countdown(
+        self, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Check funding rates and alert if any exceed the max threshold.
 
         Runs every 30 minutes.  Alerts if funding rate exceeds the configured
@@ -383,7 +385,9 @@ class QuadBotJobs:
 
             warnings: list[str] = []
             for pos in positions:
-                mark = float(getattr(pos, "mark_price", getattr(pos, "current_price", 0)))
+                mark = float(
+                    getattr(pos, "mark_price", getattr(pos, "current_price", 0))
+                )
                 liq = float(getattr(pos, "liquidation_price", 0))
                 if mark <= 0 or liq <= 0:
                     continue
@@ -396,7 +400,9 @@ class QuadBotJobs:
                     )
                 )
                 if distance < min_distance:
-                    symbol = getattr(pos, "symbol", getattr(pos, "contract_symbol", "?"))
+                    symbol = getattr(
+                        pos, "symbol", getattr(pos, "contract_symbol", "?")
+                    )
                     raw_side = getattr(pos, "position_side", getattr(pos, "side", "?"))
                     side = str(raw_side) if not isinstance(raw_side, str) else raw_side
                     lev = int(getattr(pos, "leverage", 1))
@@ -444,7 +450,11 @@ class QuadBotJobs:
                 symbol = getattr(pos, "symbol", getattr(pos, "contract_symbol", "?"))
 
                 if funding_paid != 0:
-                    cost_str = f"-${abs(funding_paid):.2f} paid" if funding_paid < 0 else f"+${funding_paid:.2f} received"
+                    cost_str = (
+                        f"-${abs(funding_paid):.2f} paid"
+                        if funding_paid < 0
+                        else f"+${funding_paid:.2f} received"
+                    )
                     lines.append(f"• `{symbol}`: {cost_str}")
                     total_cost += funding_paid
 

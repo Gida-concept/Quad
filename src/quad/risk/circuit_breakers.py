@@ -77,7 +77,6 @@ ALL_BREAKERS = [
 ]
 
 
-
 class CircuitBreakerManager:
     """Manages seven circuit breaker tiers.
 
@@ -126,9 +125,7 @@ class CircuitBreakerManager:
         """
         async with self._lock:
             daily_pnl = (
-                context.risk_status.daily_pnl
-                if context.risk_status
-                else Decimal(0)
+                context.risk_status.daily_pnl if context.risk_status else Decimal(0)
             )
             drawdown_pct = (
                 context.risk_status.drawdown_percent
@@ -148,8 +145,7 @@ class CircuitBreakerManager:
             self._check_volatility(context)
 
             return {
-                name: self._breaker_status_dict(b)
-                for name, b in self._breakers.items()
+                name: self._breaker_status_dict(b) for name, b in self._breakers.items()
             }
 
     async def update_monitoring_data(self, context: StrategyContext) -> None:
@@ -163,9 +159,7 @@ class CircuitBreakerManager:
                 context.account.total_usdt if context.account else Decimal(0)
             )
             daily_pnl = (
-                context.risk_status.daily_pnl
-                if context.risk_status
-                else Decimal(0)
+                context.risk_status.daily_pnl if context.risk_status else Decimal(0)
             )
             drawdown_pct = (
                 context.risk_status.drawdown_percent
@@ -275,8 +269,7 @@ class CircuitBreakerManager:
     def status(self) -> dict[str, CircuitBreakerStatus]:
         """Return the status of all circuit breakers."""
         return {
-            name: self._breaker_status_dict(b)
-            for name, b in self._breakers.items()
+            name: self._breaker_status_dict(b) for name, b in self._breakers.items()
         }
 
     def is_trading_allowed(self) -> bool:
@@ -309,8 +302,7 @@ class CircuitBreakerManager:
             breaker.active = True
             breaker.triggered_at = time.time()
             breaker.reason = (
-                f"Daily PnL {daily_pnl:.2f} exceeds loss limit "
-                f"{-max_loss_dec:.2f}"
+                f"Daily PnL {daily_pnl:.2f} exceeds loss limit {-max_loss_dec:.2f}"
             )
             breaker.last_utc_day = now_utc_day
             self._log.warning(
@@ -319,9 +311,7 @@ class CircuitBreakerManager:
                 max_loss=str(max_loss_dec),
             )
 
-    def _check_drawdown(
-        self, drawdown_pct: Decimal, portfolio_value: Decimal
-    ) -> None:
+    def _check_drawdown(self, drawdown_pct: Decimal, portfolio_value: Decimal) -> None:
         """Tier 2: Trigger if drawdown exceeds max. Auto-reset with hysteresis."""
         breaker = self._breakers[DRAWDOWN_BREAKER]
         max_dd = self._cfg["max_drawdown_pct"]
@@ -345,8 +335,7 @@ class CircuitBreakerManager:
             breaker.active = True
             breaker.triggered_at = time.time()
             breaker.reason = (
-                f"Drawdown {drawdown_pct:.2f}% exceeds limit "
-                f"{max_dd_dec:.2f}%"
+                f"Drawdown {drawdown_pct:.2f}% exceeds limit {max_dd_dec:.2f}%"
             )
             self._log.warning(
                 "drawdown_triggered",
@@ -403,13 +392,9 @@ class CircuitBreakerManager:
             if pos.liquidation_price <= 0 or pos.mark_price <= 0:
                 continue
             if pos.position_side.value == "long":
-                distance = (
-                    pos.mark_price - pos.liquidation_price
-                ) / pos.mark_price
+                distance = (pos.mark_price - pos.liquidation_price) / pos.mark_price
             else:
-                distance = (
-                    pos.liquidation_price - pos.mark_price
-                ) / pos.mark_price
+                distance = (pos.liquidation_price - pos.mark_price) / pos.mark_price
             if distance < min_distance:
                 current_near.add(pos.symbol)
 
@@ -423,8 +408,7 @@ class CircuitBreakerManager:
             breaker.active = True
             breaker.triggered_at = time.time()
             breaker.reason = (
-                f"Liquidation cascade detected for symbols: "
-                f"{sorted(liquidated)}"
+                f"Liquidation cascade detected for symbols: {sorted(liquidated)}"
             )
             self._log.warning(
                 "liquidation_cascade_triggered",
@@ -471,9 +455,7 @@ class CircuitBreakerManager:
         # Check for escalation (3+ consecutive spikes)
         max_consecutive_spikes = int(spike_cfg["max_consecutive_spikes"])
         escalating = [
-            sym
-            for sym, cnt in counts.items()
-            if cnt >= max_consecutive_spikes
+            sym for sym, cnt in counts.items() if cnt >= max_consecutive_spikes
         ]
 
         if escalating and not breaker.active:
@@ -544,11 +526,7 @@ class CircuitBreakerManager:
         """Track consecutive losses from realized PnL in context."""
         breaker = self._breakers[CONSECUTIVE_LOSS_BREAKER]
 
-        daily_pnl = (
-            context.risk_status.daily_pnl
-            if context.risk_status
-            else Decimal(0)
-        )
+        daily_pnl = context.risk_status.daily_pnl if context.risk_status else Decimal(0)
 
         if daily_pnl < Decimal(0):
             if breaker.consecutive_losses < 100:  # prevent overflow
@@ -615,9 +593,7 @@ class CircuitBreakerManager:
             ),
         }
 
-    def _breaker_status_dict(
-        self, breaker: _CircuitBreaker
-    ) -> CircuitBreakerStatus:
+    def _breaker_status_dict(self, breaker: _CircuitBreaker) -> CircuitBreakerStatus:
         """Convert internal breaker state to a public status dataclass."""
         return CircuitBreakerStatus(
             name=breaker.name,

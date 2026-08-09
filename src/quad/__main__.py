@@ -6,6 +6,7 @@ handling.  All logging is configured before the orchestrator starts.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
@@ -13,6 +14,7 @@ import re
 import sys
 
 import structlog
+from structlog.types import Processor
 
 VERSION = "0.1.0"
 
@@ -34,7 +36,7 @@ class _TokenRedactionFilter(logging.Filter):
             if "bot" in message and self._TOKEN_RE.search(message):
                 record.msg = self._TOKEN_RE.sub("/bot***REDACTED***", message)
                 record.args = ()
-        except Exception:
+        except Exception:  # noqa: S110
             # Redaction must never break logging.
             pass
         return True
@@ -57,9 +59,8 @@ def _configure_logging() -> None:
     if sys.platform == "win32":
         for stream in (sys.stdout, sys.stderr):
             if hasattr(stream, "reconfigure"):
-                stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-
-    processors = [
+                stream.reconfigure(encoding="utf-8", errors="replace")
+    processors: list[Processor] = [
         structlog.stdlib.filter_by_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
@@ -110,14 +111,38 @@ def _configure_logging() -> None:
     root_logger.addHandler(handler)
 
 
-async def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for ``python -m quad``."""
+    parser = argparse.ArgumentParser(
+        prog="quad",
+        description="Quad USD-M Futures trading bot.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"quad {VERSION}",
+        help="Print the version and exit.",
+    )
+    parser.add_argument(
+        "--config",
+        "-c",
+        default=None,
+        metavar="PATH",
+        help="Path to config YAML (overrides QUAD_CONFIG_PATH env var).",
+    )
+    return parser.parse_args(argv)
+
+
+async def main(argv: list[str] | None = None) -> None:
     """Application entry point."""
+    args = _parse_args(argv)
+
     _configure_logging()
     log = structlog.get_logger()
 
     log.info("quad_starting", version=VERSION)
 
-    config_path = os.environ.get(
+    config_path = args.config or os.environ.get(
         "QUAD_CONFIG_PATH",
         "config/config.yaml",
     )
@@ -136,7 +161,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         # Graceful exit -- orchestrator handles cleanup in run_forever()
         pass
-    except Exception:  # noqa: BLE001
+    except Exception:
         import traceback
 
         traceback.print_exc()

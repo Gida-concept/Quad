@@ -274,21 +274,29 @@ def plausibility_check(
     except (TypeError, ValueError):
         rsi = None
 
-    if direction_key == "LONG" and trend in _DOWNTREND_REGIMES:
-        if rsi is not None and rsi > 70:
-            reason = (
-                f"LONG into downtrend with overbought RSI "
-                f"(trend_regime={trend}, rsi={rsi:.1f})"
-            )
-            return False, reason
+    if (
+        direction_key == "LONG"
+        and trend in _DOWNTREND_REGIMES
+        and rsi is not None
+        and rsi > 70
+    ):
+        reason = (
+            f"LONG into downtrend with overbought RSI "
+            f"(trend_regime={trend}, rsi={rsi:.1f})"
+        )
+        return False, reason
 
-    if direction_key == "SHORT" and trend in _UPTREND_REGIMES:
-        if rsi is not None and rsi < 30:
-            reason = (
-                f"SHORT into uptrend with oversold RSI "
-                f"(trend_regime={trend}, rsi={rsi:.1f})"
-            )
-            return False, reason
+    if (
+        direction_key == "SHORT"
+        and trend in _UPTREND_REGIMES
+        and rsi is not None
+        and rsi < 30
+    ):
+        reason = (
+            f"SHORT into uptrend with oversold RSI "
+            f"(trend_regime={trend}, rsi={rsi:.1f})"
+        )
+        return False, reason
 
     return True, ""
 
@@ -397,8 +405,9 @@ def normalize_decision(
             out["side"] = derived_side
 
     # --- Confidence (clamp to [0, 1]; default 0.0) -------------------------
+    raw_confidence = out.get("confidence")
     try:
-        confidence = float(out.get("confidence")) if out.get("confidence") is not None else 0.0
+        confidence = float(raw_confidence) if raw_confidence is not None else 0.0
     except (TypeError, ValueError):
         confidence = 0.0
     out["confidence"] = max(0.0, min(1.0, confidence))
@@ -493,8 +502,5 @@ def _un_derivable_reason(action: str, direction: Direction, position_side: Any) 
                 "EXIT requested but no open position is held for the contract. "
                 "Order side cannot be derived deterministically."
             )
-        return (
-            f"EXIT side un-derivable for direction={direction} "
-            f"position={held}."
-        )
+        return f"EXIT side un-derivable for direction={direction} position={held}."
     return f"Order side un-derivable for action={action} direction={direction}."

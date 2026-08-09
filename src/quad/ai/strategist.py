@@ -32,8 +32,7 @@ _STRATEGIST_SYSTEM = (
     "You are a futures strategy consultant. "
     "Given current market conditions and the available strategy catalog, "
     "recommend the most suitable strategy. "
-    "Explain your reasoning briefly (under 150 words)."
-    + _STRATEGY_CATALOG
+    "Explain your reasoning briefly (under 150 words)." + _STRATEGY_CATALOG
 )
 
 
@@ -78,10 +77,7 @@ async def recommend_strategy(
     """
     spot = float(mark_price or 0)
 
-    user_prompt = (
-        f"Recommend a strategy for {symbol}:\n"
-        f"Mark Price: ${spot:,.2f}\n"
-    )
+    user_prompt = f"Recommend a strategy for {symbol}:\nMark Price: ${spot:,.2f}\n"
     if funding_rate is not None:
         fr = float(getattr(funding_rate, "funding_rate", 0))
         user_prompt += f"Funding Rate: {fr * 100:+.6f}%\n"

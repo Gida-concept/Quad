@@ -69,7 +69,8 @@ class BacktestEngine:
         self._strategy = strategy
         self._db = db_manager
 
-        self._config = config
+        assert config is not None, "BacktestEngine requires a config dict"
+        self._config: dict[str, Any] = config
 
         # Simulation state
         self._starting_capital: Decimal = config["starting_capital"]
@@ -208,7 +209,7 @@ class BacktestEngine:
                     pos = open_positions.pop(action.contract or "", None)
                     if pos is not None:
                         trade_id_counter += 1
-                        exit_price = (action.price or Decimal(0))
+                        exit_price = action.price or Decimal(0)
                         entry_price = pos["entry_price"]
                         quantity = pos["quantity"]
                         pnl = (exit_price - entry_price) * quantity
@@ -238,7 +239,11 @@ class BacktestEngine:
                 context=context,
             )
             total_equity = cash + positions_value
-            drawdown = (peak_equity - total_equity) / peak_equity if peak_equity > 0 else Decimal(0)
+            drawdown = (
+                (peak_equity - total_equity) / peak_equity
+                if peak_equity > 0
+                else Decimal(0)
+            )
 
             peak_equity = max(peak_equity, total_equity)
 
@@ -277,8 +282,14 @@ class BacktestEngine:
             else Decimal(0)
         )
 
-        profit_factor = float(gross_wins / gross_losses) if gross_losses > 0 else float("inf")
-        return_pct = (total_pnl / self._starting_capital) * 100 if self._starting_capital > 0 else Decimal(0)
+        profit_factor = (
+            float(gross_wins / gross_losses) if gross_losses > 0 else float("inf")
+        )
+        return_pct = (
+            (total_pnl / self._starting_capital) * 100
+            if self._starting_capital > 0
+            else Decimal(0)
+        )
         annualised = (
             return_pct * (Decimal(365) / Decimal(str(total_days)))
             if total_days > 0
@@ -416,7 +427,7 @@ class BacktestEngine:
         """Compute the current market value of all open positions."""
         total = Decimal(0)
 
-        for symbol, pos in open_positions.items():
+        for pos in open_positions.values():
             current_price = pos.get("entry_price", Decimal(0))
 
             total += current_price * pos.get("quantity", Decimal(0))

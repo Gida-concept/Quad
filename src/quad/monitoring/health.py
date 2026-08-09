@@ -7,6 +7,7 @@ TradingView webhook receiver (POST endpoint).
 
 from __future__ import annotations
 
+import os
 import time as _time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -60,9 +61,7 @@ class HealthServer:
         self._monitoring_config = self._config.get("monitoring", {})
 
         self._port = (
-            port
-            or self._monitoring_config.get("health_server", {}).get("port")
-            or 9090
+            port or self._monitoring_config.get("health_server", {}).get("port") or 9090
         )
         self._components: dict[str, Any] = dict(components or {})
         self._metrics: MetricsCollector | None = metrics_collector
@@ -71,7 +70,18 @@ class HealthServer:
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._extra_routes: list[tuple[str, str, Callable]] = []
-        self._log = logger.bind(port=self._port)
+        api_key = self._resolve_api_key()
+        # Default to loopback when no auth key is configured; only expose
+        # on all interfaces when the caller explicitly opts in via a key.
+        bind_address = (
+            self._monitoring_config.get("health_server", {}).get(
+                "bind_address", "127.0.0.1"
+            )
+            if api_key
+            else "127.0.0.1"
+        )
+        self._bind_address = bind_address
+        self._log = logger.bind(port=self._port, bind_address=bind_address)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -130,12 +140,17 @@ class HealthServer:
         await self._runner.setup()
         self._site = web.TCPSite(
             self._runner,
-            self._monitoring_config.get("health_server", {}).get("bind_address", "127.0.0.1"),
+            self._bind_address,
             self._port,
         )
         await self._site.start()
 
-        self._log.info("health_server_started", port=self._port)
+        self._log.info(
+            "health_server_started",
+            port=self._port,
+            bind_address=self._bind_address,
+            auth_required=bool(self._resolve_api_key()),
+        )
 
     async def stop(self) -> None:
         """Gracefully shut down the server."""
@@ -155,7 +170,9 @@ class HealthServer:
     # Component registration
     # ------------------------------------------------------------------
 
-    def register_component(self, name: str, health_check: Callable[[], bool] | bool) -> None:
+    def register_component(
+        self, name: str, health_check: Callable[[], bool] | bool
+    ) -> None:
         """Register a component for readiness checks.
 
         Parameters
@@ -172,13 +189,19 @@ class HealthServer:
     # Endpoint handlers
     # ------------------------------------------------------------------
 
+    def _resolve_api_key(self) -> str:
+        """Return the health-server API key, env var first then config."""
+        return os.environ.get("QUAD_HEALTH_API_KEY", "") or str(
+            self._monitoring_config.get("health_server", {}).get("api_key", "")
+        )
+
     def _check_api_key(self, request: web.Request) -> bool:
         """Check the ``X-API-Key`` header against the configured key.
 
         Returns ``True`` if no key is configured (no auth required), or
         if the request includes a matching ``X-API-Key`` header.
         """
-        api_key = self._monitoring_config.get("health_server", {}).get("api_key", "")
+        api_key = self._resolve_api_key()
         if not api_key:
             return True  # No auth configured
         return request.headers.get("X-API-Key", "") == api_key
@@ -187,7 +210,10 @@ class HealthServer:
         """Return a 403 response if API key check fails, otherwise ``None``."""
         if not self._check_api_key(request):
             return web.json_response(
-                {"error": "Forbidden", "message": "Invalid or missing X-API-Key header"},
+                {
+                    "error": "Forbidden",
+                    "message": "Invalid or missing X-API-Key header",
+                },
                 status=403,
             )
         return None
@@ -203,7 +229,9 @@ class HealthServer:
             {
                 "status": "ok",
                 "uptime": round(uptime, 2),
-                "version": self._monitoring_config.get("health_server", {}).get("version", "0.1.0"),
+                "version": self._monitoring_config.get("health_server", {}).get(
+                    "version", "0.1.0"
+                ),
                 "timestamp": int(_time.time() * 1000),
             }
         )

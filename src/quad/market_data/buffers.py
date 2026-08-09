@@ -84,9 +84,7 @@ class PriceBuffer:
                 return None
             return buf[-1]
 
-    async def get_recent(
-        self, symbol: str, count: int | None = None
-    ) -> list[Decimal]:
+    async def get_recent(self, symbol: str, count: int | None = None) -> list[Decimal]:
         """Return the last *count* prices for *symbol* (newest first).
 
         Returns fewer than *count* items if fewer are available.
@@ -120,9 +118,7 @@ class PriceBuffer:
             else:
                 self._buffers.clear()
 
-    async def vwap(
-        self, symbol: str, window: int | None = None
-    ) -> Decimal | None:
+    async def vwap(self, symbol: str, window: int | None = None) -> Decimal | None:
         """Compute the simple average of the last *window* price values.
 
         Returns ``None`` if fewer than *window* values are available.

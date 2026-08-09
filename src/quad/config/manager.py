@@ -74,6 +74,7 @@ CONFIG_FILE = "config.yaml"
 # Public API
 # ============================================================================
 
+
 class ConfigManager:
     """Configuration manager with layered merge, dot-notation access,
     hot-reload callbacks, and thread safety.
@@ -213,9 +214,7 @@ class ConfigManager:
         with self._lock:
             return copy.deepcopy(self._config)
 
-    def on_change(
-        self, callback: Callable[[str, Any, Any], None]
-    ) -> None:
+    def on_change(self, callback: Callable[[str, Any, Any], None]) -> None:
         """Register a hot-reload listener.
 
         The callback is invoked with ``(key, old_value, new_value)`` whenever
@@ -269,9 +268,7 @@ class ConfigManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _resolve_config_dir(
-        self, config_dir: str | Path | None
-    ) -> Path:
+    def _resolve_config_dir(self, config_dir: str | Path | None) -> Path:
         """Resolve the configuration directory path.
 
         Priority:
@@ -380,9 +377,7 @@ class ConfigManager:
         validated = QuadConfig.model_validate(merged)
         self._config = validated.model_dump()
 
-    def _fire_callbacks(
-        self, key: str, old_value: Any, new_value: Any
-    ) -> None:
+    def _fire_callbacks(self, key: str, old_value: Any, new_value: Any) -> None:
         """Invoke all registered ``on_change`` callbacks."""
         # Work on a snapshot of the callback list to avoid issues if a
         # callback modifies the list during iteration.
@@ -498,7 +493,7 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
         # Check well-known mapping first
         if env_name in ENV_VAR_MAP:
             config_key = ENV_VAR_MAP[env_name]
-        elif env_name.startswith("QUAD_") or env_name.startswith("BINANCE_"):
+        elif env_name.startswith(("QUAD_", "BINANCE_")):
             config_key = _env_to_config_key(env_name)
 
         if config_key is None:
@@ -525,9 +520,9 @@ def _env_to_config_key(env_name: str) -> str:
     """
     # Handle BINANCE_ prefix
     if env_name.startswith("BINANCE_"):
-        key = env_name[len("BINANCE_"):]
+        key = env_name[len("BINANCE_") :]
     elif env_name.startswith("QUAD_"):
-        key = env_name[len("QUAD_"):]
+        key = env_name[len("QUAD_") :]
     else:
         return env_name.lower().replace("__", ".").replace("_", ".")
 
@@ -656,9 +651,7 @@ def _recursive_expand_env_vars(value: Any) -> Any:
         return expanded
 
     if isinstance(value, dict):
-        return {
-            k: _recursive_expand_env_vars(v) for k, v in value.items()
-        }
+        return {k: _recursive_expand_env_vars(v) for k, v in value.items()}
 
     if isinstance(value, list):
         return [_recursive_expand_env_vars(item) for item in value]

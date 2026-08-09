@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any
 
 import structlog
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, User
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -141,23 +141,34 @@ class QuadBotCommands:
     # Simple command handlers
     # ------------------------------------------------------------------
 
-    async def _safe_reply(self, update: Update, text: str, parse_mode: str = "Markdown") -> None:
+    @staticmethod
+    def _narrow(update: Update) -> tuple[Message, User]:
+        """Return non-None message/user from an update (asserts presence)."""
+        assert update.message is not None, "command update has no message"
+        assert update.effective_user is not None, "command update has no user"
+        return update.message, update.effective_user
+
+    async def _safe_reply(
+        self, update: Update, text: str, parse_mode: str = "Markdown"
+    ) -> None:
         """Send a message, truncating and wrapping in code block if needed."""
         MAX_LEN = 4096
         if len(text) > MAX_LEN:
             # Truncate safely at a natural boundary
-            text = text[:MAX_LEN - 100] + "\n\n... (truncated)"
+            text = text[: MAX_LEN - 100] + "\n\n... (truncated)"
+        message, _ = self._narrow(update)
         try:
-            await update.message.reply_text(text, parse_mode=parse_mode)
+            await message.reply_text(text, parse_mode=parse_mode)
         except Exception:
             # If markdown fails, send as plain text
-            await update.message.reply_text(text, parse_mode=None)
+            await message.reply_text(text, parse_mode=None)
 
     async def cmd_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Send a welcome message with available commands."""
-        self._log.info("cmd_start", user=update.effective_user.id)
+        message, user = self._narrow(update)
+        self._log.info("cmd_start", user=user.id)
 
         msg = (
             "🤖 *Quad Futures Trading Bot*\n\n"
@@ -185,14 +196,15 @@ class QuadBotCommands:
             "• `/ai_decision` — Request an AI-driven trading decision\n"
             "• `/help` — Full command reference"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await message.reply_text(msg, parse_mode="Markdown")
 
     async def cmd_help(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Send the full command reference."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_help", user=update.effective_user.id)
+        self._log.info("cmd_help", user=user.id)
 
         msg = (
             "📚 *Quad Bot Command Reference*\n\n"
@@ -225,14 +237,15 @@ class QuadBotCommands:
             "• `/ai_status` — AI trading system status, rate limiter, recent decisions\n"
             "• `/ai_decision` — Trigger a full AI trading decision cycle (ENTER/EXIT/HOLD)"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await message.reply_text(msg, parse_mode="Markdown")
 
     async def cmd_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Send bot status, position summary, PnL, and risk status."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_status", user=update.effective_user.id)
+        self._log.info("cmd_status", user=user.id)
 
         try:
             # Gather status information from subsystems
@@ -254,22 +267,33 @@ class QuadBotCommands:
                     self._log.warning("status_risk_error", error=str(exc))
 
             # Get position count from exchange adapter
-            exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None) if self._orchestrator else None
+            exchange_adapter = (
+                getattr(self._orchestrator, "_exchange_adapter", None)
+                if self._orchestrator
+                else None
+            )
             if exchange_adapter is not None:
                 try:
                     positions = await exchange_adapter.get_positions()
-                    position_count = len(positions) if isinstance(positions, list) else 0
+                    position_count = (
+                        len(positions) if isinstance(positions, list) else 0
+                    )
                 except Exception as exc:
                     self._log.warning("status_positions_error", error=str(exc))
 
             # Get active strategies
             if self._orchestrator is not None:
                 try:
-                    strat_list = getattr(self._orchestrator, "get_active_strategies", None)
+                    strat_list = getattr(
+                        self._orchestrator, "get_active_strategies", None
+                    )
                     if strat_list is not None:
                         strategies = strat_list()
                         active_strategies = (
-                            [s.get_name() if hasattr(s, "get_name") else str(s) for s in strategies]
+                            [
+                                s.get_name() if hasattr(s, "get_name") else str(s)
+                                for s in strategies
+                            ]
                             if isinstance(strategies, list)
                             else []
                         )
@@ -298,31 +322,40 @@ class QuadBotCommands:
                 f"*Orders Filled:* {exec_stats.get('total_filled', 0)}\n"
                 f"*Orders Rejected:* {exec_stats.get('total_rejected', 0)}"
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_status_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error fetching status: {exc}")
+            await message.reply_text(f"⚠️ Error fetching status: {exc}")
 
     async def cmd_balance(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Send account balances and total USDT value."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_balance", user=update.effective_user.id)
+        self._log.info("cmd_balance", user=user.id)
 
         try:
             # Fetch live account data from the exchange adapter
-            exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None) if self._orchestrator else None
+            exchange_adapter = (
+                getattr(self._orchestrator, "_exchange_adapter", None)
+                if self._orchestrator
+                else None
+            )
             if exchange_adapter is None:
-                await update.message.reply_text("⚠️ Exchange adapter not available.", parse_mode="Markdown")
+                await message.reply_text(
+                    "⚠️ Exchange adapter not available.", parse_mode="Markdown"
+                )
                 return
 
             try:
                 account = await exchange_adapter.get_account()
             except Exception as exc:
                 self._log.warning("balance_fetch_failed", error=str(exc))
-                await update.message.reply_text(f"⚠️ Error fetching balance: {exc}", parse_mode="Markdown")
+                await message.reply_text(
+                    f"⚠️ Error fetching balance: {exc}", parse_mode="Markdown"
+                )
                 return
 
             if account is None:
@@ -331,7 +364,7 @@ class QuadBotCommands:
                     "💰 *Account Balance*\n\n"
                     "No account data available. The bot may not be connected to the exchange."
                 )
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             # Format balance info
@@ -340,7 +373,9 @@ class QuadBotCommands:
             balances = getattr(account, "balances", {})
 
             lines = [f"💳 *Account Balance*  |  Exchange: {exchange}\n"]
-            lines.append(f"```\n{'Asset':<10} {'Free':>14} {'Locked':>14} {'Total':>14}")
+            lines.append(
+                f"```\n{'Asset':<10} {'Free':>14} {'Locked':>14} {'Total':>14}"
+            )
             lines.append("-" * 54)
 
             for asset, bal in sorted(balances.items()):
@@ -355,22 +390,27 @@ class QuadBotCommands:
             lines.append(f"\n*Total Portfolio Value:* ${float(total_usdt):,.2f}")
 
             msg = "\n".join(lines)
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_balance_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error fetching balance: {exc}")
+            await message.reply_text(f"⚠️ Error fetching balance: {exc}")
 
     async def cmd_positions(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """List open positions with PnL."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_positions", user=update.effective_user.id)
+        self._log.info("cmd_positions", user=user.id)
 
         try:
             positions: list[Any] = []
-            exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None) if self._orchestrator else None
+            exchange_adapter = (
+                getattr(self._orchestrator, "_exchange_adapter", None)
+                if self._orchestrator
+                else None
+            )
             if exchange_adapter is not None:
                 try:
                     positions = await exchange_adapter.get_positions()
@@ -379,7 +419,7 @@ class QuadBotCommands:
 
             if not positions:
                 msg = "📋 *Open Positions*\n\nNo open positions."
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             lines = ["📋 *Open Positions*\n"]
@@ -395,7 +435,9 @@ class QuadBotCommands:
                 side = str(raw_side) if not isinstance(raw_side, str) else raw_side
                 size = float(getattr(pos, "size", getattr(pos, "quantity", 0)))
                 entry = float(getattr(pos, "entry_price", 0))
-                mark = float(getattr(pos, "mark_price", getattr(pos, "current_price", 0)))
+                mark = float(
+                    getattr(pos, "mark_price", getattr(pos, "current_price", 0))
+                )
                 liq = float(getattr(pos, "liquidation_price", 0))
                 pnl = float(getattr(pos, "unrealized_pnl", 0))
                 lev = int(getattr(pos, "leverage", 1))
@@ -414,18 +456,19 @@ class QuadBotCommands:
             lines.append(f"\n*Total Unrealized PnL:* {pnl_emoji} ${total_pnl:+,.2f}")
 
             msg = "\n".join(lines)
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_positions_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error fetching positions: {exc}")
+            await message.reply_text(f"⚠️ Error fetching positions: {exc}")
 
     async def cmd_orders(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """List open or pending orders."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_orders", user=update.effective_user.id)
+        self._log.info("cmd_orders", user=user.id)
 
         try:
             orders: list[Any] = []
@@ -437,7 +480,7 @@ class QuadBotCommands:
 
             if not orders:
                 msg = "📋 *Open Orders*\n\nNo open orders."
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             lines = ["📋 *Open Orders*\n"]
@@ -463,11 +506,11 @@ class QuadBotCommands:
 
             lines.append("```")
             msg = "\n".join(lines)
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_orders_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error fetching orders: {exc}")
+            await message.reply_text(f"⚠️ Error fetching orders: {exc}")
 
     # ------------------------------------------------------------------
     # Futures command handlers
@@ -480,12 +523,13 @@ class QuadBotCommands:
 
         Usage: ``/funding_rate [symbol]``
         """
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_funding_rate", user=update.effective_user.id)
+        self._log.info("cmd_funding_rate", user=user.id)
 
         if self._market_data_engine is None:
             msg = "⚠️ Market data engine is not available."
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         try:
@@ -494,7 +538,7 @@ class QuadBotCommands:
                 fr = await self._market_data_engine.get_funding_rate(symbol)
                 if fr is None:
                     msg = f"⚠️ No funding rate data available for `{symbol}`."
-                    await update.message.reply_text(msg, parse_mode="Markdown")
+                    await message.reply_text(msg, parse_mode="Markdown")
                     return
 
                 rate_pct = float(fr.funding_rate) * 100
@@ -515,7 +559,10 @@ class QuadBotCommands:
                 config = self._config
                 symbols = config["trading"]["underlyings"]
                 lines = ["💰 *Funding Rates*\n"]
-                lines.append("```\n" f"{'Symbol':<12} {'Rate':>10} {'Countdown':>14} {'Mark Price':>12}")
+                lines.append(
+                    "```\n"
+                    f"{'Symbol':<12} {'Rate':>10} {'Countdown':>14} {'Mark Price':>12}"
+                )
                 lines.append("-" * 52)
 
                 for sym in symbols:
@@ -532,16 +579,18 @@ class QuadBotCommands:
                     rate_str = f"{rate_pct:+.5f}%"
                     countdown = f"{mins}m {secs}s"
                     mark_str = f"${float(fr.mark_price):,.2f}"
-                    lines.append(f"{sym:<12} {rate_str:>10} {countdown:>14} {mark_str:>12}")
+                    lines.append(
+                        f"{sym:<12} {rate_str:>10} {countdown:>14} {mark_str:>12}"
+                    )
 
                 lines.append("```")
                 msg = "\n".join(lines)
 
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_funding_rate_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error fetching funding rates: {exc}")
+            await message.reply_text(f"⚠️ Error fetching funding rates: {exc}")
 
     async def cmd_book(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -550,19 +599,20 @@ class QuadBotCommands:
 
         Usage: ``/book <symbol>``
         """
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_book", user=update.effective_user.id)
+        self._log.info("cmd_book", user=user.id)
 
         if not context.args:
             msg = "⚠️ Usage: `/book <symbol>`\nExample: `/book BTCUSDT`"
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         symbol = context.args[0].upper()
 
         if self._market_data_engine is None:
             msg = "⚠️ Market data engine is not available."
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         try:
@@ -570,7 +620,7 @@ class QuadBotCommands:
 
             if book is None:
                 msg = f"⚠️ No order book data available for `{symbol}`."
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             bids = book.get("bids", [])[:5]
@@ -585,23 +635,31 @@ class QuadBotCommands:
 
             lines.append(f"*Spread:* ${spread:.2f} ({spread_pct:.3f}%)\n")
 
-            lines.append("```\n" f"{'Bids':>24}     {'Asks':>24}")
+            lines.append(f"```\n{'Bids':>24}     {'Asks':>24}")
             lines.append(f"{'Price':>12} {'Qty':>10}     {'Price':>12} {'Qty':>10}")
             lines.append("-" * 52)
 
             max_rows = max(len(bids), len(asks))
             for i in range(max_rows):
-                bid_str = f"{float(bids[i][0]):>12.4f} {float(bids[i][1]):>10.4f}" if i < len(bids) else " " * 24
-                ask_str = f"{float(asks[i][0]):>12.4f} {float(asks[i][1]):>10.4f}" if i < len(asks) else " " * 24
+                bid_str = (
+                    f"{float(bids[i][0]):>12.4f} {float(bids[i][1]):>10.4f}"
+                    if i < len(bids)
+                    else " " * 24
+                )
+                ask_str = (
+                    f"{float(asks[i][0]):>12.4f} {float(asks[i][1]):>10.4f}"
+                    if i < len(asks)
+                    else " " * 24
+                )
                 lines.append(f"{bid_str}     {ask_str}")
 
             lines.append("```")
             msg = "\n".join(lines)
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_book_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error fetching order book: {exc}")
+            await message.reply_text(f"⚠️ Error fetching order book: {exc}")
 
     async def cmd_leverage(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -610,8 +668,9 @@ class QuadBotCommands:
 
         Usage: ``/leverage [symbol] [value]``
         """
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_leverage", user=update.effective_user.id)
+        self._log.info("cmd_leverage", user=user.id)
 
         try:
             trading_config = self._config["trading"]
@@ -628,7 +687,7 @@ class QuadBotCommands:
                     "• `/leverage SYMBOL` — Show current leverage for a symbol\n"
                     "• `/leverage SYMBOL VALUE` — Set leverage (requires exchange)"
                 )
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             symbol = context.args[0].upper()
@@ -644,9 +703,9 @@ class QuadBotCommands:
                         "_Setting leverage on the exchange requires a running exchange adapter._\n"
                         f"*Current Config Default:* `{default_leverage}x`"
                     )
-                    await update.message.reply_text(msg, parse_mode="Markdown")
+                    await message.reply_text(msg, parse_mode="Markdown")
                 except ValueError:
-                    await update.message.reply_text(
+                    await message.reply_text(
                         "⚠️ Leverage value must be an integer.",
                         parse_mode="Markdown",
                     )
@@ -659,11 +718,11 @@ class QuadBotCommands:
                 f"*Max Allowed:* `{max_leverage}x`\n\n"
                 "To set: `/leverage {symbol} <value>`"
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_leverage_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error: {exc}")
+            await message.reply_text(f"⚠️ Error: {exc}")
 
     async def cmd_position_mode(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -672,8 +731,9 @@ class QuadBotCommands:
 
         Usage: ``/position_mode [mode]``
         """
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_position_mode", user=update.effective_user.id)
+        self._log.info("cmd_position_mode", user=user.id)
 
         try:
             trading_config = self._config["trading"]
@@ -688,12 +748,12 @@ class QuadBotCommands:
                     "_Switching position mode on the exchange requires all "
                     "positions to be closed first and a running exchange adapter._"
                 )
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             requested = context.args[0].lower()
             if requested not in ("one_way", "hedge"):
-                await update.message.reply_text(
+                await message.reply_text(
                     "⚠️ Invalid mode. Use `one_way` or `hedge`.",
                     parse_mode="Markdown",
                 )
@@ -707,25 +767,30 @@ class QuadBotCommands:
                 "and use the exchange API._\n"
                 f"*Config Value:* `{requested}`"
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_position_mode_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error: {exc}")
+            await message.reply_text(f"⚠️ Error: {exc}")
 
     async def cmd_liquidation_warnings(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Check all positions for proximity to liquidation."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_liquidation_warnings", user=update.effective_user.id)
+        self._log.info("cmd_liquidation_warnings", user=user.id)
 
         try:
             risk_config = self._config["risk"]
 
-            exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None) if self._orchestrator else None
+            exchange_adapter = (
+                getattr(self._orchestrator, "_exchange_adapter", None)
+                if self._orchestrator
+                else None
+            )
             if exchange_adapter is None:
-                await update.message.reply_text(
+                await message.reply_text(
                     "⚠️ Exchange adapter not available. Cannot check liquidation proximity.",
                     parse_mode="Markdown",
                 )
@@ -733,7 +798,7 @@ class QuadBotCommands:
 
             positions = await exchange_adapter.get_positions()
             if not positions:
-                await update.message.reply_text(
+                await message.reply_text(
                     "✅ No open positions. Nothing to check.",
                     parse_mode="Markdown",
                 )
@@ -741,7 +806,9 @@ class QuadBotCommands:
 
             at_risk = []
             for pos in positions:
-                mark = float(getattr(pos, "mark_price", getattr(pos, "current_price", 0)))
+                mark = float(
+                    getattr(pos, "mark_price", getattr(pos, "current_price", 0))
+                )
                 liq = float(getattr(pos, "liquidation_price", 0))
                 if mark <= 0 or liq <= 0:
                     continue
@@ -754,7 +821,9 @@ class QuadBotCommands:
                     )
                 )
                 if distance < min_distance:
-                    symbol = getattr(pos, "symbol", getattr(pos, "contract_symbol", "?"))
+                    symbol = getattr(
+                        pos, "symbol", getattr(pos, "contract_symbol", "?")
+                    )
                     raw_side = getattr(pos, "position_side", getattr(pos, "side", "?"))
                     side = str(raw_side) if not isinstance(raw_side, str) else raw_side
                     lev = int(getattr(pos, "leverage", 1))
@@ -766,7 +835,7 @@ class QuadBotCommands:
                     f"No positions are near liquidation.\n"
                     f"*Threshold:* `{min_distance:.0%}` distance"
                 )
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             lines = ["🚨 *Liquidation Warnings*\n"]
@@ -780,22 +849,23 @@ class QuadBotCommands:
                 )
 
             msg = "\n".join(lines)
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_liquidation_warnings_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error checking liquidation: {exc}")
+            await message.reply_text(f"⚠️ Error checking liquidation: {exc}")
 
     async def cmd_market_regime(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show funding rate landscape and volatility assessment."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_market_regime", user=update.effective_user.id)
+        self._log.info("cmd_market_regime", user=user.id)
 
         if self._market_data_engine is None:
             msg = "⚠️ Market data engine is not available."
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         try:
@@ -832,10 +902,18 @@ class QuadBotCommands:
             n = positive_count + negative_count
             if n > 0:
                 avg_rate = total_rate / n
-                bias = "Bullish (positive funding)" if avg_rate > 0 else "Bearish (negative funding)" if avg_rate < 0 else "Neutral"
+                bias = (
+                    "Bullish (positive funding)"
+                    if avg_rate > 0
+                    else "Bearish (negative funding)"
+                    if avg_rate < 0
+                    else "Neutral"
+                )
                 lines.append(f"*Average Rate:* {avg_rate:+.5f}%")
                 lines.append(f"*Bias:* {bias}")
-                lines.append(f"*Positive / Negative:* {positive_count}/{negative_count}")
+                lines.append(
+                    f"*Positive / Negative:* {positive_count}/{negative_count}"
+                )
 
                 # Volatility assessment from ticker if available
                 try:
@@ -847,25 +925,34 @@ class QuadBotCommands:
                         last = float(ticker.get("last_price", 0))
                         if last > 0 and high > 0 and low > 0:
                             range_pct = (high - low) / last * 100
-                            vol_label = "High" if range_pct > 5 else "Moderate" if range_pct > 2 else "Low"
+                            vol_label = (
+                                "High"
+                                if range_pct > 5
+                                else "Moderate"
+                                if range_pct > 2
+                                else "Low"
+                            )
                             lines.append(f"*24h Change:* {change:+.2f}%")
-                            lines.append(f"*24h Range:* {range_pct:.1f}% ({vol_label} volatility)")
-                except Exception:
-                    pass
+                            lines.append(
+                                f"*24h Range:* {range_pct:.1f}% ({vol_label} volatility)"
+                            )
+                except Exception as exc:
+                    self._log.warning("market_regime_ticker_error", error=str(exc))
 
             msg = "\n".join(lines)
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_market_regime_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error: {exc}")
+            await message.reply_text(f"⚠️ Error: {exc}")
 
     async def cmd_strategies(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """List active strategies and their status."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_strategies", user=update.effective_user.id)
+        self._log.info("cmd_strategies", user=user.id)
 
         try:
             # Import here to avoid circular import at module level
@@ -875,7 +962,7 @@ class QuadBotCommands:
 
             if not registered:
                 msg = "📋 *Active Strategies*\n\nNo strategies are registered."
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             lines = ["📋 *Registered Strategies*\n"]
@@ -889,7 +976,9 @@ class QuadBotCommands:
 
                 param_lines = []
                 for p in params:
-                    default_str = f" (default: {p.default})" if p.default is not None else ""
+                    default_str = (
+                        f" (default: {p.default})" if p.default is not None else ""
+                    )
                     param_lines.append(f"  • `{p.name}`: {p.description}{default_str}")
 
                 lines.append(f"*{name}*\n{desc}")
@@ -898,11 +987,11 @@ class QuadBotCommands:
                 lines.append("")
 
             msg = "\n".join(lines)
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_strategies_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error listing strategies: {exc}")
+            await message.reply_text(f"⚠️ Error listing strategies: {exc}")
 
     async def cmd_kill(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -911,8 +1000,9 @@ class QuadBotCommands:
 
         Requires a confirmation via inline keyboard.
         """
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_kill", user=update.effective_user.id)
+        self._log.info("cmd_kill", user=user.id)
 
         keyboard = [
             [
@@ -931,7 +1021,7 @@ class QuadBotCommands:
             "• Not close existing positions (manual action required)\n\n"
             "*This action cannot be undone via Telegram.*"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        await message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
 
     async def cmd_kill_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -941,6 +1031,7 @@ class QuadBotCommands:
         if query is None:
             return
         await query.answer()
+        user = query.from_user
 
         if query.data == "kill_confirm":
             reason = "Kill switch triggered via Telegram by admin"
@@ -948,12 +1039,16 @@ class QuadBotCommands:
                 if self._risk_manager is not None:
                     self._risk_manager.trigger_kill_switch(reason)
                 elif self._orchestrator is not None:
-                    self._log.warning("kill_switch: risk_manager is None, falling back to orchestrator")
+                    self._log.warning(
+                        "kill_switch: risk_manager is None, falling back to orchestrator"
+                    )
                     ks = getattr(self._orchestrator, "trigger_kill_switch", None)
                     if ks is not None:
                         ks(reason)
                 else:
-                    self._log.warning("kill_switch: both risk_manager and orchestrator are None")
+                    self._log.warning(
+                        "kill_switch: both risk_manager and orchestrator are None"
+                    )
 
                 await query.edit_message_text(
                     "🚨 *Kill Switch Activated*\n\n"
@@ -961,7 +1056,7 @@ class QuadBotCommands:
                     "Existing positions remain open — manage them manually.",
                     parse_mode="Markdown",
                 )
-                self._log.warning("kill_switch_activated_via_telegram", user=update.effective_user.id)
+                self._log.warning("kill_switch_activated_via_telegram", user=user.id)
 
             except Exception as exc:
                 self._log.exception("kill_switch_error", error=str(exc))
@@ -974,13 +1069,14 @@ class QuadBotCommands:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Send risk status, circuit breakers, and exposure report."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_risk", user=update.effective_user.id)
+        self._log.info("cmd_risk", user=user.id)
 
         try:
             if self._risk_manager is None:
                 msg = "⚠️ Risk manager is not available."
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             risk_status = await self._risk_manager.get_status()
@@ -1020,19 +1116,27 @@ class QuadBotCommands:
                             rate_pct = float(fr.funding_rate) * 100
                             fr_lines.append(f"  • `{sym}`: {rate_pct:+.5f}%")
                     if fr_lines:
-                        funding_info = "\n*Funding Rates:*\n" + "\n".join(fr_lines) + "\n"
-                except Exception:
-                    pass
+                        funding_info = (
+                            "\n*Funding Rates:*\n" + "\n".join(fr_lines) + "\n"
+                        )
+                except Exception as exc:
+                    self._log.warning("risk_funding_rates_error", error=str(exc))
 
             # Liquidation proximity summary
             liq_info = ""
             try:
-                exchange_adapter = getattr(self._orchestrator, "_exchange_adapter", None) if self._orchestrator else None
+                exchange_adapter = (
+                    getattr(self._orchestrator, "_exchange_adapter", None)
+                    if self._orchestrator
+                    else None
+                )
                 if exchange_adapter is not None:
                     positions = await exchange_adapter.get_positions()
                     at_risk = 0
-                    for pos in (positions or []):
-                        mark = float(getattr(pos, "mark_price", getattr(pos, "current_price", 0)))
+                    for pos in positions or []:
+                        mark = float(
+                            getattr(pos, "mark_price", getattr(pos, "current_price", 0))
+                        )
                         liq = float(getattr(pos, "liquidation_price", 0))
                         if mark > 0 and liq > 0:
                             distance = abs(mark - liq) / mark
@@ -1046,8 +1150,8 @@ class QuadBotCommands:
                                 at_risk += 1
                     liq_emoji = "🚨" if at_risk > 0 else "✅"
                     liq_info = f"\n*Liquidation Risk:* {liq_emoji} {at_risk} position(s) near liquidation\n"
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log.warning("risk_liquidation_proximity_error", error=str(exc))
 
             msg = (
                 "⚠️ *Risk Status*\n\n"
@@ -1063,7 +1167,7 @@ class QuadBotCommands:
 
         except Exception as exc:
             self._log.exception("cmd_risk_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error fetching risk status: {exc}")
+            await message.reply_text(f"⚠️ Error fetching risk status: {exc}")
 
     async def cmd_cancel(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1072,25 +1176,26 @@ class QuadBotCommands:
 
         Usage: ``/cancel <order_id>``
         """
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_cancel", user=update.effective_user.id)
+        self._log.info("cmd_cancel", user=user.id)
 
         if not context.args or not context.args[0].strip():
-            await update.message.reply_text("Usage: `/cancel <order_id>`")
+            await message.reply_text("Usage: `/cancel <order_id>`")
             return
 
         order_id = context.args[0].strip()
         if len(order_id) > 100:
-            await update.message.reply_text("Order ID too long (max 100 chars)")
+            await message.reply_text("Order ID too long (max 100 chars)")
             return
-        if not _re.match(r'^[a-zA-Z0-9_\-]+$', order_id):
-            await update.message.reply_text("Invalid order ID format")
+        if not _re.match(r"^[a-zA-Z0-9_\-]+$", order_id):
+            await message.reply_text("Invalid order ID format")
             return
 
         try:
             if self._execution_engine is None:
                 msg = "⚠️ Execution engine is not available."
-                await update.message.reply_text(msg, parse_mode="Markdown")
+                await message.reply_text(msg, parse_mode="Markdown")
                 return
 
             success = await self._execution_engine.cancel_order(order_id)
@@ -1098,18 +1203,19 @@ class QuadBotCommands:
                 msg = f"✅ Order `{order_id}` cancelled successfully."
             else:
                 msg = f"⚠️ Could not cancel order `{order_id}`. It may already be filled or cancelled."
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_cancel_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error cancelling order: {exc}")
+            await message.reply_text(f"⚠️ Error cancelling order: {exc}")
 
     async def cmd_settings(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show current configuration tree or key settings overview."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_settings", user=update.effective_user.id)
+        self._log.info("cmd_settings", user=user.id)
 
         try:
             # If orchestrator is available, show the full config tree
@@ -1159,11 +1265,9 @@ class QuadBotCommands:
 
         except Exception as exc:
             self._log.exception("cmd_settings_error", error=str(exc))
-            await update.message.reply_text(f"⚠️ Error fetching settings: {exc}")
+            await message.reply_text(f"⚠️ Error fetching settings: {exc}")
 
-    async def cmd_set(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    async def cmd_set(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Set a config value at runtime.
 
         Usage: /set <key> <value>
@@ -1171,10 +1275,11 @@ class QuadBotCommands:
         Example: /set risk.max_funding_rate_cost 0.001
         Example: /set risk.max_drawdown_pct 15
         """
-        self._log.info("cmd_set", user=update.effective_user.id, args=context.args)
+        message, user = self._narrow(update)
+        self._log.info("cmd_set", user=user.id, args=context.args)
 
         if not context.args or len(context.args) < 2:
-            await update.message.reply_text(
+            await message.reply_text(
                 "Usage: `/set <config.key.path> <value>`\n\n"
                 "Examples:\n"
                 "`/set trading.leverage 5`\n"
@@ -1193,6 +1298,7 @@ class QuadBotCommands:
         value_raw = " ".join(context.args[1:])
 
         # Parse value type
+        value: int | float | bool | str
         try:
             value = int(value_raw)
         except ValueError:
@@ -1206,7 +1312,7 @@ class QuadBotCommands:
 
         try:
             if self._orchestrator is None:
-                await update.message.reply_text(
+                await message.reply_text(
                     "⚠️ Orchestrator is not available.",
                     parse_mode="Markdown",
                 )
@@ -1214,7 +1320,7 @@ class QuadBotCommands:
 
             config_mgr = getattr(self._orchestrator, "_config_manager", None)
             if config_mgr is None:
-                await update.message.reply_text(
+                await message.reply_text(
                     "⚠️ Config manager is not available.",
                     parse_mode="Markdown",
                 )
@@ -1242,10 +1348,10 @@ class QuadBotCommands:
                 msg += f"Env: `{env_var}`\n"
             msg += "\n_⚠️ Some changes may need a restart to take full effect_"
 
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
-            await update.message.reply_text(
+            await message.reply_text(
                 f"❌ Error setting `{key}`: {exc}",
                 parse_mode="Markdown",
             )
@@ -1258,8 +1364,9 @@ class QuadBotCommands:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Send AI-generated market analysis for configured underlyings."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_analyze", user=update.effective_user.id)
+        self._log.info("cmd_analyze", user=user.id)
 
         if self._groq_client is None:
             msg = (
@@ -1267,16 +1374,16 @@ class QuadBotCommands:
                 "The Groq API key is not configured. Set `GROQ_API_KEY` "
                 "in your `.env` file and restart the bot."
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         if self._market_data_engine is None:
             msg = "⚠️ Market data engine is not available."
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         # Send initial "thinking" message
-        status_msg = await update.message.reply_text(
+        status_msg = await message.reply_text(
             "🤔 Analysing market data...",
             parse_mode="Markdown",
         )
@@ -1291,9 +1398,15 @@ class QuadBotCommands:
             results: list[str] = []
             for underlying in underlyings:
                 try:
-                    mark_price = await self._market_data_engine.get_mark_price(underlying)
-                    funding_rate = await self._market_data_engine.get_funding_rate(underlying)
-                    order_book = await self._market_data_engine.get_order_book(underlying)
+                    mark_price = await self._market_data_engine.get_mark_price(
+                        underlying
+                    )
+                    funding_rate = await self._market_data_engine.get_funding_rate(
+                        underlying
+                    )
+                    order_book = await self._market_data_engine.get_order_book(
+                        underlying
+                    )
                     analysis = await analyze_market(
                         client=self._groq_client,
                         symbol=underlying,
@@ -1328,8 +1441,9 @@ class QuadBotCommands:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Ask Groq AI to recommend a strategy based on market conditions."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_ai_strategy", user=update.effective_user.id)
+        self._log.info("cmd_ai_strategy", user=user.id)
 
         if self._groq_client is None:
             msg = (
@@ -1337,15 +1451,15 @@ class QuadBotCommands:
                 "The Groq API key is not configured. Set `GROQ_API_KEY` "
                 "in your `.env` file and restart the bot."
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         if self._market_data_engine is None:
             msg = "⚠️ Market data engine is not available."
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
-        status_msg = await update.message.reply_text(
+        status_msg = await message.reply_text(
             "🤔 Consulting Groq AI on strategy selection...",
             parse_mode="Markdown",
         )
@@ -1356,7 +1470,7 @@ class QuadBotCommands:
             # Get data for the first configured underlying
             config = self._config
             underlyings = config["trading"]["underlyings"]
-            underlying = list(underlyings)[0] if underlyings else "BTCUSDT"
+            underlying = next(iter(underlyings), "BTCUSDT")
 
             mark_price = await self._market_data_engine.get_mark_price(underlying)
             funding_rate = await self._market_data_engine.get_funding_rate(underlying)
@@ -1389,8 +1503,9 @@ class QuadBotCommands:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show AI trading system status and metrics."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_ai_status", user=update.effective_user.id)
+        self._log.info("cmd_ai_status", user=user.id)
 
         if self._groq_client is None:
             msg = (
@@ -1398,7 +1513,7 @@ class QuadBotCommands:
                 "The Groq API key is not configured. Set `GROQ_API_KEY` "
                 "in your `.env` file and restart the bot."
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         try:
@@ -1408,7 +1523,9 @@ class QuadBotCommands:
             # Gather orchestrator AI info if available
             ai_info = {}
             if orchestrator is not None:
-                status_dict = orchestrator.status() if hasattr(orchestrator, "status") else {}
+                status_dict = (
+                    orchestrator.status() if hasattr(orchestrator, "status") else {}
+                )
                 ai_info = status_dict.get("ai", {})
 
             requests_window = stats.get("requests_in_window", 0)
@@ -1436,17 +1553,15 @@ class QuadBotCommands:
                 f"  Consecutive failures: {ai_info.get('consecutive_failures', 0)}\n"
             )
 
-            last_error = ai_info.get('last_error')
+            last_error = ai_info.get("last_error")
             if last_error:
                 msg += f"\n*Last Error:* `{last_error[:200]}`"
 
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
 
         except Exception as exc:
             self._log.exception("cmd_ai_status_error", error=str(exc))
-            await update.message.reply_text(
-                f"⚠️ AI status error: {exc}", parse_mode="Markdown"
-            )
+            await message.reply_text(f"⚠️ AI status error: {exc}", parse_mode="Markdown")
 
     def _build_usage_bar(self, used: int, total: int, width: int = 10) -> str:
         """Build a simple text progress bar for rate limit usage."""
@@ -1468,8 +1583,9 @@ class QuadBotCommands:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Request an AI-driven trading decision (ENTER/EXIT/HOLD)."""
+        message, user = self._narrow(update)
 
-        self._log.info("cmd_ai_decision", user=update.effective_user.id)
+        self._log.info("cmd_ai_decision", user=user.id)
 
         if self._groq_client is None:
             msg = (
@@ -1477,7 +1593,7 @@ class QuadBotCommands:
                 "The Groq API key is not configured. Set `GROQ_API_KEY` "
                 "in your `.env` file and restart the bot."
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         if not self._groq_client.is_available():
@@ -1486,15 +1602,15 @@ class QuadBotCommands:
                 "The daily request limit has been exhausted. "
                 "The AI decision will be available after the window resets."
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
         if self._orchestrator is None:
             msg = "⚠️ Orchestrator is not available."
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await message.reply_text(msg, parse_mode="Markdown")
             return
 
-        status_msg = await update.message.reply_text(
+        status_msg = await message.reply_text(
             "🤔 Running AI trading analysis cycle... (this may take 30-60 seconds)",
             parse_mode="Markdown",
         )
@@ -1554,7 +1670,9 @@ class QuadBotCommands:
                 await status_msg.edit_text(msg_text, parse_mode="Markdown")
 
                 # Execute if action is ENTER or EXIT
-                if action in ("ENTER", "EXIT") and hasattr(self._orchestrator, "_execute_ai_action"):
+                if action in ("ENTER", "EXIT") and hasattr(
+                    self._orchestrator, "_execute_ai_action"
+                ):
                     from quad.types.strategy import StrategyContext
 
                     strategy_context = StrategyContext(
@@ -1562,10 +1680,12 @@ class QuadBotCommands:
                         positions=positions,
                         futures_positions=positions,
                         orders=[],
-                        funding_rates=None,
+                        funding_rates={},
                         config=self._config,
                     )
-                    await self._orchestrator._execute_ai_action(decision, strategy_context)
+                    await self._orchestrator._execute_ai_action(
+                        decision, strategy_context
+                    )
 
                     # Append execution notification
                     await status_msg.edit_text(
@@ -1596,25 +1716,32 @@ class QuadBotCommands:
             update: Update, context: ContextTypes.DEFAULT_TYPE
         ) -> int:
             """Start the execute flow — show strategy picker."""
-            self._log.info("execute_start", user=update.effective_user.id)
+            message, user = self._narrow(update)
+            self._log.info("execute_start", user=user.id)
 
             from quad.strategy.base import StrategyRegistry
 
             strategies = StrategyRegistry.list()
             if not strategies:
-                await update.message.reply_text(
+                await message.reply_text(
                     "⚠️ No strategies are registered.", parse_mode="Markdown"
                 )
                 return ConversationHandler.END
 
             keyboard = [
-                [InlineKeyboardButton(s.replace("_", " ").title(), callback_data=f"exec_strat_{s}")]
+                [
+                    InlineKeyboardButton(
+                        s.replace("_", " ").title(), callback_data=f"exec_strat_{s}"
+                    )
+                ]
                 for s in strategies
             ]
-            keyboard.append([InlineKeyboardButton("Cancel", callback_data="exec_cancel")])
+            keyboard.append(
+                [InlineKeyboardButton("Cancel", callback_data="exec_cancel")]
+            )
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text(
+            await message.reply_text(
                 "🎯 *Execute Strategy*\n\nSelect a strategy to execute:",
                 parse_mode="Markdown",
                 reply_markup=reply_markup,
@@ -1634,8 +1761,12 @@ class QuadBotCommands:
                 await query.edit_message_text("✅ Execution cancelled.")
                 return ConversationHandler.END
 
+            if query.data is None:
+                return ConversationHandler.END
             strategy_name = query.data.replace("exec_strat_", "")
-            context.user_data["execute_strategy"] = strategy_name
+            user_data = context.user_data
+            assert user_data is not None
+            user_data["execute_strategy"] = strategy_name
 
             from quad.strategy.base import StrategyRegistry
 
@@ -1661,13 +1792,16 @@ class QuadBotCommands:
                 "Proceed with execution? This will evaluate the strategy "
                 "against current market data and submit orders if signals are generated."
             )
-            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+            await query.edit_message_text(
+                msg, parse_mode="Markdown", reply_markup=reply_markup
+            )
             return CONFIRMING_EXECUTION
 
         async def execute_confirm(
             update: Update, context: ContextTypes.DEFAULT_TYPE
         ) -> int:
             """Confirmed — execute via orchestrator."""
+            _, user = self._narrow(update)
             query = update.callback_query
             if query is None:
                 return ConversationHandler.END
@@ -1677,7 +1811,9 @@ class QuadBotCommands:
                 await query.edit_message_text("✅ Execution cancelled.")
                 return ConversationHandler.END
 
-            strategy_name = context.user_data.get("execute_strategy", "unknown")
+            user_data = context.user_data
+            assert user_data is not None
+            strategy_name = user_data.get("execute_strategy", "unknown")
 
             try:
                 await query.edit_message_text(
@@ -1688,7 +1824,9 @@ class QuadBotCommands:
                 if self._orchestrator is not None:
                     exec_method = getattr(self._orchestrator, "execute_strategy", None)
                     if exec_method is not None:
-                        result = await exec_method(strategy_name=strategy_name, dry_run=False)
+                        result = await exec_method(
+                            strategy_name=strategy_name, dry_run=False
+                        )
                         if result.get("error"):
                             await query.edit_message_text(
                                 f"⚠️ `{strategy_name}` execution error:\n{result['error']}",
@@ -1699,14 +1837,22 @@ class QuadBotCommands:
                             executed = result.get("executed", [])
                             parts = [f"✅ `{strategy_name}` executed successfully."]
                             if action_infos:
-                                parts.append(f"\n*Actions generated:* {result.get('actions_count', len(action_infos))}")
+                                parts.append(
+                                    f"\n*Actions generated:* {result.get('actions_count', len(action_infos))}"
+                                )
                                 for a in action_infos[:5]:
-                                    parts.append(f"  • `{a.get('type', '?')}` {a.get('contract', '')} {a.get('side', '')}")
+                                    parts.append(
+                                        f"  • `{a.get('type', '?')}` {a.get('contract', '')} {a.get('side', '')}"
+                                    )
                             if executed:
                                 parts.append("\n*Execution results:*")
                                 for e in executed[:5]:
-                                    e_status = e.get("result", e.get("error", "submitted"))
-                                    parts.append(f"  • `{e.get('action', '?')}` → {e_status}")
+                                    e_status = e.get(
+                                        "result", e.get("error", "submitted")
+                                    )
+                                    parts.append(
+                                        f"  • `{e.get('action', '?')}` → {e_status}"
+                                    )
                             await query.edit_message_text(
                                 "\n".join(parts),
                                 parse_mode="Markdown",
@@ -1714,7 +1860,7 @@ class QuadBotCommands:
                         self._log.info(
                             "execute_complete",
                             strategy=strategy_name,
-                            user=update.effective_user.id,
+                            user=user.id,
                         )
                     else:
                         await query.edit_message_text(
@@ -1730,10 +1876,12 @@ class QuadBotCommands:
                     )
 
             except Exception as exc:
-                self._log.exception("execute_error", strategy=strategy_name, error=str(exc))
+                self._log.exception(
+                    "execute_error", strategy=strategy_name, error=str(exc)
+                )
                 await query.edit_message_text(f"⚠️ Execution error: {exc}")
 
-            context.user_data.pop("execute_strategy", None)
+            user_data.pop("execute_strategy", None)
             return ConversationHandler.END
 
         async def execute_cancel(
@@ -1753,7 +1901,9 @@ class QuadBotCommands:
                     CallbackQueryHandler(execute_strategy_selected, pattern=r"^exec_")
                 ],
                 CONFIRMING_EXECUTION: [
-                    CallbackQueryHandler(execute_confirm, pattern=r"^(exec_confirm|exec_cancel)$")
+                    CallbackQueryHandler(
+                        execute_confirm, pattern=r"^(exec_confirm|exec_cancel)$"
+                    )
                 ],
             },
             fallbacks=[
@@ -1767,13 +1917,13 @@ class QuadBotCommands:
     # ------------------------------------------------------------------
 
     async def error_handler(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self, update: object, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Log errors and notify the admin chat."""
         self._log.error(
             "bot_error",
             error=str(context.error),
-            update_id=update.update_id if update else None,
+            update_id=getattr(update, "update_id", None),
         )
 
         # Notify admin chat if configured

@@ -120,7 +120,9 @@ class BacktestResult:
         return {
             "strategy": self.strategy_name,
             "underlying": self.underlying,
-            "period": f"{self.start.date()} to {self.end.date()}" if self.start and self.end else "N/A",
+            "period": f"{self.start.date()} to {self.end.date()}"
+            if self.start and self.end
+            else "N/A",
             "total_days": self.total_days,
             "total_trades": self.total_trades,
             "winning_trades": self.winning_trades,

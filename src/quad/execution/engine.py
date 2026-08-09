@@ -257,9 +257,7 @@ class ExecutionEngine:
             bracket_ids: dict[str, int] = {}
             # Closing side mirrors the entry: LONG -> SELL, SHORT -> BUY.
             close_side = (
-                "SELL"
-                if str(action.side or "").upper() in ("BUY", "LONG")
-                else "BUY"
+                "SELL" if str(action.side or "").upper() in ("BUY", "LONG") else "BUY"
             )
             if action.stop_loss_price is not None:
                 try:
@@ -606,7 +604,9 @@ class ExecutionEngine:
 
     async def _reconciliation_loop(self) -> None:
         """Background loop that periodically reconciles order state."""
-        interval = self._config.get("execution", {}).get("reconcile_interval_seconds", 60)
+        interval = self._config.get("execution", {}).get(
+            "reconcile_interval_seconds", 60
+        )
 
         while not self._stop_event.is_set():
             try:
@@ -639,7 +639,8 @@ class ExecutionEngine:
         order_request = OrderRequest(
             symbol=action.contract or "",
             side=action.side or "",
-            order_type=action.order_type or exec_cfg.get("default_order_type", "MARKET"),
+            order_type=action.order_type
+            or exec_cfg.get("default_order_type", "MARKET"),
             quantity=action.quantity,
             price=action.price,
             reduce_only=exec_cfg.get("reduce_only", False),

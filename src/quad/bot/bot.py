@@ -429,13 +429,9 @@ class QuadBot:
 
         # Optimization cycle: configurable interval (default every 7 days)
         if self._optimizer is not None:
-            interval_days = int(
-                self._config["retrain"]["interval_days"]
-            )
+            interval_days = int(self._config["retrain"]["interval_days"])
             interval_s = interval_days * 86400
-            first_s = int(
-                self._config["retrain"]["initial_delay_hours"]
-            ) * 3600
+            first_s = int(self._config["retrain"]["initial_delay_hours"]) * 3600
 
             job_queue.run_repeating(
                 self._jobs.job_optimization_cycle,
@@ -475,7 +471,11 @@ class QuadBot:
         funding_cost_minute = funding_cost_cfg["minute"]
         job_queue.run_daily(
             self._jobs.job_funding_cost_report,
-            time=dt.time(hour=funding_cost_hour, minute=funding_cost_minute, tzinfo=dt.timezone.utc),
+            time=dt.time(
+                hour=funding_cost_hour,
+                minute=funding_cost_minute,
+                tzinfo=dt.timezone.utc,
+            ),
             name="funding_cost_report",
         )
 

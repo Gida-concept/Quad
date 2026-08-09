@@ -8,7 +8,7 @@ SQLite ``?`` parameter style (via automatic $N to ? conversion).
 from __future__ import annotations
 
 import time
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 import structlog
 
@@ -59,9 +59,10 @@ class BaseRepository(Generic[T]):
         slow_query_threshold_ms: int = 500,
     ) -> None:
         self._db = db_manager
-        self._model_cls = model_cls  # type: ignore[assignment]
-        self._table = model_cls.__tablename__  # type: ignore[attr-defined]
-        self._columns = model_cls.columns()  # type: ignore[attr-defined]
+        assert model_cls is not None, "BaseRepository requires a model class"
+        self._model_cls = cast(Any, model_cls)
+        self._table = self._model_cls.__tablename__
+        self._columns = self._model_cls.columns()
         self._log = logger.bind(table=self._table)
         self._slow_query_threshold_ms = slow_query_threshold_ms
 
@@ -81,6 +82,10 @@ class BaseRepository(Generic[T]):
 
     def _column_list(self) -> str:
         return ", ".join(self._columns)
+
+    def _from_row(self, row: Any) -> T:
+        """Build a model instance from a database row (cast for typing)."""
+        return cast(T, self._model_cls.from_row(row))
 
     def _param_placeholders(self, start: int = 1) -> str:
         """Return a comma-separated list of positional placeholders."""
@@ -109,7 +114,7 @@ class BaseRepository(Generic[T]):
                 self._log.warning("slow_query", ms=round(dur), method="get", id=id)
             if row is None:
                 return None
-            return self._model_cls.from_row(row)  # type: ignore[attr-defined]
+            return self._from_row(row)
         except Exception:
             self._log.exception("get_failed", id=id)
             raise
@@ -125,7 +130,9 @@ class BaseRepository(Generic[T]):
                 if filters:
                     keys = list(filters.keys())
                     where = self._placeholder_clause(keys)
-                    sql = f"SELECT {self._column_list()} FROM {self._table} WHERE {where}"
+                    sql = (
+                        f"SELECT {self._column_list()} FROM {self._table} WHERE {where}"
+                    )
                     rows = await conn.fetch(sql, *filters.values())
                 else:
                     sql = f"SELECT {self._column_list()} FROM {self._table}"
@@ -134,7 +141,7 @@ class BaseRepository(Generic[T]):
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="list")
-            return [self._model_cls.from_row(r) for r in rows]  # type: ignore[attr-defined]
+            return [self._from_row(r) for r in rows]
         except Exception:
             self._log.exception("list_failed")
             raise
@@ -154,7 +161,7 @@ class BaseRepository(Generic[T]):
             if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="create")
             self._log.info("row_created", id=last_id)
-            return last_id  # type: ignore[return-value]
+            return last_id
         except Exception:
             self._log.exception("create_failed")
             raise
@@ -216,13 +223,11 @@ class BaseRepository(Generic[T]):
                         *filters.values(),
                     )
                 else:
-                    row = await conn.fetchval(
-                        f"SELECT COUNT(*) FROM {self._table}"
-                    )
+                    row = await conn.fetchval(f"SELECT COUNT(*) FROM {self._table}")
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="count")
-            return row if row is not None else 0  # type: ignore[return-value]
+            return row if row is not None else 0
         except Exception:
             self._log.exception("count_failed")
             raise
@@ -302,7 +307,7 @@ class AccountRepository(BaseRepository[AccountModel]):
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="upsert_account")
-            return last_id  # type: ignore[return-value]
+            return last_id
         except Exception:
             self._log.exception("upsert_account_failed")
             raise
@@ -330,7 +335,9 @@ class PositionRepository(BaseRepository[PositionModel]):
         """Return positions for a given futures symbol."""
         return await self.list(symbol=symbol)
 
-    async def get_open_futures_positions(self, symbol: str, position_side: str | None = None) -> list[PositionModel]:
+    async def get_open_futures_positions(
+        self, symbol: str, position_side: str | None = None
+    ) -> list[PositionModel]:
         """Return open futures positions, optionally filtered by side."""
         t0 = time.monotonic()
         try:
@@ -339,7 +346,8 @@ class PositionRepository(BaseRepository[PositionModel]):
                     rows = await conn.fetch(
                         f"SELECT {self._column_list()} FROM {self._table} "
                         "WHERE status = 'OPEN' AND symbol = $1 AND position_side = $2",
-                        symbol, position_side,
+                        symbol,
+                        position_side,
                     )
                 else:
                     rows = await conn.fetch(
@@ -349,13 +357,17 @@ class PositionRepository(BaseRepository[PositionModel]):
                     )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_open_futures_positions")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_open_futures_positions"
+                )
             return [PositionModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_open_futures_positions_failed")
             raise
 
-    async def get_liquidation_risk_positions(self, distance_threshold_pct: float) -> list[PositionModel]:
+    async def get_liquidation_risk_positions(
+        self, distance_threshold_pct: float
+    ) -> list[PositionModel]:
         """Return positions where distance to liquidation is near threshold.
 
         This is a client-side filter since liquidation_price is stored as text.
@@ -370,7 +382,9 @@ class PositionRepository(BaseRepository[PositionModel]):
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_liquidation_risk_positions")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_liquidation_risk_positions"
+                )
             results: list[PositionModel] = []
             for r in rows:
                 pos = PositionModel.from_row(r)
@@ -511,11 +525,14 @@ class TradeRepository(BaseRepository[TradeModel]):
                     f"SELECT {self._column_list()} FROM {self._table} "
                     f"WHERE timestamp >= $1 AND timestamp <= $2 "
                     f"ORDER BY timestamp ASC",
-                    start, end,
+                    start,
+                    end,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_by_date_range"
+                )
             return [TradeModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_trades_by_date_range_failed")
@@ -567,11 +584,14 @@ class DecisionRepository(BaseRepository[DecisionModel]):
                     f"SELECT {self._column_list()} FROM {self._table} "
                     f"WHERE timestamp >= $1 AND timestamp <= $2 "
                     f"ORDER BY timestamp ASC",
-                    start, end,
+                    start,
+                    end,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_by_date_range"
+                )
             return [DecisionModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_decisions_by_date_range_failed")
@@ -653,7 +673,8 @@ class DecisionRepository(BaseRepository[DecisionModel]):
                             f"AND predicted_direction IN ('LONG', 'SHORT') "
                             f"AND timestamp >= $1 "
                             f"ORDER BY timestamp ASC LIMIT $2",
-                            since, limit,
+                            since,
+                            limit,
                         )
                     else:
                         rows = await conn.fetch(
@@ -661,7 +682,8 @@ class DecisionRepository(BaseRepository[DecisionModel]):
                             f"WHERE outcome != 'open' "
                             f"AND timestamp >= $1 "
                             f"ORDER BY timestamp ASC LIMIT $2",
-                            since, limit,
+                            since,
+                            limit,
                         )
                 else:
                     if only_directional:
@@ -826,11 +848,14 @@ class PerformanceSnapshotRepository(BaseRepository[PerformanceSnapshotModel]):
                     f"SELECT {self._column_list()} FROM {self._table} "
                     f"WHERE timestamp >= $1 AND timestamp <= $2 "
                     f"ORDER BY timestamp ASC",
-                    start, end,
+                    start,
+                    end,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_by_date_range"
+                )
             return [PerformanceSnapshotModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_snapshots_by_date_range_failed")
@@ -856,7 +881,8 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
                 f"SELECT {self._column_list()} FROM {self._table} "
                 "WHERE run_at >= $1 AND run_at <= $2 "
                 "ORDER BY run_at DESC",
-                start, end,
+                start,
+                end,
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -890,7 +916,9 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
             return self._model_cls.from_row(row) if row else None
 
 
-class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommendationModel]):
+class OptimizationRecommendationRepository(
+    BaseRepository[OptimizationRecommendationModel]
+):
     """Repository for optimization_recommendation operations."""
 
     def __init__(
@@ -919,7 +947,9 @@ class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommenda
             )
             return [self._model_cls.from_row(row) for row in rows]
 
-    async def get_by_type(self, recommendation_type: str) -> list[OptimizationRecommendationModel]:
+    async def get_by_type(
+        self, recommendation_type: str
+    ) -> list[OptimizationRecommendationModel]:
         """Return recommendations of a given type."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -939,8 +969,9 @@ class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommenda
             )
             return [self._model_cls.from_row(row) for row in rows]
 
-    async def mark_applied(self, recommendation_id: int, applied_at: int,
-                           strategy_params_json: str) -> None:
+    async def mark_applied(
+        self, recommendation_id: int, applied_at: int, strategy_params_json: str
+    ) -> None:
         """Mark a recommendation as applied."""
         async with self._db.pool.acquire() as conn:
             await conn.execute(
@@ -948,7 +979,9 @@ class OptimizationRecommendationRepository(BaseRepository[OptimizationRecommenda
                 "SET status = 'applied', applied_at = $1, "
                 "    applied_strategy_params_json = $2 "
                 "WHERE id = $3",
-                applied_at, strategy_params_json, recommendation_id,
+                applied_at,
+                strategy_params_json,
+                recommendation_id,
             )
 
 
@@ -976,7 +1009,8 @@ class ConfigChangeRepository(BaseRepository[ConfigChangeModel]):
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {self._column_list()} FROM {self._table} WHERE key = $1 ORDER BY id DESC LIMIT $2",
-                key, limit,
+                key,
+                limit,
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -1001,7 +1035,8 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
                     "WHERE breaker_name = $1 ORDER BY timestamp DESC LIMIT $2",
-                    breaker_name, limit,
+                    breaker_name,
+                    limit,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1040,11 +1075,14 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
                     f"SELECT {self._column_list()} FROM {self._table} "
                     "WHERE timestamp >= $1 AND timestamp <= $2 "
                     "ORDER BY timestamp ASC",
-                    start, end,
+                    start,
+                    end,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_by_date_range"
+                )
             return [CircuitBreakerEventModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_circuit_events_by_date_range_failed")
@@ -1061,9 +1099,7 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
     ) -> None:
         super().__init__(db_manager, model_cls or ErrorLogModel)
 
-    async def get_by_level(
-        self, level: str, limit: int = 50
-    ) -> list[ErrorLogModel]:
+    async def get_by_level(self, level: str, limit: int = 50) -> list[ErrorLogModel]:
         """Return the most recent error logs for a given severity level."""
         t0 = time.monotonic()
         try:
@@ -1071,7 +1107,8 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
                     "WHERE level = $1 ORDER BY timestamp DESC LIMIT $2",
-                    level, limit,
+                    level,
+                    limit,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1099,9 +1136,7 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
             self._log.exception("get_recent_error_logs_failed")
             raise
 
-    async def get_by_date_range(
-        self, start: int, end: int
-    ) -> list[ErrorLogModel]:
+    async def get_by_date_range(self, start: int, end: int) -> list[ErrorLogModel]:
         """Return error logs within a timestamp range (inclusive)."""
         t0 = time.monotonic()
         try:
@@ -1110,19 +1145,20 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
                     f"SELECT {self._column_list()} FROM {self._table} "
                     "WHERE timestamp >= $1 AND timestamp <= $2 "
                     "ORDER BY timestamp ASC",
-                    start, end,
+                    start,
+                    end,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_by_date_range")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_by_date_range"
+                )
             return [ErrorLogModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_error_logs_by_date_range_failed")
             raise
 
-    async def get_by_source(
-        self, source: str, limit: int = 50
-    ) -> list[ErrorLogModel]:
+    async def get_by_source(self, source: str, limit: int = 50) -> list[ErrorLogModel]:
         """Return the most recent error logs from a specific component (event name)."""
         t0 = time.monotonic()
         try:
@@ -1130,7 +1166,8 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
                     "WHERE event = $1 ORDER BY timestamp DESC LIMIT $2",
-                    source, limit,
+                    source,
+                    limit,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1216,7 +1253,7 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="upsert")
-            return last_id  # type: ignore[return-value]
+            return last_id
         except Exception:
             self._log.exception("upsert_strategy_state_failed")
             raise
@@ -1243,8 +1280,12 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
         """Record a funding payment."""
         now = int(time.time() * 1000)
         payment = FundingPaymentModel(
-            id=0, symbol=symbol, position_id=position_id,
-            amount=amount, rate=rate, funding_time=now,
+            id=0,
+            symbol=symbol,
+            position_id=position_id,
+            amount=amount,
+            rate=rate,
+            funding_time=now,
         )
         return await self.create(payment)
 
@@ -1258,11 +1299,14 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
                     "WHERE symbol = $1 ORDER BY funding_time DESC LIMIT $2",
-                    symbol, limit,
+                    symbol,
+                    limit,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_funding_history")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_funding_history"
+                )
             return [FundingPaymentModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_funding_history_failed")
@@ -1280,7 +1324,9 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_total_funding_paid")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_total_funding_paid"
+                )
             return str(row) if row is not None else "0"
         except Exception:
             self._log.exception("get_total_funding_paid_failed")
@@ -1303,8 +1349,13 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
         """Record a liquidation event."""
         now = int(time.time() * 1000)
         event = LiquidationEventModel(
-            id=0, symbol=symbol, position_id=position_id,
-            amount=amount, price=price, side=side, timestamp=now,
+            id=0,
+            symbol=symbol,
+            position_id=position_id,
+            amount=amount,
+            price=price,
+            side=side,
+            timestamp=now,
         )
         return await self.create(event)
 
@@ -1321,7 +1372,8 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
                         f"SELECT {self._column_list()} FROM {self._table} "
                         "WHERE timestamp >= $1 AND symbol = $2 "
                         "ORDER BY timestamp DESC",
-                        cutoff, symbol,
+                        cutoff,
+                        symbol,
                     )
                 else:
                     rows = await conn.fetch(
@@ -1331,7 +1383,9 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
                     )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
-                self._log.warning("slow_query", ms=round(dur), method="get_recent_liquidations")
+                self._log.warning(
+                    "slow_query", ms=round(dur), method="get_recent_liquidations"
+                )
             return [LiquidationEventModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_recent_liquidations_failed")

@@ -102,8 +102,6 @@ ml-service/trained_models/archive/
 *.cert
 secrets/
 
-# === Docs (except README) ===
-docs/
 
 # === Project management / agent files ===
 CLAUDE.md

@@ -70,9 +70,11 @@ def effective_min_liquidation_distance(
     lev = max(1, int(leverage or 1))
     return min(configured, fraction / Decimal(lev))
 
+
 # ---------------------------------------------------------------------------
 # Helper: identify entry actions
 # ---------------------------------------------------------------------------
+
 
 def _is_entry(action_type: str) -> bool:
     """Return True for action types that open a new position."""
@@ -111,9 +113,7 @@ class GatePipeline:
     # Public evaluation API
     # ------------------------------------------------------------------
 
-    async def evaluate(
-        self, action: Action, context: StrategyContext
-    ) -> RiskResult:
+    async def evaluate(self, action: Action, context: StrategyContext) -> RiskResult:
         """Run through all 9 gates. Short-circuits on first failure.
 
         Returns
@@ -138,9 +138,7 @@ class GatePipeline:
             gate="ALL",
             reason="All gates passed",
             details={
-                "gates_checked": [
-                    g for g in ALL_GATES if self._enabled.get(g, False)
-                ]
+                "gates_checked": [g for g in ALL_GATES if self._enabled.get(g, False)]
             },
         )
 
@@ -193,11 +191,7 @@ class GatePipeline:
         limit = int(self._cfg["max_positions"])
         # Count futures positions with non-zero size
         open_count = len(
-            [
-                p
-                for p in (context.futures_positions or [])
-                if abs(p.size) > 0
-            ]
+            [p for p in (context.futures_positions or []) if abs(p.size) > 0]
         )
 
         # Entry actions count toward the limit
@@ -229,9 +223,7 @@ class GatePipeline:
     ) -> RiskResult:
         """Gate: reject if total notional exposure exceeds portfolio risk %."""
         max_risk_pct = Decimal(str(self._cfg["max_portfolio_risk_pct"]))
-        portfolio_value = (
-            context.account.total_usdt if context.account else Decimal(0)
-        )
+        portfolio_value = context.account.total_usdt if context.account else Decimal(0)
         if portfolio_value <= Decimal(0):
             return RiskResult(
                 passed=True,
@@ -279,20 +271,13 @@ class GatePipeline:
     ) -> RiskResult:
         """Gate: reject if daily realised loss exceeds the configured limit."""
         max_loss = Decimal(str(self._cfg["max_daily_loss_usd"]))
-        daily_pnl = (
-            context.risk_status.daily_pnl
-            if context.risk_status
-            else Decimal(0)
-        )
+        daily_pnl = context.risk_status.daily_pnl if context.risk_status else Decimal(0)
 
         if daily_pnl < -max_loss:
             return RiskResult(
                 passed=False,
                 gate=DAILY_LOSS_GATE,
-                reason=(
-                    f"Daily loss {daily_pnl:.2f} exceeds limit "
-                    f"{-max_loss:.2f}"
-                ),
+                reason=(f"Daily loss {daily_pnl:.2f} exceeds limit {-max_loss:.2f}"),
                 details={
                     "daily_pnl": str(daily_pnl),
                     "max_daily_loss": str(-max_loss),
@@ -310,9 +295,7 @@ class GatePipeline:
         """Gate: reject if current drawdown exceeds the configured limit."""
         max_dd_pct = Decimal(str(self._cfg["max_drawdown_pct"]))
         current_dd = (
-            context.risk_status.drawdown_percent
-            if context.risk_status
-            else Decimal(0)
+            context.risk_status.drawdown_percent if context.risk_status else Decimal(0)
         )
 
         if current_dd > max_dd_pct:
@@ -320,8 +303,7 @@ class GatePipeline:
                 passed=False,
                 gate=DRAWDOWN_GATE,
                 reason=(
-                    f"Drawdown {current_dd:.2f}% exceeds limit "
-                    f"of {max_dd_pct:.2f}%"
+                    f"Drawdown {current_dd:.2f}% exceeds limit of {max_dd_pct:.2f}%"
                 ),
                 details={
                     "drawdown_pct": str(current_dd),
@@ -331,10 +313,7 @@ class GatePipeline:
         return RiskResult(
             passed=True,
             gate=DRAWDOWN_GATE,
-            reason=(
-                f"Drawdown {current_dd:.2f}% within "
-                f"{max_dd_pct:.2f}% limit"
-            ),
+            reason=(f"Drawdown {current_dd:.2f}% within {max_dd_pct:.2f}% limit"),
         )
 
     async def _check_liquidation_risk(
@@ -359,21 +338,19 @@ class GatePipeline:
             )
 
             if pos.position_side.value == "long":
-                distance = (
-                    pos.mark_price - pos.liquidation_price
-                ) / pos.mark_price
+                distance = (pos.mark_price - pos.liquidation_price) / pos.mark_price
             else:
-                distance = (
-                    pos.liquidation_price - pos.mark_price
-                ) / pos.mark_price
+                distance = (pos.liquidation_price - pos.mark_price) / pos.mark_price
 
             if distance < float(min_distance):
-                near_liquidation.append({
-                    "symbol": pos.symbol,
-                    "side": pos.position_side.value,
-                    "distance_pct": round(distance * 100, 2),
-                    "min_distance_pct": round(float(min_distance) * 100, 2),
-                })
+                near_liquidation.append(
+                    {
+                        "symbol": pos.symbol,
+                        "side": pos.position_side.value,
+                        "distance_pct": round(distance * 100, 2),
+                        "min_distance_pct": round(float(min_distance) * 100, 2),
+                    }
+                )
 
         if near_liquidation:
             symbols = [n["symbol"] for n in near_liquidation]
@@ -440,9 +417,7 @@ class GatePipeline:
                 reason="Funding rate is zero or negative",
             )
 
-        projected_cost = position_value * funding_rate * Decimal(
-            str(funding_periods)
-        )
+        projected_cost = position_value * funding_rate * Decimal(str(funding_periods))
         cost_limit = position_value * max_cost_ratio
 
         if projected_cost > cost_limit:
@@ -465,10 +440,7 @@ class GatePipeline:
         return RiskResult(
             passed=True,
             gate=FUNDING_RATE_COST_GATE,
-            reason=(
-                f"Funding cost {projected_cost:.2f} within "
-                f"{cost_limit:.2f} limit"
-            ),
+            reason=(f"Funding cost {projected_cost:.2f} within {cost_limit:.2f} limit"),
         )
 
     async def _check_leverage_limit(
@@ -482,14 +454,10 @@ class GatePipeline:
         max_leverage = int(self._cfg["max_leverage"])
         # Also respect account-level max leverage
         if context.account and context.account.max_leverage > 0:
-            max_leverage = min(
-                max_leverage, context.account.max_leverage
-            )
+            max_leverage = min(max_leverage, context.account.max_leverage)
 
         wallet_balance = (
-            context.account.total_wallet_balance
-            if context.account
-            else Decimal(0)
+            context.account.total_wallet_balance if context.account else Decimal(0)
         )
         if wallet_balance <= Decimal(0):
             return RiskResult(
@@ -520,7 +488,9 @@ class GatePipeline:
                     f"max {max_leverage}x"
                 ),
                 details={
-                    "effective_leverage": str(effective_leverage.quantize(Decimal("0.01"))),
+                    "effective_leverage": str(
+                        effective_leverage.quantize(Decimal("0.01"))
+                    ),
                     "max_leverage": max_leverage,
                     "total_notional": str(total_notional.quantize(Decimal("0.01"))),
                     "wallet_balance": str(wallet_balance),
@@ -529,10 +499,7 @@ class GatePipeline:
         return RiskResult(
             passed=True,
             gate=LEVERAGE_LIMIT_GATE,
-            reason=(
-                f"Leverage {effective_leverage:.2f}x within "
-                f"{max_leverage}x limit"
-            ),
+            reason=(f"Leverage {effective_leverage:.2f}x within {max_leverage}x limit"),
         )
 
     async def _check_position_concentration(
@@ -544,9 +511,7 @@ class GatePipeline:
         max_position_concentration * portfolio_value.
         """
         max_conc = Decimal(str(self._cfg["max_position_concentration"]))
-        portfolio_value = (
-            context.account.total_usdt if context.account else Decimal(0)
-        )
+        portfolio_value = context.account.total_usdt if context.account else Decimal(0)
         if portfolio_value <= Decimal(0):
             return RiskResult(
                 passed=True,
@@ -561,17 +526,14 @@ class GatePipeline:
             size = Decimal(str(abs(pos.size)))
             mark_price = Decimal(str(pos.mark_price))
             notional = size * mark_price
-            notional_by_symbol[sym] = (
-                notional_by_symbol.get(sym, Decimal(0)) + notional
-            )
+            notional_by_symbol[sym] = notional_by_symbol.get(sym, Decimal(0)) + notional
 
         # Add proposed position notional for entry actions
         target_symbol = action.symbol
         if _is_entry(action.type) and action.quantity > Decimal(0):
-            notional_by_symbol[target_symbol] = (
-                notional_by_symbol.get(target_symbol, Decimal(0))
-                + abs(action.quantity)
-            )
+            notional_by_symbol[target_symbol] = notional_by_symbol.get(
+                target_symbol, Decimal(0)
+            ) + abs(action.quantity)
 
         # Check each symbol against the concentration limit
         limit_value = max_conc * portfolio_value
@@ -579,12 +541,16 @@ class GatePipeline:
         for sym, notional in notional_by_symbol.items():
             if notional > limit_value:
                 conc_pct = (notional / portfolio_value) * Decimal(100)
-                violations.append({
-                    "symbol": sym,
-                    "notional": str(notional.quantize(Decimal("0.01"))),
-                    "concentration_pct": str(conc_pct.quantize(Decimal("0.01"))),
-                    "limit_pct": str((max_conc * Decimal(100)).quantize(Decimal("0.01"))),
-                })
+                violations.append(
+                    {
+                        "symbol": sym,
+                        "notional": str(notional.quantize(Decimal("0.01"))),
+                        "concentration_pct": str(conc_pct.quantize(Decimal("0.01"))),
+                        "limit_pct": str(
+                            (max_conc * Decimal(100)).quantize(Decimal("0.01"))
+                        ),
+                    }
+                )
 
         if violations:
             return RiskResult(
@@ -609,9 +575,7 @@ class GatePipeline:
         total notional exceeds *correlation_threshold_pct* of the portfolio.
         """
         threshold_pct = Decimal(str(self._cfg["correlation_threshold_pct"]))
-        portfolio_value = (
-            context.account.total_usdt if context.account else Decimal(0)
-        )
+        portfolio_value = context.account.total_usdt if context.account else Decimal(0)
         if portfolio_value <= Decimal(0):
             return RiskResult(
                 passed=True,
@@ -634,9 +598,8 @@ class GatePipeline:
         # Add proposed position for entry actions
         if _is_entry(action.type) and action.quantity > Decimal(0) and action.symbol:
             quote = action.symbol[-4:] if len(action.symbol) >= 4 else action.symbol
-            notional_by_quote[quote] = (
-                notional_by_quote.get(quote, Decimal(0))
-                + abs(action.quantity)
+            notional_by_quote[quote] = notional_by_quote.get(quote, Decimal(0)) + abs(
+                action.quantity
             )
 
         threshold_value = threshold_pct / Decimal(100) * portfolio_value
@@ -644,11 +607,13 @@ class GatePipeline:
         for quote, notional in notional_by_quote.items():
             if notional > threshold_value:
                 pct = (notional / portfolio_value) * Decimal(100)
-                violations.append({
-                    "quote_asset": quote,
-                    "total_notional": str(notional.quantize(Decimal("0.01"))),
-                    "portfolio_pct": str(pct.quantize(Decimal("0.01"))),
-                })
+                violations.append(
+                    {
+                        "quote_asset": quote,
+                        "total_notional": str(notional.quantize(Decimal("0.01"))),
+                        "portfolio_pct": str(pct.quantize(Decimal("0.01"))),
+                    }
+                )
 
         if violations:
             return RiskResult(

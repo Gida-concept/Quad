@@ -7,10 +7,11 @@ for discovery and access.
 
 from __future__ import annotations
 
+import builtins
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import structlog
 
@@ -59,7 +60,7 @@ class StrategyBase(ABC):
     get_description(), and get_params_spec().
     """
 
-    registry: dict[str, type[StrategyBase]] = {}
+    registry: ClassVar[dict[str, type[StrategyBase]]] = {}
 
     # ---- Auto-registration via __init_subclass__ ----
 
@@ -112,17 +113,21 @@ class StrategyBase(ABC):
         spec_map = {s.name: s for s in self.get_params_spec()}
 
         for spec_entry in self.get_params_spec():
-            if spec_entry.required and spec_entry.name not in self.params and spec_entry.default is None:
+            if (
+                spec_entry.required
+                and spec_entry.name not in self.params
+                and spec_entry.default is None
+            ):
                 raise ValueError(
                     f"Missing required parameter '{spec_entry.name}' "
                     f"for strategy '{self.get_name()}'"
                 )
 
         for key, value in self.params.items():
-            spec_entry = spec_map.get(key)
-            if spec_entry is None:
+            matched = spec_map.get(key)
+            if matched is None:
                 continue
-            expected = spec_entry.type
+            expected = matched.type
             if expected == "int" and not isinstance(value, int):
                 raise TypeError(
                     f"Parameter '{key}' must be int, got {type(value).__name__}"
@@ -180,7 +185,7 @@ class StrategyBase(ABC):
         """
         return [
             Action(
-                type="hold",
+                type="HOLD",
                 strategy=self.get_name(),
                 reason=reason,
             )
@@ -258,21 +263,25 @@ class StrategyBase(ABC):
             tp_price = entry_price * (1 - tp_capital_pct / 100.0 / leverage)
 
         if sl_price > 0:
-            actions.append(Action(
-                type="set_stop_loss",
-                strategy=strategy_name,
-                symbol=symbol,
-                stop_loss_price=Decimal(str(round(sl_price, 8))),
-                reason=f"Stop loss at {sl_price:.8f} ({sl_capital_pct}% of capital at {leverage}x)",
-            ))
+            actions.append(
+                Action(
+                    type="set_stop_loss",
+                    strategy=strategy_name,
+                    symbol=symbol,
+                    stop_loss_price=Decimal(str(round(sl_price, 8))),
+                    reason=f"Stop loss at {sl_price:.8f} ({sl_capital_pct}% of capital at {leverage}x)",
+                )
+            )
         if tp_price > 0:
-            actions.append(Action(
-                type="set_take_profit",
-                strategy=strategy_name,
-                symbol=symbol,
-                take_profit_price=Decimal(str(round(tp_price, 8))),
-                reason=f"Take profit at {tp_price:.8f} ({tp_capital_pct}% of capital at {leverage}x)",
-            ))
+            actions.append(
+                Action(
+                    type="set_take_profit",
+                    strategy=strategy_name,
+                    symbol=symbol,
+                    take_profit_price=Decimal(str(round(tp_price, 8))),
+                    reason=f"Take profit at {tp_price:.8f} ({tp_capital_pct}% of capital at {leverage}x)",
+                )
+            )
 
         return actions
 
@@ -307,7 +316,9 @@ class StrategyBase(ABC):
         """
         return context.mark_prices.get(symbol)
 
-    def _get_atr(self, symbol: str, context: StrategyContext, period: int | None = None) -> float | None:
+    def _get_atr(
+        self, symbol: str, context: StrategyContext, period: int | None = None
+    ) -> float | None:
         """Estimate ATR from available price data in context.
 
         Simple implementation: returns the ATR value from strategy_params
@@ -461,13 +472,12 @@ class StrategyRegistry:
         return sorted(StrategyBase.registry.keys())
 
     @staticmethod
-    def get_specs() -> dict[str, list[ParamSpec]]:
+    def get_specs() -> dict[str, builtins.list[ParamSpec]]:
         """Get parameter specifications for all registered strategies.
 
         Returns:
             Dict mapping strategy name to its list of ParamSpec.
         """
         return {
-            name: cls.get_params_spec()
-            for name, cls in StrategyBase.registry.items()
+            name: cls.get_params_spec() for name, cls in StrategyBase.registry.items()
         }

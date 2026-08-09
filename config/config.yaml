@@ -83,7 +83,10 @@ ai:
 monitoring:
   health_server:
     port: 9090
-    bind_address: "0.0.0.0"
+    # Bind to loopback by default; set QUAD_HEALTH_API_KEY (or api_key below)
+    # to require an X-API-Key header and allow binding to 0.0.0.0.
+    bind_address: "127.0.0.1"
+    # api_key: ""  # prefer QUAD_HEALTH_API_KEY env var
     version: "0.1.0"
 
 strategy:

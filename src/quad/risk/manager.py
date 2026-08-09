@@ -63,9 +63,7 @@ class RiskManager:
     # Core evaluation
     # ------------------------------------------------------------------
 
-    async def evaluate(
-        self, action: Action, context: StrategyContext
-    ) -> RiskResult:
+    async def evaluate(self, action: Action, context: StrategyContext) -> RiskResult:
         """Evaluate a proposed action through all risk subsystems.
 
         Full evaluation flow:
@@ -91,16 +89,8 @@ class RiskManager:
         # Phase 1: Circuit breaker check
         if not self._breakers.is_trading_allowed():
             cb_status = self._breakers.status()
-            active_breakers = [
-                name
-                for name, s in cb_status.items()
-                if s.active
-            ]
-            reasons = {
-                name: s.reason
-                for name, s in cb_status.items()
-                if s.active
-            }
+            active_breakers = [name for name, s in cb_status.items() if s.active]
+            reasons = {name: s.reason for name, s in cb_status.items() if s.active}
             self._log.warning(
                 "trade_rejected_circuit_breakers",
                 active_breakers=active_breakers,
@@ -109,10 +99,7 @@ class RiskManager:
             return RiskResult(
                 passed=False,
                 gate="CIRCUIT_BREAKER",
-                reason=(
-                    f"Active breakers: {active_breakers}. "
-                    f"Reasons: {reasons}"
-                ),
+                reason=(f"Active breakers: {active_breakers}. Reasons: {reasons}"),
                 details={
                     "active_breakers": active_breakers,
                     "reasons": reasons,
@@ -169,9 +156,7 @@ class RiskManager:
                     avg_leverage=report.get("avg_leverage", "0"),
                 )
             except Exception as exc:
-                self._log.exception(
-                    "exposure_update_failed", error=str(exc)
-                )
+                self._log.exception("exposure_update_failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Status
@@ -190,9 +175,7 @@ class RiskManager:
             drawdown_percent=drawdown,
             daily_pnl=daily_pnl,
             daily_loss_limit=daily_loss_limit,
-            circuit_breakers={
-                name: s for name, s in cb_status.items()
-            },
+            circuit_breakers={name: s for name, s in cb_status.items()},
             gates=gate_status,
         )
 

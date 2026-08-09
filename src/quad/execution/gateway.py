@@ -40,9 +40,8 @@ class OrderTimeoutError(Exception):
     def __init__(self, client_order_id: str, timeout: int) -> None:
         self.client_order_id = client_order_id
         self.timeout = timeout
-        super().__init__(
-            f"Order {client_order_id} not confirmed within {timeout}s"
-        )
+        super().__init__(f"Order {client_order_id} not confirmed within {timeout}s")
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -188,7 +187,9 @@ class OrderGateway:
                     client_order_id=client_order_id,
                 )
                 if attempt < self._max_retries:
-                    await asyncio.sleep(self._backoff_base ** (attempt - 1))  # configurable backoff
+                    await asyncio.sleep(
+                        self._backoff_base ** (attempt - 1)
+                    )  # configurable backoff
             except Exception as exc:
                 # Non-transient error -- reject immediately
                 self._pending_confirmations.pop(client_order_id, None)
@@ -196,9 +197,7 @@ class OrderGateway:
 
         if last_error is not None:
             self._pending_confirmations.pop(client_order_id, None)
-            raise OrderRejectedError(
-                f"All retries exhausted: {last_error}", request
-            )
+            raise OrderRejectedError(f"All retries exhausted: {last_error}", request)
 
         # 4. Wait for confirmation (event is set immediately on REST success;
         #    in a WebSocket-based system a separate handler would set it)
@@ -211,6 +210,7 @@ class OrderGateway:
             self._pending_confirmations.pop(client_order_id, None)
 
         # 5. Track in active orders
+        assert result is not None, "order submission produced no result"
         order = Order(
             id=result.order_id,
             client_order_id=client_order_id,
@@ -303,8 +303,8 @@ class OrderGateway:
                     order.status = ex_order.status
                     order.filled_qty = ex_order.filled_qty
                     order.updated_at = int(time.time() * 1000)
-                except Exception:
-                    pass  # Return what we have in memory
+                except Exception:  # noqa: S110  Return what we have in memory
+                    pass
             return order
 
         # Fallback: scan exchange open orders
@@ -313,7 +313,7 @@ class OrderGateway:
             for o in open_orders:
                 if o.client_order_id == client_order_id:
                     return o
-        except Exception:
+        except Exception:  # noqa: S110  best-effort lookup; caller handles absence
             pass
 
         return None
@@ -358,9 +358,7 @@ class OrderGateway:
             elif local_order.status in ("NEW", "PARTIALLY_FILLED"):
                 # No longer in open orders -- query individually
                 try:
-                    ex_order = await self._exchange.get_order_status(
-                        local_order.id
-                    )
+                    ex_order = await self._exchange.get_order_status(local_order.id)
                     local_order.status = ex_order.status
                     local_order.filled_qty = ex_order.filled_qty
                     local_order.updated_at = int(time.time() * 1000)

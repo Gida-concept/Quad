@@ -40,17 +40,66 @@ class TrendFollowingStrategy(StrategyBase):
     @staticmethod
     def get_params_spec() -> list[ParamSpec]:
         return [
-            ParamSpec(name="fast_ema", type="int", default=9, description="Fast EMA period"),
-            ParamSpec(name="slow_ema", type="int", default=21, description="Slow EMA period"),
-            ParamSpec(name="adx_period", type="int", default=14, description="ADX calculation period"),
-            ParamSpec(name="adx_threshold", type="int", default=25, description="Minimum ADX for trend strength"),
-            ParamSpec(name="atr_period", type="int", default=14, description="ATR calculation period"),
-            ParamSpec(name="atr_multiplier_stop", type="float", default=3.0, description="ATR multiplier for trailing stop"),
-            ParamSpec(name="atr_default_pct", type="float", default=0.02, description="Default ATR as fraction of price"),
-            ParamSpec(name="trade_capital_usd", type="int", default=5, description="Capital per trade in USD"),
-            ParamSpec(name="tp_capital_pct", type="float", default=50.0, description="Take-profit as percentage of trade capital"),
-            ParamSpec(name="confidence_default", type="float", default=0.7, description="Default confidence for signals"),
-            ParamSpec(name="confidence_high", type="float", default=0.9, description="High confidence for strong signals"),
+            ParamSpec(
+                name="fast_ema", type="int", default=9, description="Fast EMA period"
+            ),
+            ParamSpec(
+                name="slow_ema", type="int", default=21, description="Slow EMA period"
+            ),
+            ParamSpec(
+                name="adx_period",
+                type="int",
+                default=14,
+                description="ADX calculation period",
+            ),
+            ParamSpec(
+                name="adx_threshold",
+                type="int",
+                default=25,
+                description="Minimum ADX for trend strength",
+            ),
+            ParamSpec(
+                name="atr_period",
+                type="int",
+                default=14,
+                description="ATR calculation period",
+            ),
+            ParamSpec(
+                name="atr_multiplier_stop",
+                type="float",
+                default=3.0,
+                description="ATR multiplier for trailing stop",
+            ),
+            ParamSpec(
+                name="atr_default_pct",
+                type="float",
+                default=0.02,
+                description="Default ATR as fraction of price",
+            ),
+            ParamSpec(
+                name="trade_capital_usd",
+                type="int",
+                default=5,
+                description="Capital per trade in USD",
+            ),
+            ParamSpec(
+                name="tp_capital_pct",
+                type="float",
+                default=50.0,
+                description="Take-profit as percentage of trade capital",
+            ),
+            ParamSpec(
+                name="confidence_default",
+                type="float",
+                default=0.7,
+                description="Default confidence for signals",
+            ),
+            ParamSpec(
+                name="confidence_high",
+                type="float",
+                default=0.9,
+                description="High confidence for strong signals",
+            ),
         ]
 
     async def evaluate(self, context: StrategyContext) -> list[Action]:
@@ -127,11 +176,21 @@ class TrendFollowingStrategy(StrategyBase):
         slow_ema = ema_data.get("slow", 0)
 
         trade_capital = int(self.get_param("trade_capital_usd", 5))
-        sl_pct = float(self._config.get("risk", {}).get("per_position_sl", {}).get("capital_pct", 30.0))
-        tp_pct = float(self._config.get("risk", {}).get("per_position_tp", {}).get("capital_pct", 50.0))
+        sl_pct = float(
+            self._config.get("risk", {})
+            .get("per_position_sl", {})
+            .get("capital_pct", 30.0)
+        )
+        tp_pct = float(
+            self._config.get("risk", {})
+            .get("per_position_tp", {})
+            .get("capital_pct", 50.0)
+        )
         leverage = int(self._config.get("trading", {}).get("leverage", 50))
         # Read absolute max position size from risk config (single source of truth)
-        max_pos_size = float(self._config.get("risk", {}).get("max_position_size_usd", 10000))
+        max_pos_size = float(
+            self._config.get("risk", {}).get("max_position_size_usd", 10000)
+        )
 
         # LONG: fast EMA > slow EMA + strong trend
         if fast_ema > slow_ema:
@@ -218,9 +277,7 @@ class TrendFollowingStrategy(StrategyBase):
 
         atr = self._get_atr(position.symbol, context)
         if atr:
-            stop_distance = atr * float(
-                self.get_param("atr_multiplier_stop", 3.0)
-            )
+            stop_distance = atr * float(self.get_param("atr_multiplier_stop", 3.0))
             side = position.position_side
             if isinstance(side, str):
                 side = side.lower()
@@ -234,9 +291,7 @@ class TrendFollowingStrategy(StrategyBase):
                         symbol=position.symbol,
                         quantity=Decimal(str(position.size)),
                         reason=f"Trailing stop hit for {position.symbol}",
-                        confidence=float(
-                            self.get_param("confidence_default", 0.9)
-                        ),
+                        confidence=float(self.get_param("confidence_default", 0.9)),
                     )
                 ]
             elif side == "short" and price > entry + stop_distance:
@@ -247,9 +302,7 @@ class TrendFollowingStrategy(StrategyBase):
                         symbol=position.symbol,
                         quantity=Decimal(str(position.size)),
                         reason=f"Trailing stop hit for {position.symbol}",
-                        confidence=float(
-                            self.get_param("confidence_default", 0.9)
-                        ),
+                        confidence=float(self.get_param("confidence_default", 0.9)),
                     )
                 ]
 
@@ -261,9 +314,7 @@ class TrendFollowingStrategy(StrategyBase):
     # Indicator extraction helpers
     # ------------------------------------------------------------------
 
-    def _get_ema_data(
-        self, symbol: str, context: StrategyContext
-    ) -> dict | None:
+    def _get_ema_data(self, symbol: str, context: StrategyContext) -> dict | None:
         """Extract pre-computed EMA values from context strategy params."""
         fast_key = f"ema_fast_{symbol}"
         slow_key = f"ema_slow_{symbol}"
@@ -327,9 +378,7 @@ class TrendFollowingStrategy(StrategyBase):
         Returns:
             Dict with 'fast' and 'slow' EMA values, or None.
         """
-        closes = [
-            float(c.get("close", 0)) for c in candles if c.get("close")
-        ]
+        closes = [float(c.get("close", 0)) for c in candles if c.get("close")]
         if len(closes) < slow + 1:
             return None
 
@@ -348,9 +397,7 @@ class TrendFollowingStrategy(StrategyBase):
         }
 
     @staticmethod
-    def _compute_adx(
-        candles: list[dict[str, Any]], period: int
-    ) -> float | None:
+    def _compute_adx(candles: list[dict[str, Any]], period: int) -> float | None:
         """Compute ADX (Average Directional Index) from candles.
 
         Uses a simplified approximation: average of +DI and -DI
@@ -363,15 +410,9 @@ class TrendFollowingStrategy(StrategyBase):
         Returns:
             ADX value, or None if insufficient data.
         """
-        highs = [
-            float(c.get("high", 0)) for c in candles if c.get("high")
-        ]
-        lows = [
-            float(c.get("low", 0)) for c in candles if c.get("low")
-        ]
-        closes = [
-            float(c.get("close", 0)) for c in candles if c.get("close")
-        ]
+        highs = [float(c.get("high", 0)) for c in candles if c.get("high")]
+        lows = [float(c.get("low", 0)) for c in candles if c.get("low")]
+        closes = [float(c.get("close", 0)) for c in candles if c.get("close")]
 
         if len(highs) < period + 1 or len(lows) < period + 1:
             return None
@@ -418,7 +459,11 @@ class TrendFollowingStrategy(StrategyBase):
         di_plus = 100.0 * avg_dm_plus / atr if atr > 0 else 0
         di_minus = 100.0 * avg_dm_minus / atr if atr > 0 else 0
 
-        dx = 100.0 * abs(di_plus - di_minus) / (di_plus + di_minus) if (di_plus + di_minus) > 0 else 0
+        dx = (
+            100.0 * abs(di_plus - di_minus) / (di_plus + di_minus)
+            if (di_plus + di_minus) > 0
+            else 0
+        )
         adx = statistics.mean([dx] * 1)  # Simplified: single-period ADX
 
         return round(adx, 2)

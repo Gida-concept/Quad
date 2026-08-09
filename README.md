@@ -127,6 +127,10 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 ## Quick Start
 
+> **Python version**: Quad targets **Python 3.12+** (matching the Docker images
+> and CI). The codebase also runs on **3.10+** (`requires-python = ">=3.10"`), so
+> existing 3.10 environments work, but 3.12 is the reference runtime.
+
 ```bash
 # Clone and install
 git clone https://github.com/your-org/quad.git

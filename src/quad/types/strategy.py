@@ -1,4 +1,4 @@
-"""Strategy system types for Quad options trading bot.
+"""Strategy system types for Quad USD-M futures trading bot.
 
 This module defines types for the strategy execution context
 and data access interfaces used by strategies.

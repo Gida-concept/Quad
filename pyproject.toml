@@ -5,15 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quad"
 version = "0.1.0"
-description = "Production-grade open-source options trading bot for Binance Options"
+description = "Production-grade open-source USD-M futures trading bot for Binance Futures"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-keywords = ["trading", "options", "binance", "crypto"]
+keywords = ["trading", "futures", "usdm", "binance", "crypto"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial :: Investment",
@@ -42,3 +43,20 @@ quad-bot = "quad.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# BLE001 (blind `except Exception`) is a deliberate boundary-resilience
+# pattern across this codebase: 140/151 sites log and continue, and the
+# remaining 11 are annotated shutdown/best-effort paths. See ADR-094.
+extend-ignore = ["BLE001"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["yaml", "numpy"]
+ignore_missing_imports = true

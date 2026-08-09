@@ -137,22 +137,14 @@ def convert_to_action(
     raw = parsed.get("raw", "")
 
     # ----- Extract symbol -----
-    symbol = (
-        parsed.get("ticker")
-        or parsed.get("symbol")
-        or parsed.get("market")
-        or ""
-    )
+    symbol = parsed.get("ticker") or parsed.get("symbol") or parsed.get("market") or ""
     if not symbol:
         logger.warning("tv_signal_missing_symbol", raw=raw[:200])
         return None
 
     # ----- Extract side / action -----
     action = (
-        parsed.get("action")
-        or parsed.get("side")
-        or parsed.get("order_action")
-        or ""
+        parsed.get("action") or parsed.get("side") or parsed.get("order_action") or ""
     )
     action_lower = action.strip().lower()
     side = _ACTION_TO_SIDE.get(action_lower, "BUY")
@@ -179,11 +171,29 @@ def convert_to_action(
 
     # ----- Preserve all unrecognised fields as metadata -----
     known_keys = {
-        "ticker", "symbol", "market", "action", "side", "order_action",
-        "quantity", "qty", "contracts", "price", "limit_price", "strategy",
-        "secret", "order_type", "time_in_force", "takeprofit", "stoploss",
-        "raw", "_format", "_content_type", "_parse_error",
-        "alert_message", "message",
+        "ticker",
+        "symbol",
+        "market",
+        "action",
+        "side",
+        "order_action",
+        "quantity",
+        "qty",
+        "contracts",
+        "price",
+        "limit_price",
+        "strategy",
+        "secret",
+        "order_type",
+        "time_in_force",
+        "takeprofit",
+        "stoploss",
+        "raw",
+        "_format",
+        "_content_type",
+        "_parse_error",
+        "alert_message",
+        "message",
     }
     metadata = {k: v for k, v in parsed.items() if k not in known_keys}
 

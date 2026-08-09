@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # Trading Section
 # ============================================================================
 
+
 class TradingConfig(BaseModel):
     """Configuration for trading behavior and parameters."""
 
@@ -44,7 +45,13 @@ class TradingConfig(BaseModel):
         description="Seconds between AI-driven analysis cycles (default 1 hour)",
     )
     underlyings: list[str] = Field(
-        default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"],
+        default_factory=lambda: [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "DOGEUSDT",
+        ],
         description="List of underlying assets the bot monitors",
     )
     leverage: int = Field(default=1, ge=1, le=125)
@@ -71,6 +78,7 @@ class TradingConfig(BaseModel):
 # ============================================================================
 # Exchange Section
 # ============================================================================
+
 
 class RateLimitConfig(BaseModel):
     """Exchange rate limiting configuration."""
@@ -121,55 +129,71 @@ class BinanceConfig(BaseModel):
         description="Response header key for order count",
     )
     rate_limit_warn_threshold: float = Field(
-        default=0.80, ge=0.0, le=1.0,
+        default=0.80,
+        ge=0.0,
+        le=1.0,
         description="Rate-limit warning threshold as fraction of max weight",
     )
     rate_limit_hard_threshold: float = Field(
-        default=0.95, ge=0.0, le=1.0,
+        default=0.95,
+        ge=0.0,
+        le=1.0,
         description="Rate-limit hard threshold as fraction of max weight",
     )
     ws_backoff_base_seconds: float = Field(
-        default=1.0, ge=0.1,
+        default=1.0,
+        ge=0.1,
         description="Initial WebSocket reconnection backoff in seconds",
     )
     ws_backoff_max_seconds: float = Field(
-        default=30.0, ge=1.0,
+        default=30.0,
+        ge=1.0,
         description="Maximum WebSocket reconnection backoff in seconds",
     )
     ws_backoff_multiplier: float = Field(
-        default=2.0, ge=1.0,
+        default=2.0,
+        ge=1.0,
         description="WebSocket backoff multiplier per retry",
     )
     ws_backoff_jitter_factor: float = Field(
-        default=0.1, ge=0.0, le=1.0,
+        default=0.1,
+        ge=0.0,
+        le=1.0,
         description="WebSocket backoff jitter factor",
     )
     ws_max_retries: int = Field(
-        default=10, ge=1,
+        default=10,
+        ge=1,
         description="Maximum WebSocket reconnection retries",
     )
     listen_key_refresh_seconds: int = Field(
-        default=3300, ge=60,
+        default=3300,
+        ge=60,
         description="Interval between listen-key refreshes (default 55 min)",
     )
     request_timeout_seconds: float = Field(
-        default=30.0, ge=5.0,
+        default=30.0,
+        ge=5.0,
         description="REST API request timeout in seconds",
     )
     connect_timeout_seconds: float = Field(
-        default=10.0, ge=1.0,
+        default=10.0,
+        ge=1.0,
         description="REST API connection timeout in seconds",
     )
     recv_window: int = Field(
-        default=5000, ge=1000,
+        default=5000,
+        ge=1000,
         description="Default receive window for signed requests (ms)",
     )
     heartbeat_seconds: float = Field(
-        default=30.0, ge=5.0,
+        default=30.0,
+        ge=5.0,
         description="WebSocket heartbeat interval in seconds",
     )
     max_retries: int = Field(
-        default=3, ge=1,
+        default=3,
+        ge=1,
         description="Maximum REST API request retries",
     )
     new_order_resp_type: str = Field(
@@ -177,15 +201,18 @@ class BinanceConfig(BaseModel):
         description="newOrderRespType parameter for Binance order placement",
     )
     rate_limiter_wait_seconds: float = Field(
-        default=1.0, ge=0.1,
+        default=1.0,
+        ge=0.1,
         description="Seconds to wait when rate-limited",
     )
     retry_after_fallback_seconds: float = Field(
-        default=5.0, ge=1.0,
+        default=5.0,
+        ge=1.0,
         description="Fallback retry-after seconds when header is missing",
     )
     retry_backoff_base: float = Field(
-        default=2.0, ge=0.1,
+        default=2.0,
+        ge=0.1,
         description="Exponential retry backoff base in seconds for REST API requests",
     )
 
@@ -194,19 +221,23 @@ class OrderGatewayConfig(BaseModel):
     """Order gateway confirmation and retry parameters."""
 
     confirmation_timeout_seconds: float = Field(
-        default=30.0, ge=5.0,
+        default=30.0,
+        ge=5.0,
         description="Max seconds to wait for order confirmation",
     )
     max_retries: int = Field(
-        default=3, ge=0,
+        default=3,
+        ge=0,
         description="Maximum order placement retries",
     )
     completed_ids_maxlen: int = Field(
-        default=1000, ge=100,
+        default=1000,
+        ge=100,
         description="Max completed order IDs to track (ring buffer)",
     )
     backoff_base_seconds: float = Field(
-        default=2.0, ge=0.1,
+        default=2.0,
+        ge=0.1,
         description="Base exponential backoff in seconds for order retries",
     )
 
@@ -215,15 +246,18 @@ class FillReconcilerConfig(BaseModel):
     """Fill reconciler discrepancy tracking parameters."""
 
     max_discrepancy_history: int = Field(
-        default=500, ge=10,
+        default=500,
+        ge=10,
         description="Max discrepancy records to keep in ring buffer",
     )
     stale_order_hours: int = Field(
-        default=24, ge=1,
+        default=24,
+        ge=1,
         description="Hours after which an unreconciled order is considered stale",
     )
     recent_discrepancies_default_count: int = Field(
-        default=20, ge=1,
+        default=20,
+        ge=1,
         description="Default count for get_recent_discrepancies()",
     )
 
@@ -270,15 +304,14 @@ class ExchangeConfig(BaseModel):
         """Validate exchange name is supported."""
         allowed = {"binance", "mock"}
         if value.lower() not in allowed:
-            raise ValueError(
-                f"exchange name must be one of {allowed}, got '{value}'"
-            )
+            raise ValueError(f"exchange name must be one of {allowed}, got '{value}'")
         return value.lower()
 
 
 # ============================================================================
 # Risk Section
 # ============================================================================
+
 
 class DailyLossBreakerConfig(BaseModel):
     """Daily loss circuit breaker configuration."""
@@ -292,7 +325,8 @@ class ConsecutiveLossesBreakerConfig(BaseModel):
     """Consecutive losses circuit breaker configuration."""
 
     max_consecutive: int = Field(
-        default=5, ge=1,
+        default=5,
+        ge=1,
         description="Max consecutive losing trades before breaker triggers",
     )
 
@@ -301,7 +335,9 @@ class LiquidationCascadeBreakerConfig(BaseModel):
     """Liquidation cascade circuit breaker configuration."""
 
     min_cascade_distance_pct: float = Field(
-        default=0.05, ge=0.0, le=1.0,
+        default=0.05,
+        ge=0.0,
+        le=1.0,
         description="Minimum distance to liquidation (decimal) before cascade risk",
     )
 
@@ -310,11 +346,13 @@ class FundingRateSpikeBreakerConfig(BaseModel):
     """Funding rate spike circuit breaker configuration."""
 
     funding_rate_spike_threshold: float = Field(
-        default=0.001, ge=0.0,
+        default=0.001,
+        ge=0.0,
         description="Funding rate spike threshold (decimal)",
     )
     max_consecutive_spikes: int = Field(
-        default=3, ge=1,
+        default=3,
+        ge=1,
         description="Max consecutive funding rate spikes before escalation",
     )
 
@@ -323,7 +361,8 @@ class VolatilityBreakerConfig(BaseModel):
     """Volatility circuit breaker configuration."""
 
     volatility_breaker_atr_pct: float = Field(
-        default=0.05, ge=0.0,
+        default=0.05,
+        ge=0.0,
         description="Volatility breaker ATR threshold (decimal, e.g. 0.05 = 5%)",
     )
 
@@ -381,8 +420,15 @@ class PerPositionSLConfig(BaseModel):
     """Per-position stop-loss configuration."""
 
     enabled: bool = Field(default=True, description="Enable per-position stop-loss")
-    type: Literal["fixed", "trailing"] = Field(default="fixed", description="Stop-loss type")
-    capital_pct: float = Field(default=30.0, ge=0.0, le=100.0, description="Stop-loss as percentage of trade capital")
+    type: Literal["fixed", "trailing"] = Field(
+        default="fixed", description="Stop-loss type"
+    )
+    capital_pct: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=100.0,
+        description="Stop-loss as percentage of trade capital",
+    )
 
 
 class PerPositionTPConfig(BaseModel):
@@ -390,18 +436,27 @@ class PerPositionTPConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Enable per-position take-profit")
     type: Literal["fixed"] = Field(default="fixed", description="Take-profit type")
-    capital_pct: float = Field(default=50.0, ge=0.0, le=100.0, description="Take-profit as percentage of trade capital")
+    capital_pct: float = Field(
+        default=50.0,
+        ge=0.0,
+        le=100.0,
+        description="Take-profit as percentage of trade capital",
+    )
 
 
 class KellyConfig(BaseModel):
     """Kelly Criterion sizing parameters."""
 
     fraction: float = Field(
-        default=0.25, ge=0.0, le=1.0,
+        default=0.25,
+        ge=0.0,
+        le=1.0,
         description="Fractional Kelly multiplier (fraction of full-Kelly to use)",
     )
     default_fraction: float = Field(
-        default=0.02, ge=0.0, le=1.0,
+        default=0.02,
+        ge=0.0,
+        le=1.0,
         description="Default position fraction when no trade history is available",
     )
 
@@ -410,7 +465,9 @@ class RiskConfig(BaseModel):
     """Risk management thresholds and limits."""
 
     max_positions: int = Field(
-        default=1, ge=1, le=100,
+        default=1,
+        ge=1,
+        le=100,
         description="Maximum number of concurrent positions",
     )
     max_position_size: float = Field(
@@ -436,11 +493,15 @@ class RiskConfig(BaseModel):
         description="Max drawdown from peak portfolio value",
     )
     max_leverage: int = Field(
-        default=10, ge=1, le=125,
+        default=10,
+        ge=1,
+        le=125,
         description="Max leverage enforced by the risk system",
     )
     min_distance_to_liquidation_pct: float = Field(
-        default=0.2, ge=0.0, le=1.0,
+        default=0.2,
+        ge=0.0,
+        le=1.0,
         description=(
             "Absolute cap (decimal) for the minimum distance to liquidation "
             "before warning/blocking. The effective threshold is "
@@ -450,7 +511,9 @@ class RiskConfig(BaseModel):
         ),
     )
     liquidation_distance_fraction: float = Field(
-        default=0.5, ge=0.0, le=1.0,
+        default=0.5,
+        ge=0.0,
+        le=1.0,
         description=(
             "Fraction of the theoretical 1/leverage distance-to-liquidation "
             "at which a position is considered near liquidation. Lower = "
@@ -458,31 +521,41 @@ class RiskConfig(BaseModel):
         ),
     )
     funding_rate_periods: int = Field(
-        default=3, ge=1,
+        default=3,
+        ge=1,
         description="Number of funding periods (8h each) to use for projected cost checks",
     )
     max_funding_rate_cost: float = Field(
-        default=0.001, ge=0.0,
+        default=0.001,
+        ge=0.0,
         description="Maximum acceptable funding rate cost per position",
     )
     max_position_concentration: float = Field(
-        default=0.4, ge=0.0, le=1.0,
+        default=0.4,
+        ge=0.0,
+        le=1.0,
         description="Maximum position concentration as fraction of portfolio",
     )
     min_position_size_usd: float = Field(
-        default=10.0, ge=0.0,
+        default=10.0,
+        ge=0.0,
         description="Minimum position size in USD",
     )
     max_position_size_pct: float = Field(
-        default=0.10, ge=0.0, le=1.0,
+        default=0.10,
+        ge=0.0,
+        le=1.0,
         description="Maximum position size as fraction of portfolio",
     )
     max_position_size_usd: float = Field(
-        default=10000.0, ge=1.0,
+        default=10000.0,
+        ge=1.0,
         description="Absolute maximum position size in USD",
     )
     correlation_threshold_pct: float = Field(
-        default=60.0, ge=0.0, le=100.0,
+        default=60.0,
+        ge=0.0,
+        le=100.0,
         description="Correlation threshold percentage — flags if any quote-asset group exceeds this % of portfolio",
     )
     kelly: KellyConfig = Field(
@@ -506,6 +579,7 @@ class RiskConfig(BaseModel):
 # ============================================================================
 # Market Data Section
 # ============================================================================
+
 
 class BufferSizesConfig(BaseModel):
     """In-memory buffer sizes for real-time data."""
@@ -533,11 +607,15 @@ class CacheTTLConfig(BaseModel):
         default=2, ge=1, le=60, description="Mark price cache TTL in seconds"
     )
     open_interest: int = Field(
-        default=3600, ge=60, le=86400,
+        default=3600,
+        ge=60,
+        le=86400,
         description="Open interest cache TTL in seconds",
     )
     order_book_limit: int = Field(
-        default=20, ge=5, le=100,
+        default=20,
+        ge=5,
+        le=100,
         description="Max order book snapshot depth to cache",
     )
 
@@ -546,7 +624,8 @@ class MarketDataEngineConfig(BaseModel):
     """Market data engine lifecycle parameters."""
 
     shutdown_timeout_seconds: float = Field(
-        default=10.0, ge=1.0,
+        default=10.0,
+        ge=1.0,
         description="Max seconds to wait for market data engine shutdown",
     )
 
@@ -555,19 +634,24 @@ class MarketDataBackoffConfig(BaseModel):
     """WebSocket reconnection backoff parameters."""
 
     base_seconds: float = Field(
-        default=1.0, ge=0.1,
+        default=1.0,
+        ge=0.1,
         description="Initial WebSocket reconnection backoff in seconds",
     )
     max_seconds: float = Field(
-        default=30.0, ge=1.0,
+        default=30.0,
+        ge=1.0,
         description="Maximum WebSocket reconnection backoff in seconds",
     )
     multiplier: float = Field(
-        default=2.0, ge=1.0,
+        default=2.0,
+        ge=1.0,
         description="WebSocket backoff multiplier per retry",
     )
     jitter_fraction: float = Field(
-        default=0.1, ge=0.0, le=1.0,
+        default=0.1,
+        ge=0.0,
+        le=1.0,
         description="WebSocket backoff jitter fraction",
     )
 
@@ -584,7 +668,8 @@ class MarketDataWebSocketConfig(BaseModel):
         description="WebSocket reconnection backoff parameters",
     )
     heartbeat_interval_seconds: float = Field(
-        default=30.0, ge=5.0,
+        default=30.0,
+        ge=5.0,
         description="WebSocket heartbeat interval in seconds",
     )
 
@@ -614,23 +699,30 @@ class MarketDataConfig(BaseModel):
 # Persistence Section
 # ============================================================================
 
+
 class DatabasePoolConfig(BaseModel):
     """Database connection pool and retry parameters."""
 
     min_pool_size: int = Field(
-        default=1, ge=1, le=50,
+        default=1,
+        ge=1,
+        le=50,
         description="Minimum database pool connections",
     )
     max_pool_size: int = Field(
-        default=5, ge=1, le=50,
+        default=5,
+        ge=1,
+        le=50,
         description="Maximum database pool connections",
     )
     connect_retry_count: int = Field(
-        default=5, ge=1,
+        default=5,
+        ge=1,
         description="Maximum database connection retries",
     )
     command_timeout_seconds: int = Field(
-        default=60, ge=5,
+        default=60,
+        ge=5,
         description="Database command timeout in seconds",
     )
 
@@ -652,41 +744,50 @@ class PersistenceConfig(BaseModel):
 # Telegram Section
 # ============================================================================
 
+
 class TelegramJobIntervalsConfig(BaseModel):
     """Job interval configuration for the Telegram bot."""
 
     status_summary_seconds: int = Field(
-        default=3600, ge=60,
+        default=3600,
+        ge=60,
         description="Interval in seconds for status summary job",
     )
     risk_alert_seconds: int = Field(
-        default=300, ge=30,
+        default=300,
+        ge=30,
         description="Interval in seconds for risk alert job",
     )
     funding_rate_countdown_seconds: int = Field(
-        default=1800, ge=60,
+        default=1800,
+        ge=60,
         description="Interval in seconds for funding rate countdown job",
     )
     liquidation_warning_seconds: int = Field(
-        default=300, ge=30,
+        default=300,
+        ge=30,
         description="Interval in seconds for liquidation warning job",
     )
 
     # First-run delays — how long after bot startup before each job fires
     status_summary_first_seconds: int = Field(
-        default=60, ge=0,
+        default=60,
+        ge=0,
         description="Seconds before first status summary job fires",
     )
     risk_alert_first_seconds: int = Field(
-        default=120, ge=0,
+        default=120,
+        ge=0,
         description="Seconds before first risk alert job fires",
     )
     funding_rate_countdown_first_seconds: int = Field(
-        default=300, ge=0,
+        default=300,
+        ge=0,
         description="Seconds before first funding rate countdown job fires",
     )
     liquidation_warning_first_seconds: int = Field(
-        default=180, ge=0,
+        default=180,
+        ge=0,
         description="Seconds before first liquidation warning job fires",
     )
 
@@ -695,11 +796,15 @@ class TelegramDailyReportConfig(BaseModel):
     """Daily report scheduling for the Telegram bot."""
 
     hour: int = Field(
-        default=23, ge=0, le=23,
+        default=23,
+        ge=0,
+        le=23,
         description="Hour (UTC) for daily report",
     )
     minute: int = Field(
-        default=0, ge=0, le=59,
+        default=0,
+        ge=0,
+        le=59,
         description="Minute for daily report",
     )
 
@@ -708,11 +813,15 @@ class TelegramFundingCostReportConfig(BaseModel):
     """Funding cost report scheduling for the Telegram bot."""
 
     hour: int = Field(
-        default=22, ge=0, le=23,
+        default=22,
+        ge=0,
+        le=23,
         description="Hour (UTC) for funding cost report",
     )
     minute: int = Field(
-        default=0, ge=0, le=59,
+        default=0,
+        ge=0,
+        le=59,
         description="Minute for funding cost report",
     )
 
@@ -738,6 +847,7 @@ class TelegramConfig(BaseModel):
 # ============================================================================
 # Monitoring Section
 # ============================================================================
+
 
 class HealthServerConfig(BaseModel):
     """Health check HTTP server configuration."""
@@ -782,21 +892,43 @@ class MonitoringConfig(BaseModel):
 # Strategy Section
 # ============================================================================
 
+
 class TrendFollowingParams(BaseModel):
     """Trend-following strategy parameters using EMA crossover + ADX filter."""
 
     enabled: bool = False
     fast_ema: int = Field(default=9, ge=1, le=200, description="Fast EMA period")
     slow_ema: int = Field(default=21, ge=1, le=200, description="Slow EMA period")
-    adx_period: int = Field(default=14, ge=1, le=50, description="ADX calculation period")
-    adx_threshold: int = Field(default=25, ge=1, le=100, description="Minimum ADX for trend strength")
-    atr_period: int = Field(default=14, ge=1, le=50, description="ATR calculation period")
-    atr_multiplier_stop: float = Field(default=3.0, ge=0.5, le=10.0, description="ATR multiplier for trailing stop")
-    atr_default_pct: float = Field(default=0.02, ge=0.001, le=0.5, description="Default ATR as fraction of price")
-    trade_capital_usd: int = Field(default=5, ge=1, description="Capital per trade in USD")
-    tp_capital_pct: float = Field(default=50.0, ge=0.0, le=100.0, description="Take-profit as percentage of trade capital")
-    confidence_default: float = Field(default=0.7, ge=0.0, le=1.0, description="Default confidence for signals")
-    confidence_high: float = Field(default=0.9, ge=0.0, le=1.0, description="High confidence for strong signals")
+    adx_period: int = Field(
+        default=14, ge=1, le=50, description="ADX calculation period"
+    )
+    adx_threshold: int = Field(
+        default=25, ge=1, le=100, description="Minimum ADX for trend strength"
+    )
+    atr_period: int = Field(
+        default=14, ge=1, le=50, description="ATR calculation period"
+    )
+    atr_multiplier_stop: float = Field(
+        default=3.0, ge=0.5, le=10.0, description="ATR multiplier for trailing stop"
+    )
+    atr_default_pct: float = Field(
+        default=0.02, ge=0.001, le=0.5, description="Default ATR as fraction of price"
+    )
+    trade_capital_usd: int = Field(
+        default=5, ge=1, description="Capital per trade in USD"
+    )
+    tp_capital_pct: float = Field(
+        default=50.0,
+        ge=0.0,
+        le=100.0,
+        description="Take-profit as percentage of trade capital",
+    )
+    confidence_default: float = Field(
+        default=0.7, ge=0.0, le=1.0, description="Default confidence for signals"
+    )
+    confidence_high: float = Field(
+        default=0.9, ge=0.0, le=1.0, description="High confidence for strong signals"
+    )
 
 
 class RateLimiterConfig(BaseModel):
@@ -902,7 +1034,13 @@ class GroqClientConfig(BaseModel):
         description="Daily token-budget throttle for the Groq API",
     )
     valid_actions: list[str] = Field(
-        default_factory=lambda: ["ENTER", "EXIT", "HOLD", "adjust_stop", "reduce_position"],
+        default_factory=lambda: [
+            "ENTER",
+            "EXIT",
+            "HOLD",
+            "adjust_stop",
+            "reduce_position",
+        ],
         description="Valid AI trading actions",
     )
     fallback_action: str = Field(
@@ -945,6 +1083,7 @@ class AiRotationConfig(BaseModel):
 # ============================================================================
 # AI Section
 # ============================================================================
+
 
 class AiValidatorConfig(BaseModel):
     """Deterministic direction-to-side validation of AI decisions.
@@ -1091,6 +1230,7 @@ class AiConfig(BaseModel):
 # TradingView Webhook Section
 # ============================================================================
 
+
 class TradingViewWebhookConfig(BaseModel):
     """TradingView webhook receiver configuration."""
 
@@ -1203,11 +1343,13 @@ class ExecutionConfig(BaseModel):
     """Order execution engine configuration."""
 
     reconcile_interval_seconds: int = Field(
-        default=60, ge=5,
+        default=60,
+        ge=5,
         description="Seconds between order reconciliation cycles",
     )
     twap_window_seconds: int = Field(
-        default=300, ge=10,
+        default=300,
+        ge=10,
         description="Default TWAP execution window in seconds",
     )
     default_order_type: str = Field(
@@ -1243,19 +1385,26 @@ class BacktestConfig(BaseModel):
     """Backtest engine simulation parameters."""
 
     starting_capital: float = Field(
-        default=10000.0, ge=100.0,
+        default=10000.0,
+        ge=100.0,
         description="Starting capital for backtest simulations in USD",
     )
     commission_pct: float = Field(
-        default=0.001, ge=0.0, le=0.1,
+        default=0.001,
+        ge=0.0,
+        le=0.1,
         description="Commission as a fraction of trade value per side",
     )
     slippage_pct: float = Field(
-        default=0.0005, ge=0.0, le=0.1,
+        default=0.0005,
+        ge=0.0,
+        le=0.1,
         description="Slippage as a fraction of price per fill",
     )
     max_trades_per_day: int = Field(
-        default=10, ge=1, le=1000,
+        default=10,
+        ge=1,
+        le=1000,
         description="Maximum trades per day in simulation",
     )
 
@@ -1263,6 +1412,7 @@ class BacktestConfig(BaseModel):
 # ============================================================================
 # Root Config Model
 # ============================================================================
+
 
 class QuadConfig(BaseModel):
     """Root configuration model for the Quad trading bot.
@@ -1333,6 +1483,7 @@ class QuadConfig(BaseModel):
 # Public Validation API
 # ============================================================================
 
+
 def validate_config(
     config_dict: dict[str, Any],
 ) -> tuple[bool, list[str]]:
@@ -1353,14 +1504,12 @@ def validate_config(
     try:
         QuadConfig.model_validate(config_dict)
         return True, errors
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Pydantic raises ValidationError which has .errors() for structured
         # access, but we catch broadly to handle any validation issue.
         if hasattr(exc, "errors"):
-            for err in exc.errors():  # type: ignore[union-attr]
-                field_path = " -> ".join(
-                    str(loc) for loc in err.get("loc", [])
-                )
+            for err in exc.errors():
+                field_path = " -> ".join(str(loc) for loc in err.get("loc", []))
                 msg = err.get("msg", str(err))
                 errors.append(f"{field_path}: {msg}")
         else:

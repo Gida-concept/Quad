@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-
 # ---------------------------------------------------------------------------
 # Subscription dataclass
 # ---------------------------------------------------------------------------
@@ -125,7 +124,7 @@ class WebSocketManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
         # stream_name -> aiohttp.ClientWebSocketResponse
-        self._connections: dict[str, aiohttp.ClientWebSocketResponse] = {}
+        self._connections: dict[str, aiohttp.ClientWebSocketResponse[bool]] = {}
 
         # Shared aiohttp session (created once in start())
         self._session: aiohttp.ClientSession | None = None
@@ -235,10 +234,7 @@ class WebSocketManager:
 
             # If the manager is already running and this is the first
             # subscription for this stream, start a connection task.
-            if (
-                self._running
-                and stream_name not in self._tasks
-            ):
+            if self._running and stream_name not in self._tasks:
                 self._tasks[stream_name] = asyncio.create_task(
                     self._run_stream_connection(stream_name),
                 )
@@ -304,7 +300,7 @@ class WebSocketManager:
                 if ws is not None:
                     try:
                         await ws.close()
-                    except Exception:
+                    except Exception:  # noqa: S110  best-effort close; stream may already be gone
                         pass
 
             # Cancel existing tasks
@@ -348,12 +344,10 @@ class WebSocketManager:
         active_count = 0
 
         for stream_name, subs in self._stream_handlers.items():
-            reconnect_counts[stream_name] = sum(
-                s.reconnect_count for s in subs
+            reconnect_counts[stream_name] = sum(s.reconnect_count for s in subs)
+            last_message_times[stream_name] = (
+                max(s.last_message_at for s in subs) if subs else 0.0
             )
-            last_message_times[stream_name] = max(
-                s.last_message_at for s in subs
-            ) if subs else 0.0
             active_count += len(subs)
 
         return {
@@ -376,18 +370,10 @@ class WebSocketManager:
         unless the subscription has been removed.
         """
         ws_backoff_cfg = self._ws_config["backoff"]
-        ws_base_backoff = float(
-            ws_backoff_cfg["base_seconds"]
-        )
-        ws_max_backoff = float(
-            ws_backoff_cfg["max_seconds"]
-        )
-        ws_backoff_mult = float(
-            ws_backoff_cfg["multiplier"]
-        )
-        ws_jitter = float(
-            ws_backoff_cfg["jitter_fraction"]
-        )
+        ws_base_backoff = float(ws_backoff_cfg["base_seconds"])
+        ws_max_backoff = float(ws_backoff_cfg["max_seconds"])
+        ws_backoff_mult = float(ws_backoff_cfg["multiplier"])
+        ws_jitter = float(ws_backoff_cfg["jitter_fraction"])
 
         backoff = ws_base_backoff
 
@@ -451,9 +437,7 @@ class WebSocketManager:
 
         async with session.ws_connect(
             self._ws_url,
-            heartbeat=float(
-                self._ws_config["heartbeat_interval_seconds"]
-            ),
+            heartbeat=float(self._ws_config["heartbeat_interval_seconds"]),
         ) as ws:
             # Store the connection so we can close it later
             async with self._lock:
@@ -506,11 +490,13 @@ class WebSocketManager:
             )
             return
 
-        payload = json.dumps({
-            "method": "SUBSCRIBE",
-            "params": [stream_name],
-            "id": str(uuid.uuid4()),
-        })
+        payload = json.dumps(
+            {
+                "method": "SUBSCRIBE",
+                "params": [stream_name],
+                "id": str(uuid.uuid4()),
+            }
+        )
         try:
             await ws.send_str(payload)
             self._log.debug(
@@ -529,14 +515,16 @@ class WebSocketManager:
         if ws is None:
             return
 
-        payload = json.dumps({
-            "method": "UNSUBSCRIBE",
-            "params": [stream_name],
-            "id": str(uuid.uuid4()),
-        })
+        payload = json.dumps(
+            {
+                "method": "UNSUBSCRIBE",
+                "params": [stream_name],
+                "id": str(uuid.uuid4()),
+            }
+        )
         try:
             await ws.send_str(payload)
-        except Exception:
+        except Exception:  # noqa: S110
             # Best-effort; the connection may already be gone.
             pass
 
@@ -550,7 +538,7 @@ class WebSocketManager:
         if ws is not None:
             try:
                 await ws.close()
-            except Exception:
+            except Exception:  # noqa: S110  best-effort close
                 pass
 
         # Cancel background task

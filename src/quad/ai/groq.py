@@ -18,7 +18,7 @@ Usage
     client = GroqClient(api_key="...")
     response = await client.chat(
         system="You are a trading assistant.",
-        user="Analyze BTC options chain...",
+        user="Analyze BTCUSDT funding rates and order book...",
     )
     print(response)
 
@@ -208,9 +208,7 @@ class GroqClient:
         # Fall back to a sensible default when the key is absent so that
         # comparisons in is_available / _check_rate_limit never see None.
         self._max_requests_per_day = (
-            max_requests_per_day
-            or rate_limiter_cfg.get("max_requests_per_day")
-            or 1000
+            max_requests_per_day or rate_limiter_cfg.get("max_requests_per_day") or 1000
         )
         self._rate_limit_window_s = rate_limiter_cfg.get("window_seconds")
         self._warning_level_1 = rate_limiter_cfg.get("warning_level_1")
@@ -223,16 +221,11 @@ class GroqClient:
         # under-counts the real constraint.  Fall back to sane defaults when
         # the nested config key is absent (tests / minimal configs).
         token_budget_cfg = self._groq_config.get("token_budget", {}) or {}
-        self._token_budget_enabled = bool(
-            token_budget_cfg.get("enabled", True)
-        )
+        self._token_budget_enabled = bool(token_budget_cfg.get("enabled", True))
         self._max_tokens_per_day = int(
-            token_budget_cfg.get("max_tokens_per_day")
-            or _DEFAULT_MAX_TOKENS_PER_DAY
+            token_budget_cfg.get("max_tokens_per_day") or _DEFAULT_MAX_TOKENS_PER_DAY
         )
-        self._token_window_s = float(
-            token_budget_cfg.get("window_seconds") or 86400
-        )
+        self._token_window_s = float(token_budget_cfg.get("window_seconds") or 86400)
         self._token_warning_level_1 = int(
             token_budget_cfg.get("warning_level_1") or 400_000
         )
@@ -627,9 +620,8 @@ class GroqClient:
         # max-token cap, which over-counts on purpose so the throttle never
         # overspends the real quota.
         input_chars = sum(len(str(m.get("content", ""))) for m in msgs)
-        estimated_total_tokens = (
-            (input_chars // _TOKEN_CHARS_PER_TOKEN)
-            + int(max_tokens or _DEFAULT_MAX_TOKENS)
+        estimated_total_tokens = (input_chars // _TOKEN_CHARS_PER_TOKEN) + int(
+            max_tokens or _DEFAULT_MAX_TOKENS
         )
 
         for attempt in range(1, self._max_retries + 1):
@@ -639,17 +631,15 @@ class GroqClient:
                 # Check the daily TOKEN budget before making the request
                 await self._check_token_budget(estimated_total_tokens)
 
-                completion_kwargs = dict(
-                    model=active_model,
-                    messages=msgs,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                create_kwargs: dict[str, Any] = {
+                    "model": active_model,
+                    "messages": msgs,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
                 if json_mode:
-                    completion_kwargs["response_format"] = {"type": "json_object"}
-                completion = await self._client.chat.completions.create(
-                    **completion_kwargs
-                )
+                    create_kwargs["response_format"] = {"type": "json_object"}
+                completion = await self._client.chat.completions.create(**create_kwargs)
                 self._total_requests += 1
                 self._request_timestamps.append(time.time())
                 self._record_token_usage(estimated_total_tokens)
@@ -713,7 +703,7 @@ class GroqClient:
 
         # Should not reach here, but satisfy the return type
         if last_error:
-            raise last_error  # type: ignore[misc]
+            raise last_error
         return ""
 
     # ------------------------------------------------------------------
@@ -761,11 +751,13 @@ class GroqClient:
             If the API key is missing or rate limit is exceeded.
         """
         effective_temperature = (
-            temperature if temperature is not None
+            temperature
+            if temperature is not None
             else self._groq_config.get("decide_trades_temperature")
         )
         effective_max_tokens = (
-            max_tokens if max_tokens is not None
+            max_tokens
+            if max_tokens is not None
             else self._groq_config.get("decide_trades_max_tokens")
         )
         raw = await self.chat(
@@ -836,7 +828,9 @@ class GroqClient:
         # Ensure action is one of the expected values
         # NOTE: explicit fallback defaults protect against missing config keys;
         # Pydantic normally provides them but the raw dict may not always have them.
-        valid_actions = set(self._groq_config.get("valid_actions", ["ENTER", "EXIT", "HOLD"]))
+        valid_actions = set(
+            self._groq_config.get("valid_actions", ["ENTER", "EXIT", "HOLD"])
+        )
         default_action = self._groq_config.get("default_action", "HOLD")
         fallback_action = self._groq_config.get("fallback_action", "HOLD")
         action = decision.get("action", default_action)

@@ -78,12 +78,10 @@ async def analyze_market(
     if positions:
         pos_count = len(positions)
         pos_pnl = sum(
-            float(getattr(p, "unrealized_pnl", Decimal(0)))
-            for p in positions
+            float(getattr(p, "unrealized_pnl", Decimal(0))) for p in positions
         )
         position_summary = (
-            f"\nOpen positions: {pos_count}, "
-            f"unrealised PnL: ${pos_pnl:+,.2f}"
+            f"\nOpen positions: {pos_count}, unrealised PnL: ${pos_pnl:+,.2f}"
         )
 
     user_prompt = (
@@ -145,9 +143,7 @@ def _summarize_market(
             sentiment = "negative (shorts paying longs — bearish crowding)"
         else:
             sentiment = "neutral"
-        lines.append(
-            f"Funding Rate: {fr_pct:+.6f}% ({sentiment})"
-        )
+        lines.append(f"Funding Rate: {fr_pct:+.6f}% ({sentiment})")
         next_time = getattr(funding_rate, "next_funding_time", 0)
         if next_time and int(next_time) > 0:
             remaining = int(next_time) - int(time.time() * 1000)
@@ -166,8 +162,12 @@ def _summarize_market(
             ratio = bid_vol / ask_vol if ask_vol > 0 else 0
             bid_price = float(bids[0][0])
             ask_price = float(asks[0][0])
-            spread_pct = (ask_price - bid_price) / bid_price * 100 if bid_price > 0 else 0
-            lines.append(f"Order Book: spread={spread_pct:.4f}%, bid/ask vol ratio={ratio:.2f}")
+            spread_pct = (
+                (ask_price - bid_price) / bid_price * 100 if bid_price > 0 else 0
+            )
+            lines.append(
+                f"Order Book: spread={spread_pct:.4f}%, bid/ask vol ratio={ratio:.2f}"
+            )
             lines.append(f"  Top bid: ${bid_price:,.2f} ({float(bids[0][1]):.4f})")
             lines.append(f"  Top ask: ${ask_price:,.2f} ({float(asks[0][1]):.4f})")
     else:

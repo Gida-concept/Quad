@@ -1,4 +1,4 @@
-"""Exchange-related types for Quad options trading bot.
+"""Exchange-related types for Quad USD-M futures trading bot.
 
 This module defines types for exchange account updates
 and other exchange-specific data structures.

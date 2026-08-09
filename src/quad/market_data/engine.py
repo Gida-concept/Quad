@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -182,9 +183,7 @@ class MarketDataEngine:
         self._running = False
         self._stop_event.set()
 
-        timeout = float(
-            self._engine_config["shutdown_timeout_seconds"]
-        )
+        timeout = float(self._engine_config["shutdown_timeout_seconds"])
 
         # Stop WebSocket manager
         if self._ws_manager is not None:
@@ -607,9 +606,7 @@ class MarketDataEngine:
                 pass
 
         uptime = (
-            time.monotonic() - self._start_time
-            if self._start_time is not None
-            else 0.0
+            time.monotonic() - self._start_time if self._start_time is not None else 0.0
         )
 
         return {

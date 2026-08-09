@@ -60,7 +60,9 @@ class FillReconciler:
         self._log = structlog.get_logger(__name__)
         self._exchange = exchange_adapter
         self._db = db_manager
-        self._reconciler_config = config.get("exchange", {}).get("reconciler", {}) if config else {}
+        self._reconciler_config = (
+            config.get("exchange", {}).get("reconciler", {}) if config else {}
+        )
         self._discrepancy_history: deque[dict[str, Any]] = deque(
             maxlen=self._max_discrepancy_history
         )
@@ -123,11 +125,15 @@ class FillReconciler:
 
             # 1. Status comparison
             if ex_order.status != order.status:
-                if ex_order.status == "FILLED" and order.status in (
-                    "NEW",
-                    "PARTIALLY_FILLED",
-                ) or ex_order.status == "PARTIALLY_FILLED" and order.status in (
-                    "NEW",
+                if (
+                    ex_order.status == "FILLED"
+                    and order.status
+                    in (
+                        "NEW",
+                        "PARTIALLY_FILLED",
+                    )
+                    or ex_order.status == "PARTIALLY_FILLED"
+                    and order.status in ("NEW",)
                 ):
                     disc = self._record_discrepancy(
                         "MISSED_FILL",
@@ -162,9 +168,7 @@ class FillReconciler:
                             ex_order.status,
                             now_ms,
                             details={
-                                "age_hours": round(
-                                    age_ms / 3600_000, 1
-                                ),
+                                "age_hours": round(age_ms / 3600_000, 1),
                             },
                         )
                         discrepancies.append(disc)
@@ -179,9 +183,7 @@ class FillReconciler:
                             ex_order.status,
                             now_ms,
                             details={
-                                "age_hours": round(
-                                    ex_age_ms / 3600_000, 1
-                                ),
+                                "age_hours": round(ex_age_ms / 3600_000, 1),
                                 "source": "exchange",
                             },
                         )
@@ -241,13 +243,9 @@ class FillReconciler:
         list[Trade]
             Trades that appear on the exchange but not in the local dataset.
         """
-        local_ids: set[int] = {
-            t.id for t in local_trades if t.id is not None
-        }
+        local_ids: set[int] = {t.id for t in local_trades if t.id is not None}
         missed = [
-            t
-            for t in exchange_trades
-            if t.id is not None and t.id not in local_ids
+            t for t in exchange_trades if t.id is not None and t.id not in local_ids
         ]
 
         if missed:
@@ -299,18 +297,10 @@ class FillReconciler:
             if start_ts <= d.get("timestamp", 0) <= end_ts
         ]
 
-        total_filled = sum(
-            1 for d in filtered if d.get("type") == "MISSED_FILL"
-        )
-        total_rejected = sum(
-            1 for d in filtered if d.get("type") == "MISSED_REJECTION"
-        )
-        total_stale = sum(
-            1 for d in filtered if d.get("type") == "STALE_ORDER"
-        )
-        total_price = sum(
-            1 for d in filtered if d.get("type") == "PRICE_MISMATCH"
-        )
+        total_filled = sum(1 for d in filtered if d.get("type") == "MISSED_FILL")
+        total_rejected = sum(1 for d in filtered if d.get("type") == "MISSED_REJECTION")
+        total_stale = sum(1 for d in filtered if d.get("type") == "STALE_ORDER")
+        total_price = sum(1 for d in filtered if d.get("type") == "PRICE_MISMATCH")
 
         report: dict[str, Any] = {
             "period": {
@@ -352,7 +342,7 @@ class FillReconciler:
         if count is None:
             count = int(self._reconciler_config["recent_discrepancies_default_count"])
         total = len(self._discrepancy_history)
-        return list(self._discrepancy_history)[-min(count, total):]
+        return list(self._discrepancy_history)[-min(count, total) :]
 
     # ------------------------------------------------------------------
     # Internal helpers

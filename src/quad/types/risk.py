@@ -1,4 +1,4 @@
-"""Risk management types for Quad options trading bot.
+"""Risk management types for Quad USD-M futures trading bot.
 
 This module defines types used by the risk management system including
 status tracking, circuit breakers, risk evaluation results, and
@@ -24,10 +24,17 @@ __all__ = [
 
 # Canonical action type constants (single source of truth)
 ActionType = Literal[
-    "ENTER", "EXIT", "HOLD",
-    "adjust_stop", "reduce_position",
-    "set_stop_loss", "set_take_profit",
-    "open_long", "open_short", "close_long", "close_short",
+    "ENTER",
+    "EXIT",
+    "HOLD",
+    "adjust_stop",
+    "reduce_position",
+    "set_stop_loss",
+    "set_take_profit",
+    "open_long",
+    "open_short",
+    "close_long",
+    "close_short",
 ]
 
 

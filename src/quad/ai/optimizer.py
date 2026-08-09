@@ -135,14 +135,19 @@ class Optimizer:
 
             if len(trades) < self._retrain_cfg.min_trades_for_analysis:
                 run.status = "skipped"
-                run.summary_json = json.dumps({
-                    "reason": f"Only {len(trades)} trades found; minimum is "
-                              f"{self._retrain_cfg.min_trades_for_analysis}",
-                })
+                run.summary_json = json.dumps(
+                    {
+                        "reason": f"Only {len(trades)} trades found; minimum is "
+                        f"{self._retrain_cfg.min_trades_for_analysis}",
+                    }
+                )
                 run.completed_at = int(time.time() * 1000)
-                await self._run_repo.update(run.id, status=run.status,
-                                            summary_json=run.summary_json,
-                                            completed_at=run.completed_at)
+                await self._run_repo.update(
+                    run.id,
+                    status=run.status,
+                    summary_json=run.summary_json,
+                    completed_at=run.completed_at,
+                )
                 self._log.info("optimization_skipped", trades=len(trades))
                 return run
 
@@ -170,8 +175,11 @@ class Optimizer:
                             rec.applied_at = int(time.time() * 1000)
                             applied += 1
                         except Exception as exc:
-                            self._log.warning("optimization_apply_failed",
-                                              rec_id=rec.id, error=str(exc))
+                            self._log.warning(
+                                "optimization_apply_failed",
+                                rec_id=rec.id,
+                                error=str(exc),
+                            )
                             rec.status = "failed"
 
             run.applied_count = applied
@@ -185,9 +193,11 @@ class Optimizer:
             run.status = "failed"
             run.completed_at = int(time.time() * 1000)
             run.error_message = str(exc)[:500]
-            self._log.error("optimization_failed",
-                            error=str(exc),
-                            consecutive=self._consecutive_failures)
+            self._log.error(
+                "optimization_failed",
+                error=str(exc),
+                consecutive=self._consecutive_failures,
+            )
 
         finally:
             await self._run_repo.update(
@@ -234,7 +244,9 @@ class Optimizer:
         try:
             result = json.loads(text)
             if not isinstance(result, dict):
-                self._log.warning("optimization_result_not_dict", type=type(result).__name__)
+                self._log.warning(
+                    "optimization_result_not_dict", type=type(result).__name__
+                )
                 return {"summary": {}, "recommendations": []}
             return result
         except json.JSONDecodeError:
@@ -252,20 +264,22 @@ class Optimizer:
         max_recs = self._retrain_cfg.max_recommendations_per_cycle
 
         for item in raw_recs[:max_recs]:
-            results.append(OptimizationRecommendationModel(
-                id=0,
-                run_id=run_id,
-                recommendation_type=item.get("type", "parameter_adjustment"),
-                target_area=item.get("target_area", ""),
-                current_value=json.dumps(item.get("current_value", "")),
-                recommended_value=json.dumps(item.get("recommended_value", "")),
-                rationale=item.get("rationale", ""),
-                impact_estimate=item.get("impact_estimate", ""),
-                confidence=item.get("confidence", "medium"),
-                status="pending",
-                applied_at=None,
-                applied_strategy_params_json="{}",
-            ))
+            results.append(
+                OptimizationRecommendationModel(
+                    id=0,
+                    run_id=run_id,
+                    recommendation_type=item.get("type", "parameter_adjustment"),
+                    target_area=item.get("target_area", ""),
+                    current_value=json.dumps(item.get("current_value", "")),
+                    recommended_value=json.dumps(item.get("recommended_value", "")),
+                    rationale=item.get("rationale", ""),
+                    impact_estimate=item.get("impact_estimate", ""),
+                    confidence=item.get("confidence", "medium"),
+                    status="pending",
+                    applied_at=None,
+                    applied_strategy_params_json="{}",
+                )
+            )
         return results
 
     def _should_apply(self, rec: OptimizationRecommendationModel) -> bool:
@@ -320,7 +334,6 @@ class Optimizer:
         rec_type = rec.recommendation_type
         target = rec.target_area
         new_value_str = rec.recommended_value
-        now_ms = int(time.time() * 1000)
 
         self._log.info(
             "optimization_applying",
@@ -337,18 +350,14 @@ class Optimizer:
             recommended = new_value_str
 
         # --- Build an audit trail entry (will be persisted below) ---
-        now = int(time.time())
-
         if rec_type == "parameter_adjustment":
             # Update strategy parameters nested under strategy.<target>
             await self._safe_update_config(f"strategy.{target}", recommended)
 
             # Update the Pydantic config model
-            params = self._config.strategy_params or {}
+            params = dict(self._config.strategy)
             params[target] = recommended
-            self._config = self._config.model_copy(
-                update={"strategy_params": params}
-            )
+            self._config = self._config.model_copy(update={"strategy": params})
 
             await self._log_config_change(
                 key=f"strategy.{target}",

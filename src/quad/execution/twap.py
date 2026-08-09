@@ -58,7 +58,9 @@ class TwapSlicer:
         self._max_slices = int(config.get("max_slices", 10))
         self._default_window = int(config.get("default_window_seconds", 300))
         self._jitter_seconds = float(config.get("jitter_seconds", 5.0))
-        self._min_slice_qty: Decimal = config.get("min_slice_quantity", Decimal("0.001"))
+        self._min_slice_qty: Decimal = config.get(
+            "min_slice_quantity", Decimal("0.001")
+        )
         self._urgency_threshold = float(config.get("fill_urgency_threshold", 0.5))
 
     # ------------------------------------------------------------------
@@ -210,10 +212,7 @@ class TwapSlicer:
                     else Decimal(1)
                 )
 
-                if (
-                    time_frac > self._urgency_threshold
-                    and fill_frac < Decimal("0.5")
-                ):
+                if time_frac > self._urgency_threshold and fill_frac < Decimal("0.5"):
                     remaining = order_request.quantity - total_filled
                     if remaining > Decimal(0):
                         self._log.info(
@@ -229,8 +228,7 @@ class TwapSlicer:
                             quantity=remaining,
                             price=order_request.price,
                             client_order_id=(
-                                f"{order_request.client_order_id or 'twap'}"
-                                f"-urgent-{i}"
+                                f"{order_request.client_order_id or 'twap'}-urgent-{i}"
                             ),
                         )
                         try:
@@ -247,9 +245,7 @@ class TwapSlicer:
                 # ----------------------------------------------------------
                 # Sleep before next slice (with jitter)
                 # ----------------------------------------------------------
-                jitter = random.uniform(
-                    -self._jitter_seconds, self._jitter_seconds
-                )
+                jitter = random.uniform(-self._jitter_seconds, self._jitter_seconds)
                 await asyncio_sleep(max(0.0, interval + jitter))
 
         self._log.info(

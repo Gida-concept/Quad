@@ -105,20 +105,18 @@ class FuturesPositionTracker:
         for pos in positions:
             if pos.liquidation_price > 0 and pos.mark_price > 0:
                 if pos.position_side.value == "long":
-                    distance = (
-                        (pos.mark_price - pos.liquidation_price) / pos.mark_price
-                    )
+                    distance = (pos.mark_price - pos.liquidation_price) / pos.mark_price
                 else:
-                    distance = (
-                        (pos.liquidation_price - pos.mark_price) / pos.mark_price
-                    )
-                liquidation_risk.append({
-                    "symbol": pos.symbol,
-                    "side": pos.position_side.value,
-                    "distance_to_liquidation_pct": round(distance * 100, 4),
-                    "liquidation_price": pos.liquidation_price,
-                    "mark_price": pos.mark_price,
-                })
+                    distance = (pos.liquidation_price - pos.mark_price) / pos.mark_price
+                liquidation_risk.append(
+                    {
+                        "symbol": pos.symbol,
+                        "side": pos.position_side.value,
+                        "distance_to_liquidation_pct": round(distance * 100, 4),
+                        "liquidation_price": pos.liquidation_price,
+                        "mark_price": pos.mark_price,
+                    }
+                )
         self._liquidation_risk = liquidation_risk
 
         # ------------------------------------------------------------------
@@ -140,18 +138,16 @@ class FuturesPositionTracker:
             self._funding_rate_snapshots.setdefault(sym, []).append(rate_dec)
             # Keep only the last 100 snapshots
             if len(self._funding_rate_snapshots[sym]) > 100:
-                self._funding_rate_snapshots[sym] = (
-                    self._funding_rate_snapshots[sym][-100:]
-                )
+                self._funding_rate_snapshots[sym] = self._funding_rate_snapshots[sym][
+                    -100:
+                ]
             symbol_funding[sym] = rate_dec
 
         # ------------------------------------------------------------------
         # Build report
         # ------------------------------------------------------------------
         report: dict[str, Any] = {
-            "notional_exposure": {
-                k: str(v) for k, v in notional_per_symbol.items()
-            },
+            "notional_exposure": {k: str(v) for k, v in notional_per_symbol.items()},
             "total_notional_usd": str(total_notional.quantize(Decimal("0.01"))),
             "avg_leverage": str(self._avg_leverage),
             "margin_utilization_pct": str(

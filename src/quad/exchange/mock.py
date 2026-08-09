@@ -277,9 +277,7 @@ class MockAdapter(ExchangeAdapter):
         self._log.debug("mock_get_order_status", order_id=order_id)
         return order
 
-    async def get_open_orders(
-        self, symbol: str | None = None
-    ) -> list[Order]:
+    async def get_open_orders(self, symbol: str | None = None) -> list[Order]:
         """Return all orders with status ``NEW`` or ``PARTIALLY_FILLED``.
 
         Args:
@@ -295,9 +293,7 @@ class MockAdapter(ExchangeAdapter):
         ]
         if symbol:
             open_orders = [o for o in open_orders if o.symbol == symbol]
-        self._log.debug(
-            "mock_get_open_orders", count=len(open_orders), symbol=symbol
-        )
+        self._log.debug("mock_get_open_orders", count=len(open_orders), symbol=symbol)
         return open_orders
 
     # ------------------------------------------------------------------
@@ -317,7 +313,10 @@ class MockAdapter(ExchangeAdapter):
     async def set_position_mode(self, mode: str) -> dict:
         """Simulate setting position mode."""
         self._log.debug("mock_set_position_mode", mode=mode)
-        return {"dualSidePosition": str(mode.lower() == "hedge").lower(), "success": True}
+        return {
+            "dualSidePosition": str(mode.lower() == "hedge").lower(),
+            "success": True,
+        }
 
     async def get_position_mode(self) -> str:
         """Simulate getting position mode."""
@@ -337,7 +336,7 @@ class MockAdapter(ExchangeAdapter):
         """
         self._log.debug("mock_subscribe_account_updates")
         if False:
-            yield  # type: ignore[unreachable]
+            yield
 
     # ------------------------------------------------------------------
     # Utility

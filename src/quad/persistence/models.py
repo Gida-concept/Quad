@@ -46,60 +46,70 @@ SCHEMA_MIGRATIONS: dict[int, list[str]] = {
         # add optimization run tables.
         "ALTER TABLE orders ADD COLUMN avg_fill_price TEXT NOT NULL DEFAULT '0'",
         # Sessions table (idempotent via IF NOT EXISTS)
-        "CREATE TABLE IF NOT EXISTS sessions ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "start_time BIGINT NOT NULL, "
-        "end_time BIGINT, "
-        "mode TEXT NOT NULL DEFAULT 'binance', "
-        "state TEXT NOT NULL DEFAULT 'running', "
-        "pnl TEXT NOT NULL DEFAULT '0', "
-        "trades_count INTEGER NOT NULL DEFAULT 0)",
+        (
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "start_time BIGINT NOT NULL, "
+            "end_time BIGINT, "
+            "mode TEXT NOT NULL DEFAULT 'binance', "
+            "state TEXT NOT NULL DEFAULT 'running', "
+            "pnl TEXT NOT NULL DEFAULT '0', "
+            "trades_count INTEGER NOT NULL DEFAULT 0)"
+        ),
         # Optimization runs table
-        "CREATE TABLE IF NOT EXISTS optimization_runs ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "run_at BIGINT NOT NULL, "
-        "trigger TEXT NOT NULL DEFAULT 'scheduled', "
-        "decisions_analyzed INTEGER NOT NULL DEFAULT 0, "
-        "trades_analyzed INTEGER NOT NULL DEFAULT 0, "
-        "recommendations_count INTEGER NOT NULL DEFAULT 0, "
-        "applied_count INTEGER NOT NULL DEFAULT 0, "
-        "status TEXT NOT NULL DEFAULT 'running', "
-        "started_at BIGINT NOT NULL, "
-        "completed_at BIGINT, "
-        "summary_json TEXT NOT NULL DEFAULT '{}', "
-        "error_message TEXT NOT NULL DEFAULT '')",
+        (
+            "CREATE TABLE IF NOT EXISTS optimization_runs ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "run_at BIGINT NOT NULL, "
+            "trigger TEXT NOT NULL DEFAULT 'scheduled', "
+            "decisions_analyzed INTEGER NOT NULL DEFAULT 0, "
+            "trades_analyzed INTEGER NOT NULL DEFAULT 0, "
+            "recommendations_count INTEGER NOT NULL DEFAULT 0, "
+            "applied_count INTEGER NOT NULL DEFAULT 0, "
+            "status TEXT NOT NULL DEFAULT 'running', "
+            "started_at BIGINT NOT NULL, "
+            "completed_at BIGINT, "
+            "summary_json TEXT NOT NULL DEFAULT '{}', "
+            "error_message TEXT NOT NULL DEFAULT '')"
+        ),
         # Optimization recommendations table
-        "CREATE TABLE IF NOT EXISTS optimization_recommendations ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "run_id INTEGER NOT NULL, "
-        "recommendation_type TEXT NOT NULL, "
-        "target_area TEXT NOT NULL, "
-        "current_value TEXT NOT NULL DEFAULT '', "
-        "recommended_value TEXT NOT NULL DEFAULT '', "
-        "rationale TEXT NOT NULL DEFAULT '', "
-        "impact_estimate TEXT NOT NULL DEFAULT '', "
-        "confidence TEXT NOT NULL DEFAULT 'medium', "
-        "status TEXT NOT NULL DEFAULT 'pending', "
-        "applied_at BIGINT, "
-        "applied_strategy_params_json TEXT NOT NULL DEFAULT '{}', "
-        "FOREIGN KEY (run_id) REFERENCES optimization_runs(id))",
+        (
+            "CREATE TABLE IF NOT EXISTS optimization_recommendations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "run_id INTEGER NOT NULL, "
+            "recommendation_type TEXT NOT NULL, "
+            "target_area TEXT NOT NULL, "
+            "current_value TEXT NOT NULL DEFAULT '', "
+            "recommended_value TEXT NOT NULL DEFAULT '', "
+            "rationale TEXT NOT NULL DEFAULT '', "
+            "impact_estimate TEXT NOT NULL DEFAULT '', "
+            "confidence TEXT NOT NULL DEFAULT 'medium', "
+            "status TEXT NOT NULL DEFAULT 'pending', "
+            "applied_at BIGINT, "
+            "applied_strategy_params_json TEXT NOT NULL DEFAULT '{}', "
+            "FOREIGN KEY (run_id) REFERENCES optimization_runs(id))"
+        ),
         # Liquidation events table
-        "CREATE TABLE IF NOT EXISTS liquidation_events ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "symbol TEXT NOT NULL, "
-        "position_id INTEGER REFERENCES positions(id), "
-        "amount TEXT NOT NULL DEFAULT '0', "
-        "price TEXT NOT NULL DEFAULT '0', "
-        "side TEXT NOT NULL DEFAULT '', "
-        "timestamp BIGINT NOT NULL)",
+        (
+            "CREATE TABLE IF NOT EXISTS liquidation_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol TEXT NOT NULL, "
+            "position_id INTEGER REFERENCES positions(id), "
+            "amount TEXT NOT NULL DEFAULT '0', "
+            "price TEXT NOT NULL DEFAULT '0', "
+            "side TEXT NOT NULL DEFAULT '', "
+            "timestamp BIGINT NOT NULL)"
+        ),
         # Funding rate records table
-        "CREATE TABLE IF NOT EXISTS funding_rate_records ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "symbol TEXT NOT NULL, "
-        "rate TEXT NOT NULL DEFAULT '0', "
-        "time BIGINT NOT NULL, "
-        "mark_price TEXT NOT NULL DEFAULT '0', "
-        "index_price TEXT NOT NULL DEFAULT '0')",
+        (
+            "CREATE TABLE IF NOT EXISTS funding_rate_records ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol TEXT NOT NULL, "
+            "rate TEXT NOT NULL DEFAULT '0', "
+            "time BIGINT NOT NULL, "
+            "mark_price TEXT NOT NULL DEFAULT '0', "
+            "index_price TEXT NOT NULL DEFAULT '0')"
+        ),
         # Indexes for new tables
         "CREATE INDEX IF NOT EXISTS idx_opt_runs_status ON optimization_runs(status)",
         "CREATE INDEX IF NOT EXISTS idx_opt_runs_run_at ON optimization_runs(run_at)",
@@ -521,7 +531,10 @@ class SessionModel:
         # handle nullable end_time
         field_values = list(row)
         for i, f in enumerate(cls_fields):
-            if f.type in ("int | None", "Optional[int]") and field_values[i] is not None:
+            if (
+                f.type in ("int | None", "Optional[int]")
+                and field_values[i] is not None
+            ):
                 try:
                     field_values[i] = int(field_values[i])
                 except (TypeError, ValueError):
@@ -601,7 +614,10 @@ class CircuitBreakerEventModel:
         cls_fields = fields(cls)
         field_values = list(row)
         for i, f in enumerate(cls_fields):
-            if f.type in ("int | None", "Optional[int]") and field_values[i] is not None:
+            if (
+                f.type in ("int | None", "Optional[int]")
+                and field_values[i] is not None
+            ):
                 try:
                     field_values[i] = int(field_values[i])
                 except (TypeError, ValueError):
@@ -729,7 +745,10 @@ class OptimizationRunModel:
         cls_fields = fields(cls)
         field_values = list(row)
         for i, f in enumerate(cls_fields):
-            if f.type in ("int | None", "Optional[int]") and field_values[i] is not None:
+            if (
+                f.type in ("int | None", "Optional[int]")
+                and field_values[i] is not None
+            ):
                 try:
                     field_values[i] = int(field_values[i])
                 except (TypeError, ValueError):
@@ -786,7 +805,10 @@ class OptimizationRecommendationModel:
         cls_fields = fields(cls)
         field_values = list(row)
         for i, f in enumerate(cls_fields):
-            if f.type in ("int | None", "Optional[int]") and field_values[i] is not None:
+            if (
+                f.type in ("int | None", "Optional[int]")
+                and field_values[i] is not None
+            ):
                 try:
                     field_values[i] = int(field_values[i])
                 except (TypeError, ValueError):

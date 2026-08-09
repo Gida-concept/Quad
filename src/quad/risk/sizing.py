@@ -51,24 +51,12 @@ class PositionSizer:
 
         # Sizing parameters — read from config dict with inline fallbacks
         # that match config.yaml / schema.py defaults.
-        self._kelly_multiplier = float(
-            self._cfg["kelly"]["fraction"]
-        )
-        self._default_fraction = float(
-            self._cfg["kelly"]["default_fraction"]
-        )
-        self._max_pos_pct = float(
-            self._cfg["max_position_size_pct"]
-        )
-        self._max_pos_usd = Decimal(
-            str(self._cfg["max_position_size_usd"])
-        )
-        self._max_leverage = int(
-            self._cfg["max_leverage"]
-        )
-        self._min_pos_usd = Decimal(
-            str(self._cfg["min_position_size_usd"])
-        )
+        self._kelly_multiplier = float(self._cfg["kelly"]["fraction"])
+        self._default_fraction = float(self._cfg["kelly"]["default_fraction"])
+        self._max_pos_pct = float(self._cfg["max_position_size_pct"])
+        self._max_pos_usd = Decimal(str(self._cfg["max_position_size_usd"]))
+        self._max_leverage = int(self._cfg["max_leverage"])
+        self._min_pos_usd = Decimal(str(self._cfg["min_position_size_usd"]))
         # Read trade_capital_usd from risk config, with strategy-level fallback
         risk_trade_capital = self._cfg.get("trade_capital_usd")
         if risk_trade_capital is not None:
@@ -84,17 +72,13 @@ class PositionSizer:
                         trade_capital = tc
                         break
         self._trade_capital_usd = Decimal(str(trade_capital))
-        self._sl_enabled = bool(
-            self._cfg["per_position_sl"]["enabled"]
-        )
+        self._sl_enabled = bool(self._cfg["per_position_sl"]["enabled"])
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    async def compute_size(
-        self, action: Action, context: StrategyContext
-    ) -> Action:
+    async def compute_size(self, action: Action, context: StrategyContext) -> Action:
         """Return an Action with its quantity adjusted by Kelly sizing.
 
         The method:
@@ -125,9 +109,7 @@ class PositionSizer:
         avg_win = Decimal(str(params.get("avg_win", "0")))
         avg_loss = Decimal(str(params.get("avg_loss", "0")))
 
-        portfolio_value = (
-            context.account.total_usdt if context.account else Decimal(0)
-        )
+        portfolio_value = context.account.total_usdt if context.account else Decimal(0)
 
         if win_rate <= 0 or avg_win <= Decimal(0) or avg_loss <= Decimal(0):
             # Fall back to default fraction
@@ -193,9 +175,7 @@ class PositionSizer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _kelly_fraction(
-        win_rate: float, avg_win: Decimal, avg_loss: Decimal
-    ) -> float:
+    def _kelly_fraction(win_rate: float, avg_win: Decimal, avg_loss: Decimal) -> float:
         """Compute the full Kelly fraction.
 
         Formula::
@@ -237,9 +217,7 @@ class PositionSizer:
 
         return max(0.0, kelly_f)
 
-    def _adjusted_kelly(
-        self, kelly_f: float, portfolio_value: Decimal
-    ) -> Decimal:
+    def _adjusted_kelly(self, kelly_f: float, portfolio_value: Decimal) -> Decimal:
         """Apply fractional multiplier, leverage adjustment, and caps.
 
         Steps:

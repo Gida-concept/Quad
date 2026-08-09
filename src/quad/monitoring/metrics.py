@@ -65,7 +65,9 @@ class MetricsCollector:
     # Metric mutation
     # ------------------------------------------------------------------
 
-    def set_gauge(self, name: str, value: float, labels: dict[str, str] | None = None) -> None:
+    def set_gauge(
+        self, name: str, value: float, labels: dict[str, str] | None = None
+    ) -> None:
         """Set a gauge value.
 
         Parameters
@@ -82,7 +84,9 @@ class MetricsCollector:
             if labels:
                 self._gauge_labels[name] = labels
 
-    def increment_counter(self, name: str, amount: float = 1.0, labels: dict[str, str] | None = None) -> None:
+    def increment_counter(
+        self, name: str, amount: float = 1.0, labels: dict[str, str] | None = None
+    ) -> None:
         """Increment a counter value.
 
         Parameters
@@ -99,7 +103,9 @@ class MetricsCollector:
             if labels:
                 self._counter_labels[name] = labels
 
-    def observe_histogram(self, name: str, value: float, labels: dict[str, str] | None = None) -> None:
+    def observe_histogram(
+        self, name: str, value: float, labels: dict[str, str] | None = None
+    ) -> None:
         """Record a histogram observation.
 
         Old observations beyond ``max_observations`` are automatically
@@ -202,17 +208,32 @@ class MetricsCollector:
                     sorted_vals = sorted(values)
                     # Prometheus histogram spec requires _bucket, _count, _sum
                     # Define bucket boundaries for typical trading metrics
-                    buckets = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, float("inf")]
+                    buckets = [
+                        0.001,
+                        0.005,
+                        0.01,
+                        0.05,
+                        0.1,
+                        0.5,
+                        1.0,
+                        5.0,
+                        10.0,
+                        float("inf"),
+                    ]
                     for b in buckets:
                         le = "+Inf" if b == float("inf") else str(b)
                         bucket_count = sum(1 for v in sorted_vals if v <= b)
-                        lines.append(f'{metric_name}_bucket{label_str}{{le="{le}"}} {bucket_count}')
-                    lines.append(f'{metric_name}_count{label_str} {count}')
-                    lines.append(f'{metric_name}_sum{label_str} {total}')
+                        lines.append(
+                            f'{metric_name}_bucket{label_str}{{le="{le}"}} {bucket_count}'
+                        )
+                    lines.append(f"{metric_name}_count{label_str} {count}")
+                    lines.append(f"{metric_name}_sum{label_str} {total}")
                     if count > 0:
-                        lines.append(f'{metric_name}_min{label_str} {sorted_vals[0]}')
-                        lines.append(f'{metric_name}_max{label_str} {sorted_vals[-1]}')
-                        lines.append(f'{metric_name}_avg{label_str} {total / count:.4f}')
+                        lines.append(f"{metric_name}_min{label_str} {sorted_vals[0]}")
+                        lines.append(f"{metric_name}_max{label_str} {sorted_vals[-1]}")
+                        lines.append(
+                            f"{metric_name}_avg{label_str} {total / count:.4f}"
+                        )
 
         lines.append("")
         return "\n".join(lines)

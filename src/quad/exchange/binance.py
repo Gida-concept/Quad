@@ -135,13 +135,15 @@ class BinanceFuturesAdapter(ExchangeAdapter):
     # (``POST /fapi/v1/algoOrder``).  Sending these to ``POST /fapi/v1/order``
     # is rejected with -4120 ("Order type not supported for this endpoint.
     # Please use the Algo Order API endpoints instead.").
-    _ALGO_ORDER_TYPES = frozenset({
-        "STOP_MARKET",
-        "TAKE_PROFIT_MARKET",
-        "STOP",
-        "TAKE_PROFIT",
-        "TRAILING_STOP_MARKET",
-    })
+    _ALGO_ORDER_TYPES = frozenset(
+        {
+            "STOP_MARKET",
+            "TAKE_PROFIT_MARKET",
+            "STOP",
+            "TAKE_PROFIT",
+            "TRAILING_STOP_MARKET",
+        }
+    )
 
     def __init__(
         self,
@@ -155,15 +157,14 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         self._log = logger.bind(adapter="binance_futures")
 
         self._api_key: str = api_key or os.environ.get("BINANCE_API_KEY", "")
-        self._api_secret: str = api_secret or os.environ.get(
-            "BINANCE_API_SECRET", ""
-        )
+        self._api_secret: str = api_secret or os.environ.get("BINANCE_API_SECRET", "")
         self._testnet: bool = testnet
         self._config = config or {}
         self._exchange_config = self._config["exchange"]
         self._binance_config = self._exchange_config["binance"]
         self._recv_window: int = (
-            recv_window if recv_window is not None
+            recv_window
+            if recv_window is not None
             else int(self._binance_config["recv_window"])
         )
 
@@ -179,18 +180,20 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
         # Resolve base URLs
         self._rest_base: str = (
-            self._binance_config["testnet_base_url"] if testnet
+            self._binance_config["testnet_base_url"]
+            if testnet
             else self._binance_config["base_url"]
         )
         self._ws_base: str = (
-            self._binance_config["ws_testnet_base_url"] if testnet
+            self._binance_config["ws_testnet_base_url"]
+            if testnet
             else self._binance_config["ws_base_url"]
         )
 
         # Rate-limit tracking
         rl = rate_limit or {}
-        self._max_weight: int = int(rl.get("max_weight"))
-        self._max_orders: int = int(rl.get("max_orders"))
+        self._max_weight: int = int(rl.get("max_weight") or 0)
+        self._max_orders: int = int(rl.get("max_orders") or 0)
         self._used_weight: int = 0
         self._used_orders: int = 0
         self._rate_limit_paused: bool = False
@@ -206,7 +209,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         self._session: aiohttp.ClientSession | None = None
 
         # WebSocket state
-        self._ws_connections: dict[str, aiohttp.ClientWebSocketResponse] = {}
+        self._ws_connections: dict[str, Any] = {}
         self._ws_tasks: dict[str, asyncio.Task[None]] = {}
         self._ws_subscriptions: dict[str, list[str]] = {}
         self._ws_close_events: dict[str, asyncio.Event] = {}
@@ -281,7 +284,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: S110  shutdown: best-effort task cancellation
                 pass
         self._ws_tasks.clear()
 
@@ -289,7 +292,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         for name, ws in list(self._ws_connections.items()):
             try:
                 await ws.close()
-            except Exception:
+            except Exception:  # noqa: S110  shutdown: best-effort websocket close
                 pass
         self._ws_connections.clear()
 
@@ -298,17 +301,15 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             self._listen_key_task.cancel()
             try:
                 await self._listen_key_task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: S110  shutdown: best-effort task cancellation
                 pass
             self._listen_key_task = None
 
         # Close listenKey
         if self._listen_key:
             try:
-                await self._request(
-                    "DELETE", "/fapi/v1/listenKey", signed=False
-                )
-            except Exception:
+                await self._request("DELETE", "/fapi/v1/listenKey", signed=False)
+            except Exception:  # noqa: S110  shutdown: best-effort listen key delete
                 pass
             self._listen_key = ""
 
@@ -367,24 +368,30 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                 continue
             side_str = pos_entry.get("positionSide", "BOTH")
             pos_side = (
-                FuturesPositionSide.LONG if side_str == "LONG"
-                else FuturesPositionSide.SHORT if side_str == "SHORT"
+                FuturesPositionSide.LONG
+                if side_str == "LONG"
+                else FuturesPositionSide.SHORT
+                if side_str == "SHORT"
                 else FuturesPositionSide.BOTH
             )
-            positions.append(FuturesPosition(
-                symbol=pos_entry.get("symbol", ""),
-                position_side=pos_side,
-                size=pos_amt,
-                entry_price=float(pos_entry.get("entryPrice", 0)),
-                mark_price=float(pos_entry.get("markPrice", 0)),
-                liquidation_price=float(pos_entry.get("liquidationPrice", 0)),
-                leverage=int(pos_entry.get("leverage", 1)),
-                margin_type=MarginType.ISOLATED if pos_entry.get("isolated") else MarginType.CROSS,
-                margin=float(pos_entry.get("isolatedWallet", 0)),
-                unrealized_pnl=float(pos_entry.get("unrealizedProfit", 0)),
-                realized_pnl=0.0,
-                update_time=int(pos_entry.get("updateTime", 0)),
-            ))
+            positions.append(
+                FuturesPosition(
+                    symbol=pos_entry.get("symbol", ""),
+                    position_side=pos_side,
+                    size=pos_amt,
+                    entry_price=float(pos_entry.get("entryPrice", 0)),
+                    mark_price=float(pos_entry.get("markPrice", 0)),
+                    liquidation_price=float(pos_entry.get("liquidationPrice", 0)),
+                    leverage=int(pos_entry.get("leverage", 1)),
+                    margin_type=MarginType.ISOLATED
+                    if pos_entry.get("isolated")
+                    else MarginType.CROSS,
+                    margin=float(pos_entry.get("isolatedWallet", 0)),
+                    unrealized_pnl=float(pos_entry.get("unrealizedProfit", 0)),
+                    realized_pnl=0.0,
+                    update_time=int(pos_entry.get("updateTime", 0)),
+                )
+            )
 
         account = Account(
             id=f"binance-{self._api_key[:8]}",
@@ -434,7 +441,9 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         """
         # Get latest funding rate from premiumIndex (includes mark/ index price)
         premium = await self._request(
-            "GET", "/fapi/v1/premiumIndex", signed=False,
+            "GET",
+            "/fapi/v1/premiumIndex",
+            signed=False,
             data={"symbol": symbol},
         )
         return FundingRate(
@@ -454,7 +463,9 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             Mark price as a ``Decimal``.
         """
         data = await self._request(
-            "GET", "/fapi/v1/premiumIndex", signed=False,
+            "GET",
+            "/fapi/v1/premiumIndex",
+            signed=False,
             data={"symbol": symbol},
         )
         return Decimal(str(data.get("markPrice", "0")))
@@ -480,21 +491,25 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             ``open_time_s`` is the open timestamp in seconds (float).
         """
         data = await self._request(
-            "GET", "/fapi/v1/klines", signed=False,
+            "GET",
+            "/fapi/v1/klines",
+            signed=False,
             data={"symbol": symbol, "interval": interval, "limit": limit},
         )
 
         # Binance kline format: [open_time, open, high, low, close, volume, ...]
         results: list[tuple[float, ...]] = []
         for k in data:
-            results.append((
-                k[0] / 1000.0,  # open time in seconds
-                float(k[1]),     # open
-                float(k[2]),     # high
-                float(k[3]),     # low
-                float(k[4]),     # close
-                float(k[5]),     # volume
-            ))
+            results.append(
+                (
+                    k[0] / 1000.0,  # open time in seconds
+                    float(k[1]),  # open
+                    float(k[2]),  # high
+                    float(k[3]),  # low
+                    float(k[4]),  # close
+                    float(k[5]),  # volume
+                )
+            )
         return results
 
     # ======================================================================
@@ -593,9 +608,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             symbol=data.get("symbol", request.symbol),
             side=data.get("side", request.side),
             order_type=data.get("type", request.order_type),
-            quantity=Decimal(
-                str(data.get("origQty", str(quantity)))
-            ),
+            quantity=Decimal(str(data.get("origQty", str(quantity)))),
             filled_qty=Decimal(str(data.get("executedQty", "0"))),
             price=(
                 Decimal(str(data.get("price", "0")))
@@ -702,19 +715,15 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         try:
             if order_id in self._algo_order_ids:
                 params: dict[str, Any] = {"algoId": order_id}
-                data = await self._request(
-                    "DELETE", "/fapi/v1/algoOrder", data=params
-                )
+                data = await self._request("DELETE", "/fapi/v1/algoOrder", data=params)
                 status = data.get("algoStatus", "")
-                self._log.info(
-                    "algo_order_cancelled", algo_id=order_id, status=status
-                )
+                self._log.info("algo_order_cancelled", algo_id=order_id, status=status)
                 self._algo_order_ids.discard(order_id)
                 return True
-            params: dict[str, Any] = {
+            cancel_params: dict[str, Any] = {
                 "orderId": order_id,
             }
-            data = await self._request("DELETE", "/fapi/v1/order", data=params)
+            data = await self._request("DELETE", "/fapi/v1/order", data=cancel_params)
             status = data.get("status", "")
             self._log.info("order_cancelled", order_id=order_id, status=status)
             return True
@@ -803,9 +812,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             price_protect=bool(data.get("priceProtect", False)),
         )
 
-    async def get_open_orders(
-        self, symbol: str | None = None
-    ) -> list[Order]:
+    async def get_open_orders(self, symbol: str | None = None) -> list[Order]:
         """Query all open orders.
 
         Calls ``GET /fapi/v1/openOrders``.
@@ -918,7 +925,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             API response dict.
         """
         return await self._request(
-            "POST", "/fapi/v1/leverage",
+            "POST",
+            "/fapi/v1/leverage",
             data={"symbol": symbol, "leverage": leverage},
         )
 
@@ -935,7 +943,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             API response dict.
         """
         return await self._request(
-            "POST", "/fapi/v1/marginType",
+            "POST",
+            "/fapi/v1/marginType",
             data={"symbol": symbol, "marginType": margin_type.upper()},
         )
 
@@ -952,7 +961,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         """
         dual = mode.lower() == "hedge"
         return await self._request(
-            "POST", "/fapi/v1/positionSide/dual",
+            "POST",
+            "/fapi/v1/positionSide/dual",
             data={"dualSidePosition": str(dual).lower()},
         )
 
@@ -965,7 +975,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             "hedge" if dual position side is enabled, else "one_way".
         """
         data = await self._request(
-            "GET", "/fapi/v1/positionSide/dual",
+            "GET",
+            "/fapi/v1/positionSide/dual",
         )
         if isinstance(data, bool):
             return "hedge" if data else "one_way"
@@ -993,9 +1004,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
         while not self._stop_event.is_set():
             try:
-                data = await asyncio.wait_for(
-                    self._price_queue.get(), timeout=1.0
-                )
+                data = await asyncio.wait_for(self._price_queue.get(), timeout=1.0)
                 yield data
             except asyncio.TimeoutError:
                 continue
@@ -1016,9 +1025,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
         while not self._stop_event.is_set():
             try:
-                data = await asyncio.wait_for(
-                    self._mark_price_queue.get(), timeout=1.0
-                )
+                data = await asyncio.wait_for(self._mark_price_queue.get(), timeout=1.0)
                 yield data
             except asyncio.TimeoutError:
                 continue
@@ -1040,15 +1047,11 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         await self._ensure_listen_key()
 
         # Start listenKey refresh loop
-        self._listen_key_task = asyncio.create_task(
-            self._listen_key_refresh_loop()
-        )
+        self._listen_key_task = asyncio.create_task(self._listen_key_refresh_loop())
 
         while not self._stop_event.is_set():
             try:
-                update = await asyncio.wait_for(
-                    self._account_queue.get(), timeout=1.0
-                )
+                update = await asyncio.wait_for(self._account_queue.get(), timeout=1.0)
                 yield update
             except asyncio.TimeoutError:
                 continue
@@ -1106,7 +1109,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         params["recvWindow"] = self._recv_window
 
         query_string = "&".join(
-            f"{k}={v}" for k, v in params.items()  # insertion order, NOT sorted
+            f"{k}={v}"
+            for k, v in params.items()  # insertion order, NOT sorted
         )
 
         signature = hmac.new(
@@ -1129,9 +1133,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         """Execute a REST API request with retry and rate-limit handling."""
         if max_retries is None:
             max_retries = int(self._binance_config["max_retries"])
-        retry_backoff_base = float(
-            self._binance_config["retry_backoff_base"]
-        )
+        retry_backoff_base = float(self._binance_config["retry_backoff_base"])
 
         if self._session is None or self._session.closed:
             raise ExchangeConnectionError("HTTP session is not available")
@@ -1153,9 +1155,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             try:
                 await self._wait_if_rate_limited()
 
-                async with self._session.request(
-                    method.upper(), url, **kwargs
-                ) as resp:
+                async with self._session.request(method.upper(), url, **kwargs) as resp:
                     self._update_rate_limits(resp.headers)
 
                     if resp.status == 429:
@@ -1177,13 +1177,11 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
                     if resp.status in (400, 404):
                         body = await resp.text()
-                        raise ExchangeOrderError(
-                            f"Order error ({resp.status}): {body}"
-                        )
+                        raise ExchangeOrderError(f"Order error ({resp.status}): {body}")
 
                     if resp.status >= 500:
                         if attempt < max_retries:
-                            backoff = retry_backoff_base ** attempt
+                            backoff = retry_backoff_base**attempt
                             self._log.warning(
                                 "server_error_retrying",
                                 status=resp.status,
@@ -1193,8 +1191,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                             await asyncio.sleep(backoff)
                             continue
                         raise ExchangeConnectionError(
-                            f"Server error ({resp.status}) after "
-                            f"{max_retries} retries"
+                            f"Server error ({resp.status}) after {max_retries} retries"
                         )
 
                     content_type = resp.headers.get("Content-Type", "")
@@ -1207,7 +1204,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
             except asyncio.TimeoutError as exc:
                 if attempt < max_retries:
-                    backoff = retry_backoff_base ** attempt
+                    backoff = retry_backoff_base**attempt
                     self._log.warning(
                         "request_timeout_retrying",
                         attempt=attempt + 1,
@@ -1221,16 +1218,12 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
             except (aiohttp.ClientError, OSError) as exc:
                 if attempt < max_retries:
-                    backoff = retry_backoff_base ** attempt
+                    backoff = retry_backoff_base**attempt
                     await asyncio.sleep(backoff)
                     continue
-                raise ExchangeConnectionError(
-                    f"HTTP error: {exc}"
-                ) from exc
+                raise ExchangeConnectionError(f"HTTP error: {exc}") from exc
 
-        raise ExchangeConnectionError(
-            f"Request failed after {max_retries} retries"
-        )
+        raise ExchangeConnectionError(f"Request failed after {max_retries} retries")
 
     # ======================================================================
     # Internal — Rate Limiting
@@ -1256,16 +1249,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             except (ValueError, TypeError):
                 pass
 
-        weight_pct = (
-            self._used_weight / self._max_weight
-            if self._max_weight > 0
-            else 0
-        )
-        order_pct = (
-            self._used_orders / self._max_orders
-            if self._max_orders > 0
-            else 0
-        )
+        weight_pct = self._used_weight / self._max_weight if self._max_weight > 0 else 0
+        order_pct = self._used_orders / self._max_orders if self._max_orders > 0 else 0
 
         if weight_pct >= float(self._binance_config.get("rate_limit_warn_threshold")):
             self._log.warning(
@@ -1305,7 +1290,9 @@ class BinanceFuturesAdapter(ExchangeAdapter):
     async def _wait_if_rate_limited(self) -> None:
         """Wait if the rate-limit pause is active."""
         if not self._rate_limit_paused:
-            if self._used_weight >= self._max_weight * float(self._binance_config.get("rate_limit_hard_threshold")):
+            if self._used_weight >= self._max_weight * float(
+                self._binance_config.get("rate_limit_hard_threshold")
+            ):
                 wait = float(self._binance_config.get("rate_limiter_wait_seconds"))
                 self._log.warning(
                     "rate_limit_throttling",
@@ -1330,17 +1317,12 @@ class BinanceFuturesAdapter(ExchangeAdapter):
     # Internal — WebSocket
     # ======================================================================
 
-    async def _subscribe_ws_streams(
-        self, stream_names: list[str]
-    ) -> None:
+    async def _subscribe_ws_streams(self, stream_names: list[str]) -> None:
         """Subscribe to one or more WebSocket streams."""
         if not stream_names:
             return
 
-        new_streams = [
-            s for s in stream_names
-            if s not in self._ws_subscriptions
-        ]
+        new_streams = [s for s in stream_names if s not in self._ws_subscriptions]
 
         if not new_streams:
             return
@@ -1349,9 +1331,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             self._ws_subscriptions.setdefault(stream_name, [])
 
         for stream_name in new_streams:
-            task = asyncio.create_task(
-                self._ws_listen_loop(stream_name)
-            )
+            task = asyncio.create_task(self._ws_listen_loop(stream_name))
             self._ws_tasks[stream_name] = task
 
         self._log.info(
@@ -1367,6 +1347,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         while not self._stop_event.is_set():
             try:
                 ws_url = f"{self._ws_base}/ws/{stream_name}"
+                if self._session is None:
+                    raise ExchangeConnectionError("HTTP session not initialized")
                 async with self._session.ws_connect(
                     ws_url,
                     heartbeat=float(self._binance_config["heartbeat_seconds"]),
@@ -1379,9 +1361,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                         if self._stop_event.is_set():
                             break
                         if msg.type == aiohttp.WSMsgType.TEXT:
-                            await self._handle_ws_message(
-                                stream_name, msg.data
-                            )
+                            await self._handle_ws_message(stream_name, msg.data)
                         elif msg.type == aiohttp.WSMsgType.ERROR:
                             self._log.error(
                                 "ws_error",
@@ -1417,8 +1397,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                 ws_jitter = float(self._binance_config["ws_backoff_jitter_factor"])
 
                 backoff = min(
-                    ws_base_backoff
-                    * (ws_backoff_mult ** (retries - 1)),
+                    ws_base_backoff * (ws_backoff_mult ** (retries - 1)),
                     ws_max_backoff,
                 )
                 import random
@@ -1438,9 +1417,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             finally:
                 self._ws_connections.pop(stream_name, None)
 
-    async def _handle_ws_message(
-        self, stream_name: str, raw: str
-    ) -> None:
+    async def _handle_ws_message(self, stream_name: str, raw: str) -> None:
         """Parse and dispatch an incoming WebSocket message."""
         try:
             data = json.loads(raw)
@@ -1472,9 +1449,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             if "c" in data and "s" in data:
                 self._price_queue.put_nowait(data)
 
-    def _handle_account_update_event(
-        self, data: dict[str, Any]
-    ) -> None:
+    def _handle_account_update_event(self, data: dict[str, Any]) -> None:
         """Parse an ACCOUNT_UPDATE event and enqueue an ``AccountUpdate``."""
         try:
             balances_data = data.get("B", {})
@@ -1520,7 +1495,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         if self._session is not None and not self._session.closed:
             try:
                 await self._session.close()
-            except Exception:
+            except Exception:  # noqa: S110  shutdown: best-effort session close
                 pass
         self._session = None
 
@@ -1546,9 +1521,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             return None
 
         side_str = "LONG" if pos_amt > 0 else "SHORT"
-        side = (
-            PositionSide.LONG if side_str == "LONG" else PositionSide.SHORT
-        )
+        side = PositionSide.LONG if side_str == "LONG" else PositionSide.SHORT
 
         pos_side_str = entry.get("positionSide", "BOTH")
         if pos_side_str == "LONG":
@@ -1608,18 +1581,16 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         if self._listen_key:
             return self._listen_key
 
-        data = await self._request(
-            "POST", "/fapi/v1/listenKey", signed=False
-        )
+        data = await self._request("POST", "/fapi/v1/listenKey", signed=False)
         self._listen_key = data.get("listenKey", "")
         if not self._listen_key:
-            raise ExchangeConnectionError(
-                "Failed to create listenKey"
-            )
+            raise ExchangeConnectionError("Failed to create listenKey")
 
         # Connect to user data WebSocket
         try:
             ws_url = f"{self._ws_base}/ws/{self._listen_key}"
+            if self._session is None:
+                raise ExchangeConnectionError("HTTP session not initialized")
             ws = await self._session.ws_connect(
                 ws_url,
                 heartbeat=float(self._binance_config["heartbeat_seconds"]),

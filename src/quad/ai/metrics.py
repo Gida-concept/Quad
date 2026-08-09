@@ -138,9 +138,11 @@ def _outcome(row: Any) -> str:
 
 def _direction(row: Any) -> str:
     """Normalized uppercase predicted direction."""
-    return str(
-        _row_attr(row, "predicted_direction", "NEUTRAL") or "NEUTRAL"
-    ).strip().upper()
+    return (
+        str(_row_attr(row, "predicted_direction", "NEUTRAL") or "NEUTRAL")
+        .strip()
+        .upper()
+    )
 
 
 def _confidence(row: Any) -> float:
@@ -318,9 +320,7 @@ def compute_metrics(
     # (an un-derivable ENTER): it must never inflate these counts, which gate
     # the orchestrator's ``min_resolved`` and would otherwise disagree with
     # hit_rate/ECE/Brier (all of which exclude NEUTRAL via ``_is_directional``).
-    metrics.wins = sum(
-        1 for r in rows if _is_directional(r) and _outcome(r) == "win"
-    )
+    metrics.wins = sum(1 for r in rows if _is_directional(r) and _outcome(r) == "win")
     metrics.losses = sum(
         1 for r in rows if _is_directional(r) and _outcome(r) == "loss"
     )

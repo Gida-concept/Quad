@@ -97,9 +97,7 @@ def _std_dev(values: list[float], period: int, sma_values: list[float]) -> list[
     return result
 
 
-def _true_range(
-    high: list[float], low: list[float], close: list[float]
-) -> list[float]:
+def _true_range(high: list[float], low: list[float], close: list[float]) -> list[float]:
     """Compute true range values."""
     tr: list[float] = [high[0] - low[0]]
     for i in range(1, len(high)):
@@ -414,9 +412,7 @@ def _compute_volume_ratio(volumes: list[float], period: int = 20) -> float | Non
     return round(current_vol / avg_vol, 4)
 
 
-def _compute_obv(
-    closes: list[float], volumes: list[float]
-) -> dict[str, Any]:
+def _compute_obv(closes: list[float], volumes: list[float]) -> dict[str, Any]:
     """Compute On-Balance Volume and its trend direction."""
     n = len(closes)
     if n < 2:
@@ -473,44 +469,47 @@ def _detect_candlestick_patterns(
     total_range = h - l
 
     if total_range == 0:
-        return {p: False for p in ["doji", "bullish_engulfing", "bearish_engulfing",
-                                    "hammer", "shooting_star"]}
+        return {
+            p: False
+            for p in [
+                "doji",
+                "bullish_engulfing",
+                "bearish_engulfing",
+                "hammer",
+                "shooting_star",
+            ]
+        }
 
     # Doji: very small body relative to range
     patterns["doji"] = body / total_range < 0.1
 
     if n >= 2:
         prev_o, prev_c = opens[-2], closes[-2]
-        prev_body = abs(prev_c - prev_o)
 
         # Bullish engulfing: red candle followed by green candle that engulfs it
         patterns["bullish_engulfing"] = (
             prev_c < prev_o  # previous was red
-            and c > o          # current is green
-            and c > prev_o     # current closes above previous open
-            and o < prev_c     # current opens below previous close
+            and c > o  # current is green
+            and c > prev_o  # current closes above previous open
+            and o < prev_c  # current opens below previous close
         )
 
         # Bearish engulfing: green candle followed by red candle that engulfs it
         patterns["bearish_engulfing"] = (
             prev_c > prev_o  # previous was green
-            and c < o          # current is red
-            and c < prev_o     # current closes below previous open
-            and o > prev_c     # current opens above previous close
+            and c < o  # current is red
+            and c < prev_o  # current closes below previous open
+            and o > prev_c  # current opens above previous close
         )
 
     # Hammer: small body at the top, long lower wick
     patterns["hammer"] = (
-        lower_wick >= 2 * body
-        and upper_wick <= body
-        and lower_wick > 0
+        lower_wick >= 2 * body and upper_wick <= body and lower_wick > 0
     )
 
     # Shooting star: small body at the bottom, long upper wick
     patterns["shooting_star"] = (
-        upper_wick >= 2 * body
-        and lower_wick <= body
-        and upper_wick > 0
+        upper_wick >= 2 * body and lower_wick <= body and upper_wick > 0
     )
 
     return patterns
@@ -564,9 +563,7 @@ def compute_indicators(candles: list[Candle]) -> dict[str, Any]:
     result["trend_plus_di"] = adx_data.get("plus_di")
     result["trend_minus_di"] = adx_data.get("minus_di")
     result["trend_regime"] = regime
-    result["trend_price_vs_ema20"] = (
-        round(closes[-1] / ema20 - 1, 4) if ema20 else None
-    )
+    result["trend_price_vs_ema20"] = round(closes[-1] / ema20 - 1, 4) if ema20 else None
 
     # ------------------------------------------------------------------
     # Momentum
@@ -630,15 +627,11 @@ def compute_indicators(candles: list[Candle]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     # Price action summary
     # ------------------------------------------------------------------
-    result["price_change_pct"] = round(
-        (closes[-1] - closes[0]) / closes[0] * 100, 2
-    )
+    result["price_change_pct"] = round((closes[-1] - closes[0]) / closes[0] * 100, 2)
     result["price_high"] = round(max(highs), 2)
     result["price_low"] = round(min(lows), 2)
     result["price_current"] = round(closes[-1], 2)
-    result["price_range_pct"] = round(
-        (max(highs) - min(lows)) / closes[0] * 100, 2
-    )
+    result["price_range_pct"] = round((max(highs) - min(lows)) / closes[0] * 100, 2)
 
     # ------------------------------------------------------------------
     # Candlestick patterns

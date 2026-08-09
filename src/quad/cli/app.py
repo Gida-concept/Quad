@@ -190,14 +190,24 @@ def risk(
     print("Risk Status")
     print("=" * 50)
     print(f"  Max Positions:             {risk_config['max_positions']}")
-    print(f"  Max Position Size:         {float(risk_config['max_position_size_pct']):.0%}")
+    print(
+        f"  Max Position Size:         {float(risk_config['max_position_size_pct']):.0%}"
+    )
     print(f"  Max Portfolio Risk:        {risk_config['max_portfolio_risk_pct']}%")
     print(f"  Max Daily Loss:            ${risk_config['max_daily_loss_usd']}")
     print(f"  Max Drawdown:              {risk_config['max_drawdown_pct']}%")
-    print(f"  Min Liquidation Distance:  {float(risk_config['min_distance_to_liquidation_pct']):.0%}")
-    print(f"  Liquidation Warn Fraction: {float(risk_config.get('liquidation_distance_fraction', 0.5)):.0%} of 1/leverage distance")
-    print(f"  Max Funding Rate Cost:     {float(risk_config['max_funding_rate_cost']):.4%}")
-    print(f"  Max Position Concentration: {risk_config['max_position_concentration']:.0%}")
+    print(
+        f"  Min Liquidation Distance:  {float(risk_config['min_distance_to_liquidation_pct']):.0%}"
+    )
+    print(
+        f"  Liquidation Warn Fraction: {float(risk_config.get('liquidation_distance_fraction', 0.5)):.0%} of 1/leverage distance"
+    )
+    print(
+        f"  Max Funding Rate Cost:     {float(risk_config['max_funding_rate_cost']):.4%}"
+    )
+    print(
+        f"  Max Position Concentration: {risk_config['max_position_concentration']:.0%}"
+    )
     print("=" * 50)
     print()
     print("  Use the Telegram bot `/risk` command for live risk status.")
@@ -239,7 +249,9 @@ def evaluate(
 @app.command()
 def execute(
     strategy_name: str = typer.Argument(..., help="Strategy name to execute"),
-    dry_run: bool = typer.Option(True, "--dry-run", "-n", help="Dry run (no real orders)"),
+    dry_run: bool = typer.Option(
+        True, "--dry-run", "-n", help="Dry run (no real orders)"
+    ),
     config_path: str = typer.Option(
         "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
@@ -286,23 +298,14 @@ def backtest(
     print(f"  Period: {days} days")
     print()
 
-    # Delegate to backtesting engine
-    from quad.backtesting.engine import BacktestEngine
-
-    engine = BacktestEngine(
-        strategy=None,  # type: ignore[arg-type]
-        db_manager=None,  # type: ignore[arg-type]
-        config={},
-    )
-    print("Backtesting engine ready.")
-    print()
-    print("Full backtest execution requires:")
-    print("  • A configured DatabaseManager with historical futures data")
-    print("  • A strategy instance")
-    print("  • An underlying symbol to backtest")
-    print()
-    print("Usage example from code:")
-    print("  await engine.run(strategy, 'BTCUSDT', start, end)")
+    # The backtest engine requires a live database manager, a strategy
+    # instance, and historical futures data.  None of these are wired up
+    # yet, so fail honestly instead of pretending the run succeeded.
+    print("❌ Backtesting is not implemented yet.")
+    print("  Required: a configured DatabaseManager with historical futures data,")
+    print("  a strategy instance, and an underlying symbol.")
+    print("  See docs/strategy-development.md for the planned engine.run() API.")
+    raise typer.Exit(code=1)
 
 
 @app.command(name="config")

@@ -164,15 +164,17 @@ def _klines_to_candles(
     """
     candles: list[Candle] = []
     for k in klines:
-        candles.append(Candle(
-            symbol=pair,
-            open=Decimal(str(k[1])),
-            high=Decimal(str(k[2])),
-            low=Decimal(str(k[3])),
-            close=Decimal(str(k[4])),
-            volume=Decimal(str(k[5])),
-            timestamp=int(k[0] * 1000),  # store in ms for consistency
-        ))
+        candles.append(
+            Candle(
+                symbol=pair,
+                open=Decimal(str(k[1])),
+                high=Decimal(str(k[2])),
+                low=Decimal(str(k[3])),
+                close=Decimal(str(k[4])),
+                volume=Decimal(str(k[5])),
+                timestamp=int(k[0] * 1000),  # store in ms for consistency
+            )
+        )
     return candles
 
 
@@ -234,7 +236,7 @@ async def collect_market_context(
     # 1. Fetch candles via Binance Futures klines API (via exchange adapter)
     # ------------------------------------------------------------------
     try:
-        tasks = []
+        tasks: list[Any] = []
         for pair in pairs:
             for tf in timeframes:
                 interval = _TIMEFRAME_MAP.get(tf, tf)
@@ -270,12 +272,14 @@ async def collect_market_context(
                     )
                     continue
 
-                context.candles[key] = _klines_to_candles(pair, result)
+                assert isinstance(result, list)
+                klines: list[tuple[float, ...]] = list(result)
+                context.candles[key] = _klines_to_candles(pair, klines)
                 logger.debug(
                     "candles_fetched",
                     pair=pair,
                     timeframe=tf,
-                    count=len(result),
+                    count=len(klines),
                 )
 
     except Exception as exc:
@@ -300,9 +304,7 @@ async def collect_market_context(
         context.account = await exchange_adapter.get_account()
         logger.debug(
             "account_fetched",
-            total_usdt=float(context.account.total_usdt)
-            if context.account
-            else 0,
+            total_usdt=float(context.account.total_usdt) if context.account else 0,
         )
     except Exception as exc:
         context.errors["account"] = str(exc)
@@ -366,10 +368,11 @@ async def collect_market_context(
         if ticker is not None:
             # Build a FuturesContract from ticker data if available
             try:
+                ticker_dict = dict(ticker)
                 contract = FuturesContract(
                     symbol=pair,
                     mark_price=Decimal(str(mp)) if mp else Decimal(0),
-                    last_price=Decimal(str(ticker.get("lastPrice", 0))),
+                    last_price=Decimal(str(ticker_dict.get("lastPrice", 0))),
                     volume_24h=Decimal(str(ticker.get("volume", 0))),
                     price_change_24h=Decimal(str(ticker.get("priceChange", 0))),
                     high_24h=Decimal(str(ticker.get("highPrice", 0))),

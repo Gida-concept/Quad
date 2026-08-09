@@ -54,8 +54,10 @@ class _BaseTTLCache(Generic[T]):
         default_ttl: int | None = None,
         config: dict | None = None,
     ) -> None:
-        self._config = config or {}
-        self._cache_config = self._config["market_data"]["cache_ttl"]
+        self._config: dict[str, Any] = config or {}
+        self._cache_config: Any = self._config.get("market_data", {}).get(
+            "cache_ttl", {}
+        )
         if default_ttl is None:
             default_ttl = 60  # hardcoded safe fallback (not config-dependent)
         self._default_ttl = default_ttl
@@ -210,7 +212,7 @@ class FundingRateCache(_BaseTTLCache[FundingRate]):
         config: dict | None = None,
     ) -> None:
         if default_ttl is None:
-            cfg = config["market_data"]["cache_ttl"]
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
             default_ttl = int(cfg["funding_rate"]) if "funding_rate" in cfg else 28800
         super().__init__(default_ttl=default_ttl, config=config)
         self._exchange = exchange_adapter
@@ -243,10 +245,10 @@ class OrderBookCache(_BaseTTLCache[dict]):
         config: dict | None = None,
     ) -> None:
         if default_ttl is None:
-            cfg = config["market_data"]["cache_ttl"]
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
             default_ttl = int(cfg["order_book"]) if "order_book" in cfg else 5
         if limit is None:
-            cfg = config["market_data"]["cache_ttl"]
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
             limit = int(cfg["order_book_limit"]) if "order_book_limit" in cfg else 20
         super().__init__(default_ttl=default_ttl, config=config)
         self._exchange = exchange_adapter
@@ -279,7 +281,7 @@ class MarkPriceCache(_BaseTTLCache[Decimal]):
         config: dict | None = None,
     ) -> None:
         if default_ttl is None:
-            cfg = config["market_data"]["cache_ttl"]
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
             default_ttl = int(cfg["mark_price"]) if "mark_price" in cfg else 2
         super().__init__(default_ttl=default_ttl, config=config)
         self._exchange = exchange_adapter
@@ -311,7 +313,7 @@ class OpenInterestCache(_BaseTTLCache[dict]):
         config: dict | None = None,
     ) -> None:
         if default_ttl is None:
-            cfg = config["market_data"]["cache_ttl"]
+            cfg = (config or {}).get("market_data", {}).get("cache_ttl", {})
             default_ttl = int(cfg["open_interest"]) if "open_interest" in cfg else 3600
         super().__init__(default_ttl=default_ttl, config=config)
         self._exchange = exchange_adapter

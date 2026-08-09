@@ -61,17 +61,12 @@ def create_exchange(
 
     if mode == "binance":
         exchange_cfg = cfg["exchange"]
-        api_key = (
-            exchange_cfg.get("api_key")
-            or os.environ.get("BINANCE_API_KEY", "")
-        )
-        api_secret = (
-            exchange_cfg.get("api_secret")
-            or os.environ.get("BINANCE_API_SECRET", "")
+        api_key = exchange_cfg.get("api_key") or os.environ.get("BINANCE_API_KEY", "")
+        api_secret = exchange_cfg.get("api_secret") or os.environ.get(
+            "BINANCE_API_SECRET", ""
         )
         testnet = _coerce_bool(
-            exchange_cfg.get("testnet")
-            or os.environ.get("BINANCE_TESTNET", False)
+            exchange_cfg.get("testnet") or os.environ.get("BINANCE_TESTNET", "")
         )
         rate_limit = exchange_cfg.get("rate_limit") or {}
 
@@ -86,10 +81,7 @@ def create_exchange(
     if mode == "mock":
         return MockAdapter()
 
-    msg = (
-        f"Unknown exchange mode: '{mode}'. "
-        "Expected one of: binance, mock."
-    )
+    msg = f"Unknown exchange mode: '{mode}'. Expected one of: binance, mock."
     raise ValueError(msg)
 
 

@@ -31,6 +31,7 @@ from typing import Any
 
 import structlog
 
+from quad.ai.context import MarketContext
 from quad.config.manager import ConfigManager
 from quad.config.schema import AiConfig, QuadConfig, TradingViewWebhookConfig
 from quad.exchange.factory import create_exchange
@@ -87,7 +88,6 @@ class QuadOrchestrator:
         self._log = logger.bind()
 
         # Config path
-        config_dir = str(Path(config_path).parent.resolve())
         self._config_path = config_path
 
         # ------------------------------------------------------------------
@@ -126,8 +126,8 @@ class QuadOrchestrator:
         self._metrics_cycle_count: int = 0
 
         # Pair-rotation state: trade one pair at a time, advance on close.
-        self._rotation_index: int = 0      # index into ai.pairs of next pair to scan
-        self._current_symbol: str = ""     # held / being-scanned pair
+        self._rotation_index: int = 0  # index into ai.pairs of next pair to scan
+        self._current_symbol: str = ""  # held / being-scanned pair
 
         # Telegram notification support
         self._telegram_bot: Any = None
@@ -280,6 +280,7 @@ class QuadOrchestrator:
         supported), SIGINT is handled by asyncio's default behaviour
         (``KeyboardInterrupt`` -> ``CancelledError``).
         """
+
         def _on_sigterm() -> None:
             self._log.info("signal_received", signal="SIGTERM")
             self._stop_event.set()
@@ -378,7 +379,10 @@ class QuadOrchestrator:
 
     async def _init_database(self) -> None:
         """Initialise the database (connect + create tables + migrate)."""
-        dsn = self._config_manager.get(
+        config_manager = self._config_manager
+        if config_manager is None:
+            raise RuntimeError("Config manager not initialized before database init")
+        dsn = config_manager.get(
             "persistence.dsn",
             os.environ.get(
                 "DATABASE_URL",
@@ -405,9 +409,7 @@ class QuadOrchestrator:
         """
         # Override exchange name based on mode
         mode = self._mode
-        exchange_cfg: dict[str, Any] = dict(
-            self._config_dict["exchange"]
-        )
+        exchange_cfg: dict[str, Any] = dict(self._config_dict["exchange"])
 
         if mode == "dry_run":
             exchange_cfg["name"] = "binance"
@@ -580,6 +582,8 @@ class QuadOrchestrator:
 
     async def _init_execution_engine(self) -> None:
         """Initialise the execution engine."""
+        if self._risk_manager is None:
+            raise RuntimeError("Risk manager not initialized before execution engine")
         self._execution_engine = ExecutionEngine(
             exchange_adapter=self._exchange_adapter,
             risk_manager=self._risk_manager,
@@ -692,9 +696,7 @@ class QuadOrchestrator:
             # Capture the PTB Bot instance for trade notifications
             if self._bot is not None and self._bot.application is not None:
                 self._telegram_bot = self._bot.application.bot
-            self._telegram_chat_id = int(
-                telegram_cfg.get("notification_chat_id") or 0
-            )
+            self._telegram_chat_id = int(telegram_cfg.get("notification_chat_id") or 0)
 
             self._log.info(
                 "telegram_bot_initialized",
@@ -716,9 +718,7 @@ class QuadOrchestrator:
         """Initialise the health check HTTP server."""
         monitoring_cfg = self._config_dict["monitoring"]
         health_cfg = monitoring_cfg["health_server"]
-        port = int(
-            health_cfg.get("port", os.environ.get("QUAD_HEALTH_PORT"))
-        )
+        port = int(health_cfg.get("port", os.environ.get("QUAD_HEALTH_PORT")))
         enabled = health_cfg.get("enabled")
 
         if not enabled:
@@ -778,15 +778,15 @@ class QuadOrchestrator:
 
         self._metrics = MetricsCollector()
         self._metrics.set_gauge("orchestrator_started", 1.0)
-        self._metrics.set_gauge(
-            "dry_run", 1.0 if self._is_dry_run else 0.0
-        )
+        self._metrics.set_gauge("dry_run", 1.0 if self._is_dry_run else 0.0)
         self._log.info("metrics_collector_initialized")
 
     async def _init_groq_ai(self) -> None:
         """Initialise the Groq AI client (if API key is available)."""
         ai_cfg = AiConfig.model_validate(self._config_dict.get("ai"))
-        api_key = os.environ.get("GROQ_API_KEY") or self._config_dict.get("ai", {}).get("api_key")
+        api_key = os.environ.get("GROQ_API_KEY") or self._config_dict.get("ai", {}).get(
+            "api_key"
+        )
 
         if not api_key:
             self._log.info("groq_ai_disabled_no_key")
@@ -812,9 +812,7 @@ class QuadOrchestrator:
 
         # Set AI cycle interval from config, defaulting to 1 hour
         self._ai_cycle_interval = int(
-            self._config_manager.get(
-                "trading.ai_cycle_interval"
-            )
+            self._config_manager.get("trading.ai_cycle_interval")
             if self._config_manager
             else 3600
         )
@@ -905,7 +903,11 @@ class QuadOrchestrator:
                 import json as _json
 
                 try:
-                    payload = _json.loads(raw_text) if raw_text.strip().startswith("{") else {}
+                    payload = (
+                        _json.loads(raw_text)
+                        if raw_text.strip().startswith("{")
+                        else {}
+                    )
                     if payload.get("secret") != secret:
                         log.warning("tv_webhook_invalid_secret")
                         return web.Response(status=403, text="Forbidden")
@@ -958,16 +960,29 @@ class QuadOrchestrator:
                         reason=f"TradingView alert: {signal.strategy_name}",
                         metadata=dict(signal.metadata or {}),
                     )
-                    await self._execution_engine.execute(action, {})
+                    if self._execution_engine is None:
+                        log.warning("tv_webhook_execution_engine_missing")
+                        return web.Response(
+                            status=503, text="Execution engine unavailable"
+                        )
+                    await self._execution_engine.execute(
+                        action, StrategyContext(config=self._config_dict)
+                    )
                 except Exception as exc:
                     log.exception("tv_webhook_execution_error", error=str(exc))
 
             return web.json_response({"status": "ok"})
 
         # Register the route on the health server
-        self._health_server.add_route("POST", "/webhook/tradingview", _tv_webhook_handler)
+        self._health_server.add_route(
+            "POST", "/webhook/tradingview", _tv_webhook_handler
+        )
 
-        self._tv_webhook = {"enabled": True, "secret_configured": bool(secret), "port": port}
+        self._tv_webhook = {
+            "enabled": True,
+            "secret_configured": bool(secret),
+            "port": port,
+        }
         self._log.info(
             "tradingview_webhook_initialized",
             port=port,
@@ -1080,9 +1095,11 @@ class QuadOrchestrator:
         The cycle runs every ``ai_cycle_interval`` seconds (default 3600).
         Exactly one position at a time is enforced by the force-close step.
         """
-        underlyings = list(
-            self._config_manager.get("trading", {}).get("underlyings", [])
-        )
+        config_manager = self._config_manager
+        if config_manager is None:
+            self._log.warning("main_cycle_config_manager_missing")
+            return
+        underlyings = list(config_manager.get("trading", {}).get("underlyings", []))
 
         while not self._stop_event.is_set():
             cycle_start = time.monotonic()
@@ -1097,8 +1114,8 @@ class QuadOrchestrator:
                 open_orders = []
                 try:
                     open_orders = await self._exchange_adapter.get_open_orders()
-                except Exception:
-                    pass  # Non-critical; continue with empty orders
+                except Exception:  # noqa: S110  Non-critical; continue with empty orders
+                    pass
 
                 # ----------------------------------------------------------
                 # 1b. Resolve AI decision outcomes against live positions.
@@ -1109,7 +1126,9 @@ class QuadOrchestrator:
                 try:
                     await self._reconcile_decision_outcomes(positions)
                 except Exception as exc:
-                    self._log.warning("decision_outcome_reconcile_failed", error=str(exc))
+                    self._log.warning(
+                        "decision_outcome_reconcile_failed", error=str(exc)
+                    )
 
                 # ----------------------------------------------------------
                 # 1c. Phase 3 prediction-quality metrics.  Lightweight: one
@@ -1141,14 +1160,18 @@ class QuadOrchestrator:
                         ai_available = self._groq_client.is_available()
                         if ai_available:
                             rotation_enabled = bool(
-                                self._config_dict.get("ai", {}).get("rotation", {}).get("enabled", False)
+                                self._config_dict.get("ai", {})
+                                .get("rotation", {})
+                                .get("enabled", False)
                             )
                             if rotation_enabled:
                                 ai_used = await self._run_ai_rotation(
                                     account, positions, open_orders, context
                                 )
                             else:  # legacy path unchanged
-                                if self._config_dict.get("trading", {}).get("serial_trade_mode", True):
+                                if self._config_dict.get("trading", {}).get(
+                                    "serial_trade_mode", True
+                                ):
                                     await self._close_all_positions()
                                 ai_decision = await self._run_ai_trading_cycle(
                                     underlyings, account, positions
@@ -1172,20 +1195,18 @@ class QuadOrchestrator:
                 # 6. Update monitoring / metrics
                 # ----------------------------------------------------------
                 try:
-                    await self._risk_manager.update_monitoring(context)
-                    # Check if any circuit breaker was triggered
-                    if self._risk_manager is not None:
-                        try:
-                            cb_status = await self._risk_manager.get_status()
-                            for cb_name, cb in cb_status.circuit_breakers.items():
-                                if cb.active:
-                                    await self._notify_circuit_breaker(
-                                        name=cb_name,
-                                        reason=cb.reason or "Circuit breaker triggered",
-                                        tier=getattr(cb, "tier", 0),
-                                    )
-                        except Exception:
-                            pass
+                    risk_manager = self._risk_manager
+                    if risk_manager is not None:
+                        await risk_manager.update_monitoring(context)
+                        # Check if any circuit breaker was triggered
+                        cb_status = await risk_manager.get_status()
+                        for cb_name, cb in cb_status.circuit_breakers.items():
+                            if cb.active:
+                                await self._notify_circuit_breaker(
+                                    name=cb_name,
+                                    reason=cb.reason or "Circuit breaker triggered",
+                                    tier=getattr(cb, "tier", 0),
+                                )
                 except Exception as exc:
                     self._log.warning(
                         "risk_monitoring_update_error",
@@ -1196,9 +1217,7 @@ class QuadOrchestrator:
                 # 6b. Periodic status / metrics (surface dry-run state)
                 # ----------------------------------------------------------
                 dry_run = self._is_dry_run
-                testnet = bool(
-                    getattr(self._exchange_adapter, "is_testnet", False)
-                )
+                testnet = bool(getattr(self._exchange_adapter, "is_testnet", False))
                 self._log.info(
                     "cycle_status",
                     dry_run=dry_run,
@@ -1210,17 +1229,14 @@ class QuadOrchestrator:
                 )
 
                 if self._metrics is not None:
-                    self._metrics.set_gauge(
-                        "active_positions", float(len(positions))
-                    )
+                    self._metrics.set_gauge("active_positions", float(len(positions)))
                     self._metrics.set_gauge(
                         "active_strategies", float(len(self._active_strategies))
                     )
+                    self._metrics.set_gauge("dry_run", 1.0 if dry_run else 0.0)
                     self._metrics.set_gauge(
-                        "dry_run", 1.0 if dry_run else 0.0
-                    )
-                    self._metrics.set_gauge(
-                        "dry_run_guard_active", 1.0 if (dry_run and not testnet) else 0.0
+                        "dry_run_guard_active",
+                        1.0 if (dry_run and not testnet) else 0.0,
                     )
                     self._metrics.increment_counter("trading_cycles")
 
@@ -1340,7 +1356,7 @@ class QuadOrchestrator:
                 user_prompt_len=len(prompts["user"]),
             )
 
-            ai_trade_cfg = self._config_dict.get("ai")
+            ai_trade_cfg = self._config_dict.get("ai") or {}
             decision = await self._groq_client.decide_trades(
                 system_prompt=prompts["system"],
                 user_prompt=prompts["user"],
@@ -1349,9 +1365,7 @@ class QuadOrchestrator:
             )
 
             # Track timing
-            self._last_ai_cycle_time_ms = round(
-                (time.monotonic() - ai_start) * 1000, 2
-            )
+            self._last_ai_cycle_time_ms = round((time.monotonic() - ai_start) * 1000, 2)
             self._last_ai_decision = decision
 
             # 5. Log decision to database
@@ -1406,7 +1420,11 @@ class QuadOrchestrator:
             if it could not run (no pairs / Groq unavailable).
         """
         pairs = list(self._config_dict.get("ai", {}).get("pairs", []))
-        if not pairs or self._groq_client is None or not self._groq_client.is_available():
+        if (
+            not pairs
+            or self._groq_client is None
+            or not self._groq_client.is_available()
+        ):
             self._log.warning("ai_rotation_unavailable")
             return False
         retry_sleep = float(
@@ -1421,12 +1439,16 @@ class QuadOrchestrator:
         # CASE A — a position is open: manage it, never open a second.
         if open_positions:
             held = open_positions[0]
-            held_symbol = getattr(held, "symbol", "") or getattr(held, "contract_symbol", "")
+            held_symbol = getattr(held, "symbol", "") or getattr(
+                held, "contract_symbol", ""
+            )
             self._current_symbol = held_symbol
             self._log.info("rotation_managing_open_position", symbol=held_symbol)
             try:
-                decision = await self._scan_pair(held_symbol)   # raises on Groq/API error
-            except Exception as exc:                             # CancelledError NOT caught (BaseException)
+                decision = await self._scan_pair(
+                    held_symbol
+                )  # raises on Groq/API error
+            except Exception as exc:  # CancelledError NOT caught (BaseException)
                 self._log.warning("ai_scan_error", symbol=held_symbol, error=str(exc))
                 return False
             hold_action = decision.get("action", "HOLD")
@@ -1442,18 +1464,20 @@ class QuadOrchestrator:
                 )
             elif hold_action in ("adjust_stop", "reduce_position"):
                 await self._execute_ai_action(decision, context)
-            return True                     # HOLD / no-op -> keep holding; wait for next hour
+            return True  # HOLD / no-op -> keep holding; wait for next hour
 
         # CASE B — flat: scan each pair once, starting at the rotation index.
         self._rotation_index %= len(pairs)
         scanned = 0
         while scanned < len(pairs):
-            if not self._groq_client.is_available():    # daily limit hit mid-scan
+            if not self._groq_client.is_available():  # daily limit hit mid-scan
                 self._log.warning("ai_rate_limit_hit_stopping_scan")
                 break
             symbol = pairs[self._rotation_index % len(pairs)]
             self._current_symbol = symbol
-            self._log.info("rotation_scanning_pair", symbol=symbol, index=self._rotation_index)
+            self._log.info(
+                "rotation_scanning_pair", symbol=symbol, index=self._rotation_index
+            )
             try:
                 decision = await self._scan_pair(symbol)
             except Exception as exc:
@@ -1461,8 +1485,12 @@ class QuadOrchestrator:
                 self._last_ai_error = str(exc)
                 self._log.warning("ai_scan_failed", symbol=symbol, error=str(exc))
                 if isinstance(exc, RuntimeError) and "rate limit" in str(exc).lower():
-                    break                            # stop burning requests this hour
-                decision = {"action": "HOLD", "reasoning": f"scan exception: {exc}", "confidence": 0.0}
+                    break  # stop burning requests this hour
+                decision = {
+                    "action": "HOLD",
+                    "reasoning": f"scan exception: {exc}",
+                    "confidence": 0.0,
+                }
 
             action = decision.get("action", "HOLD")
             if action == "ENTER":
@@ -1472,21 +1500,25 @@ class QuadOrchestrator:
                     self._rotation_index = (self._rotation_index + 1) % len(pairs)
                     self._log.info("rotation_opened_position", symbol=symbol)
                     return True
-                self._log.warning("rotation_enter_failed_advancing", symbol=symbol)  # risk/exec rejected
+                self._log.warning(
+                    "rotation_enter_failed_advancing", symbol=symbol
+                )  # risk/exec rejected
             elif action == "EXIT":
-                self._log.info("rotation_exit_without_position_advancing", symbol=symbol)
+                self._log.info(
+                    "rotation_exit_without_position_advancing", symbol=symbol
+                )
 
             self._rotation_index = (self._rotation_index + 1) % len(pairs)
             scanned += 1
             if scanned < len(pairs):
-                await asyncio.sleep(retry_sleep)     # 30s between HOLD scans
+                await asyncio.sleep(retry_sleep)  # 30s between HOLD scans
 
         self._log.info("rotation_scan_complete_all_hold", scanned=scanned)
         return True
 
     def _position_side_for_symbol(
         self,
-        context: StrategyContext,
+        context: StrategyContext | MarketContext,
         symbol: str,
     ) -> Any:
         """Return the open position side for ``symbol``, or ``None`` when flat.
@@ -1604,7 +1636,7 @@ class QuadOrchestrator:
             indicators=indicators,
             config=cfg,
         )
-        decision = await self._groq_client.decide_trades(          # may raise (rate-limit/API)
+        decision = await self._groq_client.decide_trades(  # may raise (rate-limit/API)
             system_prompt=prompts["system"],
             user_prompt=prompts["user"],
             temperature=cfg["ai"].get("temperature"),
@@ -1674,9 +1706,16 @@ class QuadOrchestrator:
             self._log.warning("ai_decision_log_failed", error=str(exc))
 
         # Pin contract: the prompt contains ONLY this pair, so any other contract is a hallucination.
-        if decision.get("action") in ("ENTER", "EXIT", "adjust_stop", "reduce_position"):
+        if decision.get("action") in (
+            "ENTER",
+            "EXIT",
+            "adjust_stop",
+            "reduce_position",
+        ):
             if decision.get("contract") != symbol:
-                self._log.warning("ai_contract_pinned", expected=symbol, got=decision.get("contract"))
+                self._log.warning(
+                    "ai_contract_pinned", expected=symbol, got=decision.get("contract")
+                )
             decision["contract"] = symbol
         return decision
 
@@ -1700,6 +1739,9 @@ class QuadOrchestrator:
             were found.
         """
         log = self._log.bind()
+        if self._execution_engine is None:
+            log.warning("close_all_positions_no_execution_engine")
+            return False
 
         # 1. Get all open positions
         try:
@@ -1712,8 +1754,7 @@ class QuadOrchestrator:
         from quad.types.domain import PositionStatus
 
         open_positions = [
-            p for p in positions
-            if getattr(p, "status", None) == PositionStatus.OPEN
+            p for p in positions if getattr(p, "status", None) == PositionStatus.OPEN
         ]
 
         if not open_positions:
@@ -1759,7 +1800,9 @@ class QuadOrchestrator:
             if pos_side is None:
                 log.warning(
                     "close_all_positions_unknown_side",
-                    contract=getattr(position, "symbol", getattr(position, "contract_symbol", "")),
+                    contract=getattr(
+                        position, "symbol", getattr(position, "contract_symbol", "")
+                    ),
                 )
                 continue
 
@@ -1770,7 +1813,9 @@ class QuadOrchestrator:
             action = Action(
                 type="EXIT",
                 strategy="serial_close",
-                contract=getattr(position, "symbol", getattr(position, "contract_symbol", "")),
+                contract=getattr(
+                    position, "symbol", getattr(position, "contract_symbol", "")
+                ),
                 side=close_side,
                 # Preserve the exact fractional quantity.  int() would
                 # truncate fractional quantities to 0, silently zeroing the
@@ -1784,7 +1829,9 @@ class QuadOrchestrator:
 
             # 4. Execute through execution engine
             task = asyncio.create_task(
-                self._execution_engine.execute(action, {})
+                self._execution_engine.execute(
+                    action, StrategyContext(config=self._config_dict)
+                )
             )
             close_tasks.append(task)
 
@@ -1840,6 +1887,10 @@ class QuadOrchestrator:
             execution exception.  Pair-rotation uses this to distinguish
             "ENTER opened a position" from "ENTER was rejected".
         """
+        if self._risk_manager is None or self._execution_engine is None:
+            self._log.warning("ai_execution_subsystems_missing")
+            return False
+
         action_type = decision.get("action", "HOLD")
         if action_type == "HOLD":
             self._log.debug("ai_decision_hold", reason=decision.get("reasoning", ""))
@@ -1923,7 +1974,7 @@ class QuadOrchestrator:
         from quad.types.risk import Action
 
         action = Action(
-            type=action_type,  # type: ignore[arg-type]
+            type=action_type,
             strategy=strategy_name,
             symbol=contract_symbol,
             contract=contract_symbol,
@@ -1932,14 +1983,17 @@ class QuadOrchestrator:
             # truncate fractional quantities to 0, silently zeroing the order.
             quantity=Decimal(str(quantity)),
             order_type=order_type,
-            price=(
-                Decimal(str(limit_price)) if limit_price is not None else None
-            ),
+            price=(Decimal(str(limit_price)) if limit_price is not None else None),
             stop_loss_price=stop_loss_price,
             take_profit_price=take_profit_price,
             reason=decision.get("reasoning", "AI trading decision"),
             # fallback matches AiConfig.default_confidence schema default
-            metadata={"ai_confidence": decision.get("confidence", self._config_dict.get("ai", {}).get("default_confidence", 0.8))},
+            metadata={
+                "ai_confidence": decision.get(
+                    "confidence",
+                    self._config_dict.get("ai", {}).get("default_confidence", 0.8),
+                )
+            },
         )
 
         # Risk check
@@ -2054,7 +2108,9 @@ class QuadOrchestrator:
             )
             return None, None
 
-        leverage = Decimal(str(self._config_dict.get("trading", {}).get("leverage", 50)))
+        leverage = Decimal(
+            str(self._config_dict.get("trading", {}).get("leverage", 50))
+        )
         sl_pct = Decimal(str(sl_cfg.get("capital_pct", 30.0)))
         tp_pct = Decimal(str(tp_cfg.get("capital_pct", 50.0)))
         is_long = side.strip().upper() in ("BUY", "LONG")
@@ -2063,10 +2119,18 @@ class QuadOrchestrator:
         tp_price: Decimal | None = None
         if sl_cfg.get("enabled", True):
             offset = sl_pct / Decimal(100) / leverage
-            sl_price = entry * (Decimal(1) - offset) if is_long else entry * (Decimal(1) + offset)
+            sl_price = (
+                entry * (Decimal(1) - offset)
+                if is_long
+                else entry * (Decimal(1) + offset)
+            )
         if tp_cfg.get("enabled", True):
             offset = tp_pct / Decimal(100) / leverage
-            tp_price = entry * (Decimal(1) + offset) if is_long else entry * (Decimal(1) - offset)
+            tp_price = (
+                entry * (Decimal(1) + offset)
+                if is_long
+                else entry * (Decimal(1) - offset)
+            )
         return sl_price, tp_price
 
     async def _log_ai_decision(
@@ -2330,9 +2394,7 @@ class QuadOrchestrator:
         except Exception as exc:
             self._log.warning("telegram_notify_failed", error=str(exc))
 
-    async def _notify_circuit_breaker(
-        self, name: str, reason: str, tier: int
-    ) -> None:
+    async def _notify_circuit_breaker(self, name: str, reason: str, tier: int) -> None:
         """Send circuit breaker alert via Telegram."""
         if not self._telegram_bot or not self._telegram_chat_id:
             return
@@ -2341,7 +2403,7 @@ class QuadOrchestrator:
             msg = (
                 f"\U0001f6a8 <b>Circuit Breaker Triggered</b>\n"
                 f"Name: <code>{esc(name)}</code>\n"
-                f"Tier: {esc(tier)}\n"
+                f"Tier: {esc(str(tier))}\n"
                 f"Reason: {esc(reason)}"
             )
             await self._telegram_bot.send_message(
@@ -2377,7 +2439,7 @@ class QuadOrchestrator:
             open_orders = []
             try:
                 open_orders = await self._exchange_adapter.get_open_orders()
-            except Exception:
+            except Exception:  # noqa: S110  Non-critical; continue with empty orders
                 pass
 
             return StrategyContext(
@@ -2390,7 +2452,9 @@ class QuadOrchestrator:
             self._log.exception("build_strategy_context_error", error=str(exc))
             return None
 
-    async def execute_strategy(self, strategy_name: str, dry_run: bool = False) -> dict[str, Any]:
+    async def execute_strategy(
+        self, strategy_name: str, dry_run: bool = False
+    ) -> dict[str, Any]:
         """Execute a single strategy by name and return the result.
 
         Parameters
@@ -2411,14 +2475,20 @@ class QuadOrchestrator:
             # 1. Get the strategy instance
             strategy_cls = StrategyBase.registry.get(strategy_name)
             if strategy_cls is None:
-                return {"strategy": strategy_name, "error": f"Unknown strategy: {strategy_name}"}
+                return {
+                    "strategy": strategy_name,
+                    "error": f"Unknown strategy: {strategy_name}",
+                }
 
             strategy = strategy_cls()
 
             # 2. Collect market context
             context = await self._build_strategy_context()
             if context is None:
-                return {"strategy": strategy_name, "error": "Failed to build market context"}
+                return {
+                    "strategy": strategy_name,
+                    "error": "Failed to build market context",
+                }
 
             # 3. Evaluate the strategy
             strategy_params = self._config_dict["strategy"].get(strategy_name)
@@ -2429,14 +2499,27 @@ class QuadOrchestrator:
                 return {"strategy": strategy_name, "actions_count": 0, "actions": []}
 
             # 4. Execute actions (or log if dry run)
-            executed = []
+            executed: list[dict[str, Any]] = []
             for action in actions:
                 if action.type == "HOLD":
                     continue
                 if not dry_run:
+                    if self._execution_engine is None:
+                        executed.append(
+                            {
+                                "action": action.type,
+                                "error": "execution engine unavailable",
+                            }
+                        )
+                        continue
                     try:
                         result = await self._execution_engine.execute(action, context)
-                        executed.append({"action": action.type, "result": str(getattr(result, "status", "submitted"))})
+                        executed.append(
+                            {
+                                "action": action.type,
+                                "result": str(getattr(result, "status", "submitted")),
+                            }
+                        )
                     except Exception as exec_err:
                         executed.append({"action": action.type, "error": str(exec_err)})
                 else:
@@ -2445,7 +2528,15 @@ class QuadOrchestrator:
             return {
                 "strategy": strategy_name,
                 "actions_count": len(actions),
-                "actions": [{"type": a.type, "contract": a.contract, "side": a.side, "reason": a.reason} for a in actions],
+                "actions": [
+                    {
+                        "type": a.type,
+                        "contract": a.contract,
+                        "side": a.side,
+                        "reason": a.reason,
+                    }
+                    for a in actions
+                ],
                 "executed": executed,
             }
 
@@ -2491,7 +2582,8 @@ class QuadOrchestrator:
                     if self._exchange_adapter
                     else None
                 ),
-                "dry_run_guard_active": dry_run and not (
+                "dry_run_guard_active": dry_run
+                and not (
                     bool(getattr(self._exchange_adapter, "is_testnet", False))
                     if self._exchange_adapter
                     else False
@@ -2507,8 +2599,7 @@ class QuadOrchestrator:
             "ai": {
                 "enabled": self._ai_enabled,
                 "client_available": (
-                    self._groq_client is not None
-                    and self._groq_client.is_available()
+                    self._groq_client is not None and self._groq_client.is_available()
                 ),
                 "model": getattr(self._groq_client, "model", None)
                 if self._groq_client

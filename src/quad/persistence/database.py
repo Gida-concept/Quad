@@ -7,6 +7,7 @@ manager support.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from typing import Any
 
 import aiosqlite
 import structlog
+from typing_extensions import Self
 
 from .models import (
     ALL_MODELS,
@@ -66,7 +68,7 @@ class _SQLiteConnection:
         cursor = await self._conn.execute(q, p or ())
         rows = await cursor.fetchall()
         await cursor.close()
-        return rows
+        return list(rows)
 
     async def fetchrow(self, query: str, *params: Any) -> Any | None:
         """Run a query and return the first result row, or None."""
@@ -127,6 +129,10 @@ class _SQLitePool:
         blocking that raw ``sqlite3.connect()`` would cause.
         """
         if self._conn is None:
+            if self._db_path != ":memory:":
+                db_dir = os.path.dirname(os.path.abspath(self._db_path))
+                if db_dir:
+                    os.makedirs(db_dir, exist_ok=True)
             self._conn = aiosqlite.connect(
                 self._db_path,
                 isolation_level=None,  # autocommit mode — explicit BEGIN/COMMIT
@@ -156,7 +162,7 @@ class _SQLitePool:
         raw = self._ensure()
         if not hasattr(self, "_inited"):
             await self._init_connection()
-            self._inited = True  # type: ignore[attr-defined]
+            self._inited = True
         yield _SQLiteConnection(raw)
 
     @property
@@ -317,14 +323,15 @@ class DatabaseManager:
 
             # Create tables
             for model_cls in ALL_MODELS:
-                ddl = model_cls.create_table_ddl()
+                model_any: Any = model_cls
+                ddl = model_any.create_table_ddl()
                 try:
                     await conn.execute(ddl)
-                    self._log.debug("table_created", table=model_cls.__tablename__)
+                    self._log.debug("table_created", table=model_any.__tablename__)
                 except Exception:
                     self._log.exception(
                         "table_create_failed",
-                        table=model_cls.__tablename__,
+                        table=model_any.__tablename__,
                     )
                     raise
 
@@ -356,9 +363,7 @@ class DatabaseManager:
 
         async with pool.acquire() as conn:
             # Read current schema version
-            row = await conn.fetchval(
-                "SELECT MAX(version) FROM _schema_version"
-            )
+            row = await conn.fetchval("SELECT MAX(version) FROM _schema_version")
             current_version = row if row is not None else 0
 
             if current_version >= SCHEMA_VERSION:
@@ -387,9 +392,7 @@ class DatabaseManager:
                                 rows = await conn.fetch(
                                     f"PRAGMA table_info({table_name})"
                                 )
-                                col_exists = any(
-                                    row[1] == col_name for row in rows
-                                )
+                                col_exists = any(row[1] == col_name for row in rows)
                                 if col_exists:
                                     self._log.debug(
                                         "column_already_exists_skipping",
@@ -515,7 +518,7 @@ class DatabaseManager:
     # Context manager
     # ------------------------------------------------------------------
 
-    async def __aenter__(self) -> DatabaseManager:
+    async def __aenter__(self) -> Self:
         await self.connect()
         await self.initialize()
         await self.migrate()

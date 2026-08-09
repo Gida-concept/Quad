@@ -139,7 +139,7 @@ class HistoricalDataProvider:
             return []
 
         try:
-            result = await self._exchange.get_funding_rate_history(  # type: ignore[union-attr]
+            result = await self._exchange.get_funding_rate_history(
                 symbol=symbol,
                 start_time=start_time,
                 end_time=end_time,
@@ -200,7 +200,7 @@ class HistoricalDataProvider:
             return []
 
         try:
-            result = await self._exchange.get_open_interest_history(  # type: ignore[union-attr]
+            result = await self._exchange.get_open_interest_history(
                 symbol=symbol,
                 period=period,
                 limit=limit,
@@ -263,7 +263,7 @@ class HistoricalDataProvider:
             return []
 
         try:
-            result = await self._exchange.get_top_trader_long_short_ratio(  # type: ignore[union-attr]
+            result = await self._exchange.get_top_trader_long_short_ratio(
                 symbol=symbol,
                 period=period,
                 limit=limit,

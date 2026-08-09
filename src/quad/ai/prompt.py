@@ -73,7 +73,7 @@ def _format_account_summary(account: Account | None) -> str:
             # `balance` is a Balance dataclass (has .total), not a raw number.
             # Use its .total (free + locked) value; degrade gracefully if the
             # slot was populated with a raw number or string instead.
-            raw = getattr(balance, "total", balance)
+            raw: Any = getattr(balance, "total", balance)
             try:
                 val = float(raw)
             except (TypeError, ValueError):
@@ -108,12 +108,21 @@ def _format_positions(positions: list[Position]) -> str:
     if not positions:
         return "No open positions."
 
-    lines = [f"{'Symbol':<12} {'Side':<8} {'Size':<10} {'Entry':<12} {'Mark':<12} {'Liq':<12} {'PnL%':<10} {'Funding':<10}"]
+    lines = [
+        f"{'Symbol':<12} {'Side':<8} {'Size':<10} {'Entry':<12} {'Mark':<12} {'Liq':<12} {'PnL%':<10} {'Funding':<10}"
+    ]
     lines.append("-" * 86)
     for p in positions:
         pnl_pct = (
-            (float(p.current_price) - float(p.entry_price)) / float(p.entry_price) * 100 * (1 if p.side == "LONG" else -1)
-        ) if p.entry_price and float(p.entry_price) > 0 else 0.0
+            (
+                (float(p.current_price) - float(p.entry_price))
+                / float(p.entry_price)
+                * 100
+                * (1 if p.side == "LONG" else -1)
+            )
+            if p.entry_price and float(p.entry_price) > 0
+            else 0.0
+        )
         lines.append(
             f"{p.symbol:<12} {p.side:<8} {float(p.quantity):<10.4f} "
             f"{float(p.entry_price):<12,.2f} {float(p.current_price):<12,.2f} "
@@ -127,14 +136,22 @@ def _format_funding_rates(rates: dict[str, FundingRate]) -> str:
     if not rates:
         return "No funding rate data available."
 
-    lines = [f"{'Symbol':<12} {'Rate':<12} {'Next Funding':<20} {'Mark Price':<14} {'Index Price':<14}"]
+    lines = [
+        f"{'Symbol':<12} {'Rate':<12} {'Next Funding':<20} {'Mark Price':<14} {'Index Price':<14}"
+    ]
     lines.append("-" * 72)
     for symbol, fr in sorted(rates.items()):
         rate_pct = float(fr.funding_rate) * 100
-        next_funding = time.strftime(
-            "%m-%d %H:%M",
-            time.gmtime(fr.next_funding_time / 1000) if fr.next_funding_time else time.gmtime(0),
-        ) if fr.next_funding_time else "N/A"
+        next_funding = (
+            time.strftime(
+                "%m-%d %H:%M",
+                time.gmtime(fr.next_funding_time / 1000)
+                if fr.next_funding_time
+                else time.gmtime(0),
+            )
+            if fr.next_funding_time
+            else "N/A"
+        )
         lines.append(
             f"{symbol:<12} {rate_pct:<+11.6f}% {next_funding:<20} "
             f"{float(fr.mark_price):<14,.2f} {float(fr.index_price):<14,.2f}"
@@ -230,18 +247,16 @@ def _format_indicators_summary(indicators: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_compact_candles(
-    candles: list, max_candles: int = 20
-) -> str:
+def _format_compact_candles(candles: list, max_candles: int = 20) -> str:
     """Format the most recent N candles as a compact table for the prompt."""
     if not candles:
         return "No candle data available."
 
     recent = candles[-max_candles:]
-    lines: list[str] = [
-        f"Last {len(recent)} candles (oldest first):"
-    ]
-    lines.append(f"{'Time':<20} {'Open':<12} {'High':<12} {'Low':<12} {'Close':<12} {'Vol':<10}")
+    lines: list[str] = [f"Last {len(recent)} candles (oldest first):"]
+    lines.append(
+        f"{'Time':<20} {'Open':<12} {'High':<12} {'Low':<12} {'Close':<12} {'Vol':<10}"
+    )
     lines.append("-" * 78)
 
     for c in recent:
@@ -283,7 +298,7 @@ def build_trading_prompt(
     -------
     dict with keys ``"system"`` and ``"user"``.
     """
-    ai_cfg = AiConfig.model_validate(config.get("ai", {}))
+    ai_cfg = AiConfig.model_validate((config or {}).get("ai", {}) or {})
     prompt_cfg = ai_cfg.model_dump()["prompt"]
 
     # Build system prompt from template with config values
@@ -330,7 +345,9 @@ def build_trading_prompt(
             candle_key = key
             pair_candles = context.candles.get(candle_key, [])
             if pair_candles:
-                sections.append(_format_compact_candles(pair_candles, max_candles=max_candles))
+                sections.append(
+                    _format_compact_candles(pair_candles, max_candles=max_candles)
+                )
             sections.append("")
 
     # Market data (funding rates, order books)
@@ -346,8 +363,8 @@ def build_trading_prompt(
 
     # Risk context
     sections.append("## Risk Parameters")
-    risk_cfg = config.get("risk", {})
-    trading_cfg = config.get("trading", {})
+    risk_cfg = (config or {}).get("risk", {}) or {}
+    trading_cfg = (config or {}).get("trading", {}) or {}
     sections.append(f"Max Position Size: {risk_cfg.get('max_position_size')} units")
     sections.append(f"Max Portfolio Risk: {risk_cfg.get('max_portfolio_risk_pct')}%")
     sections.append(f"Max Daily Loss: ${risk_cfg.get('max_daily_loss_usd'):,.2f}")
@@ -358,13 +375,15 @@ def build_trading_prompt(
         f"Min Distance to Liquidation: {min_dist * 100:.0f}% cap "
         f"(warn within {liq_fraction:.0%} of the 1/leverage distance)"
     )
-    max_funding = trading_cfg.get('max_funding_rate_cost', 0.01)
+    max_funding = trading_cfg.get("max_funding_rate_cost", 0.01)
     sections.append(f"Max Funding Rate Cost: {max_funding * 100:.2f}%")
     sections.append(f"Max Drawdown: {risk_cfg.get('max_drawdown_pct')}%")
     sections.append("")
 
     sections.append("## Decision Required")
-    sections.append("State direction (LONG/SHORT/NEUTRAL) and exactly one action: ENTER to open, EXIT to close, or HOLD. Do not include a side. Respond with valid JSON only following the specified format.")
+    sections.append(
+        "State direction (LONG/SHORT/NEUTRAL) and exactly one action: ENTER to open, EXIT to close, or HOLD. Do not include a side. Respond with valid JSON only following the specified format."
+    )
 
     user_prompt = "\n".join(sections)
 
@@ -439,18 +458,13 @@ def build_optimization_prompt(
     dict
         With keys ``system`` and ``user``.
     """
-    system = (
-        current_config.ai.system_prompt_override
-        or OPTIMIZATION_SYSTEM_PROMPT
-    )
+    system = current_config.ai.system_prompt_override or OPTIMIZATION_SYSTEM_PROMPT
 
     # Build compact summaries
     total_decisions = len(decisions)
     executed_decisions = sum(1 for d in decisions if getattr(d, "executed", 0))
     total_trades = len(trades)
-    total_pnl = sum(
-        float(getattr(t, "pnl", "0") or "0") for t in trades
-    )
+    total_pnl = sum(float(getattr(t, "pnl", "0") or "0") for t in trades)
     wins = sum(1 for t in trades if float(getattr(t, "pnl", "0") or "0") > 0)
     losses = sum(1 for t in trades if float(getattr(t, "pnl", "0") or "0") < 0)
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
@@ -459,12 +473,14 @@ def build_optimization_prompt(
     if performance:
         start_val = float(performance[0].portfolio_value)
         end_val = float(performance[-1].portfolio_value)
-        perf_change_pct = ((end_val - start_val) / start_val * 100) if start_val else 0.0
+        perf_change_pct = (
+            ((end_val - start_val) / start_val * 100) if start_val else 0.0
+        )
     else:
         perf_change_pct = 0.0
 
     # Strategy breakdown
-    strategy_decisions = {}
+    strategy_decisions: dict[str, int] = {}
     for d in decisions:
         s = getattr(d, "strategy", "unknown")
         strategy_decisions.setdefault(s, 0)

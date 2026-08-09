@@ -1,11 +1,9 @@
 # =============================================================================
-# Docker Compose — Quad Options Trading Bot
+# Docker Compose — Quad USD-M Futures Trading Bot
 #
 # Single-service deployment with volume mounts for config, data, and logs.
 # Environment variables are read from the host shell (or .env file).
 # =============================================================================
-
-version: "3.8"
 
 services:
   quad:
