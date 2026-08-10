@@ -1078,6 +1078,39 @@ class AiRotationConfig(BaseModel):
         ge=0.0,
         description="Sleep between HOLD scans of successive pairs (seconds)",
     )
+    close_positions_on_start: bool = Field(
+        default=True,
+        description=(
+            "Close any open position left from a previous run when the bot "
+            "starts, so rotation begins flat and can open a fresh trade"
+        ),
+    )
+    max_hold_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Force-close a position held longer than this many seconds "
+            "(0 disables the stale-position guard)"
+        ),
+    )
+    price_bracket_check: bool = Field(
+        default=True,
+        description=(
+            "Compare live mark price to the open TP/SL bracket trigger "
+            "prices each cycle and force-close the position when the price "
+            "is clearly beyond a trigger but the bracket has not fired"
+        ),
+    )
+    price_bracket_tolerance_pct: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=20.0,
+        description=(
+            "Tolerance (percent) a mark price must be beyond a bracket "
+            "trigger before the bot force-closes; guards against noise and "
+            "stale data"
+        ),
+    )
 
 
 # ============================================================================

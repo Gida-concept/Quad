@@ -66,6 +66,15 @@ ai:
   rotation:
     enabled: true
     retry_sleep_seconds: 30
+    # Close any position left from a previous run on startup so a fresh
+    # trade is opened next cycle instead of holding a stale one for hours.
+    close_positions_on_start: true
+    # Force-close a position held longer than this (seconds); 0 disables.
+    max_hold_seconds: 21600
+    # Compare live mark price to the TP/SL bracket triggers each cycle and
+    # force-close when price is clearly beyond a trigger (bracket missed).
+    price_bracket_check: true
+    price_bracket_tolerance_pct: 0.5
   groq:
     token_budget:
       enabled: true
