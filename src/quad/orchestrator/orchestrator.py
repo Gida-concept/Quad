@@ -1450,7 +1450,9 @@ class QuadOrchestrator:
             p for p in positions if getattr(p, "status", None) == PositionStatus.OPEN
         ]
 
-        # CASE A — a position is open: manage it, never open a second.
+        # CASE A — a position is open: close it and open a fresh trade
+        # (1 trade per cycle) unless close_open_position_each_cycle is off,
+        # in which case the previous hold-until-TP/SL behavior applies.
         if open_positions:
             held = open_positions[0]
             held_symbol = getattr(held, "symbol", "") or getattr(
@@ -1459,96 +1461,160 @@ class QuadOrchestrator:
             self._current_symbol = held_symbol
             self._log.info("rotation_managing_open_position", symbol=held_symbol)
 
-            # Stale-position guard: force-close a position held longer than
-            # ai.rotation.max_hold_seconds so a trade can't hang for hours
-            # waiting for a TP/SL bracket that never triggers.
-            max_hold_s = float(
-                self._config_dict.get("ai", {})
-                .get("rotation", {})
-                .get("max_hold_seconds", 0.0)
+            rotation_cfg = self._config_dict.get("ai", {}).get("rotation", {}) or {}
+            close_each_cycle = bool(
+                rotation_cfg.get("close_open_position_each_cycle", True)
             )
-            if max_hold_s > 0:
-                held_since = self._rotation_hold_since.get(held_symbol)
-                now = time.monotonic()
-                if held_since is None:
-                    self._rotation_hold_since[held_symbol] = now
-                elif now - held_since >= max_hold_s:
-                    self._log.info(
-                        "rotation_max_hold_reached",
-                        symbol=held_symbol,
-                        max_hold_seconds=max_hold_s,
-                    )
-                    closed = await self._close_all_positions()
-                    self._rotation_hold_since.pop(held_symbol, None)
-                    if closed:
-                        self._log.info(
-                            "rotation_max_hold_closed",
-                            symbol=held_symbol,
-                        )
-                        return True  # flat now; next cycle opens a fresh trade
-                    self._log.warning(
-                        "rotation_max_hold_close_failed",
-                        symbol=held_symbol,
-                    )
 
-            # Price-bracket guard: if the mark price is clearly beyond a
-            # TP/SL trigger but the bracket order has not fired, the position
-            # would hang indefinitely - force-close it now.
-            try:
-                violated, which = await self._price_bracket_violation(
-                    held_symbol,
-                    getattr(held, "side", None),
-                    open_orders,
-                )
-            except Exception as exc:
-                self._log.warning(
-                    "price_bracket_check_failed",
-                    symbol=held_symbol,
-                    error=str(exc),
-                )
-                violated, which = False, ""
-            if violated:
+            if close_each_cycle:
+                # Roll the position every hour: close the current trade (the
+                # EXIT is broadcast to Telegram by _notify_trade below) and
+                # fall through to CASE B to scan for a fresh entry.  Never
+                # open a second position in the same cycle: CASE B opens at
+                # most one ENTER.
                 self._log.info(
-                    "rotation_price_beyond_bracket",
+                    "rotation_cycle_rolling_position",
                     symbol=held_symbol,
-                    bracket=which,
+                )
+                await self._notify_trade(
+                    action_type="EXIT",
+                    strategy="rotation_roll",
+                    contract=held_symbol,
+                    side=str(getattr(held, "side", "?")),
+                    quantity=str(getattr(held, "quantity", "")),
+                    price=None,
+                    reason="Rotation cycle: closing previous trade before opening a new one",
                 )
                 closed = await self._close_all_positions()
                 self._rotation_hold_since.pop(held_symbol, None)
                 if closed:
                     self._log.info(
-                        "rotation_price_bracket_closed",
+                        "rotation_cycle_closed",
+                        symbol=held_symbol,
+                    )
+                    # Advance the rotation index to the pair AFTER the closed
+                    # position (ADR-080: "advance to the next pair when the
+                    # position closes").  Deterministic regardless of the
+                    # prior index state: closing BTC -> next scan is ETH,
+                    # not BTC again and not a skipped pair.
+                    try:
+                        held_idx = pairs.index(held_symbol)
+                    except ValueError:
+                        held_idx = self._rotation_index
+                    self._rotation_index = (held_idx + 1) % len(pairs)
+                    # Refresh the in-memory position list (shared with the
+                    # caller) so cycle_status / metrics show the post-close
+                    # state instead of the stale pre-close position.
+                    try:
+                        fresh_positions = await self._exchange_adapter.get_positions()
+                        if isinstance(fresh_positions, list) and fresh_positions:
+                            positions[:] = [
+                                p
+                                for p in fresh_positions
+                                if getattr(p, "status", None) != PositionStatus.OPEN
+                            ]
+                        elif isinstance(fresh_positions, list):
+                            positions[:] = fresh_positions
+                    except Exception as exc:
+                        self._log.warning(
+                            "rotation_positions_refresh_failed",
+                            symbol=held_symbol,
+                            error=str(exc),
+                        )
+                else:
+                    self._log.warning(
+                        "rotation_cycle_close_failed",
+                        symbol=held_symbol,
+                    )
+                    return True  # do not open a second trade when close failed
+            else:
+                # Legacy behavior: hold until TP/SL bracket triggers.
+                # Stale-position guard: force-close a position held longer than
+                # ai.rotation.max_hold_seconds so a trade can't hang for hours
+                # waiting for a TP/SL bracket that never triggers.
+                max_hold_s = float(rotation_cfg.get("max_hold_seconds", 0.0))
+                if max_hold_s > 0:
+                    held_since = self._rotation_hold_since.get(held_symbol)
+                    now = time.monotonic()
+                    if held_since is None:
+                        self._rotation_hold_since[held_symbol] = now
+                    elif now - held_since >= max_hold_s:
+                        self._log.info(
+                            "rotation_max_hold_reached",
+                            symbol=held_symbol,
+                            max_hold_seconds=max_hold_s,
+                        )
+                        closed = await self._close_all_positions()
+                        self._rotation_hold_since.pop(held_symbol, None)
+                        if closed:
+                            self._log.info(
+                                "rotation_max_hold_closed",
+                                symbol=held_symbol,
+                            )
+                            return True  # flat now; next cycle opens a fresh trade
+                        self._log.warning(
+                            "rotation_max_hold_close_failed",
+                            symbol=held_symbol,
+                        )
+
+                # Price-bracket guard: if the mark price is clearly beyond a
+                # TP/SL trigger but the bracket order has not fired, the position
+                # would hang indefinitely - force-close it now.
+                try:
+                    violated, which = await self._price_bracket_violation(
+                        held_symbol,
+                        getattr(held, "side", None),
+                        open_orders,
+                    )
+                except Exception as exc:
+                    self._log.warning(
+                        "price_bracket_check_failed",
+                        symbol=held_symbol,
+                        error=str(exc),
+                    )
+                    violated, which = False, ""
+                if violated:
+                    self._log.info(
+                        "rotation_price_beyond_bracket",
                         symbol=held_symbol,
                         bracket=which,
                     )
-                    return True  # flat now; next cycle opens a fresh trade
-                self._log.warning(
-                    "rotation_price_bracket_close_failed",
-                    symbol=held_symbol,
-                    bracket=which,
-                )
+                    closed = await self._close_all_positions()
+                    self._rotation_hold_since.pop(held_symbol, None)
+                    if closed:
+                        self._log.info(
+                            "rotation_price_bracket_closed",
+                            symbol=held_symbol,
+                            bracket=which,
+                        )
+                        return True  # flat now; next cycle opens a fresh trade
+                    self._log.warning(
+                        "rotation_price_bracket_close_failed",
+                        symbol=held_symbol,
+                        bracket=which,
+                    )
 
-            try:
-                decision = await self._scan_pair(
-                    held_symbol
-                )  # raises on Groq/API error
-            except Exception as exc:  # CancelledError NOT caught (BaseException)
-                self._log.warning("ai_scan_error", symbol=held_symbol, error=str(exc))
-                return False
-            hold_action = decision.get("action", "HOLD")
-            if hold_action in ("ENTER", "EXIT"):
-                # Hold-until-TP/SL: while a position is open, never open a new
-                # trade and never close early.  The position is closed ONLY by
-                # the STOP_LOSS / TAKE_PROFIT bracket orders attached at entry.
-                self._log.info(
-                    "rotation_hold_until_tp_sl",
-                    action=hold_action,
-                    symbol=held_symbol,
-                    reason="position open; close only via TP/SL bracket",
-                )
-            elif hold_action in ("adjust_stop", "reduce_position"):
-                await self._execute_ai_action(decision, context)
-            return True  # HOLD / no-op -> keep holding; wait for next hour
+                try:
+                    decision = await self._scan_pair(
+                        held_symbol
+                    )  # raises on Groq/API error
+                except Exception as exc:  # CancelledError NOT caught (BaseException)
+                    self._log.warning("ai_scan_error", symbol=held_symbol, error=str(exc))
+                    return False
+                hold_action = decision.get("action", "HOLD")
+                if hold_action in ("ENTER", "EXIT"):
+                    # Hold-until-TP/SL: while a position is open, never open a new
+                    # trade and never close early.  The position is closed ONLY by
+                    # the STOP_LOSS / TAKE_PROFIT bracket orders attached at entry.
+                    self._log.info(
+                        "rotation_hold_until_tp_sl",
+                        action=hold_action,
+                        symbol=held_symbol,
+                        reason="position open; close only via TP/SL bracket",
+                    )
+                elif hold_action in ("adjust_stop", "reduce_position"):
+                    await self._execute_ai_action(decision, context)
+                return True  # HOLD / no-op -> keep holding; wait for next hour
 
         # CASE B — flat: scan each pair once, starting at the rotation index.
         self._rotation_hold_since.clear()  # flat: nothing held to track
@@ -2565,7 +2631,9 @@ class QuadOrchestrator:
         pnl: str | None = None,
     ) -> None:
         """Send trade notification via Telegram."""
-        if not self._telegram_bot or not self._telegram_chat_id:
+        if not getattr(self, "_telegram_bot", None) or not getattr(
+            self, "_telegram_chat_id", 0
+        ):
             return
         try:
             emoji = {
@@ -2594,7 +2662,9 @@ class QuadOrchestrator:
 
     async def _notify_circuit_breaker(self, name: str, reason: str, tier: int) -> None:
         """Send circuit breaker alert via Telegram."""
-        if not self._telegram_bot or not self._telegram_chat_id:
+        if not getattr(self, "_telegram_bot", None) or not getattr(
+            self, "_telegram_chat_id", 0
+        ):
             return
         try:
             esc = _html.escape

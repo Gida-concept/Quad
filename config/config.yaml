@@ -69,6 +69,11 @@ ai:
     # Close any position left from a previous run on startup so a fresh
     # trade is opened next cycle instead of holding a stale one for hours.
     close_positions_on_start: true
+    # Roll every hour: close the current position at the start of each
+    # rotation cycle and open a fresh trade (1 trade per cycle) instead of
+    # holding until the TP/SL bracket triggers. Set false to restore the
+    # hold-until-TP/SL behavior.
+    close_open_position_each_cycle: true
     # Force-close a position held longer than this (seconds); 0 disables.
     max_hold_seconds: 21600
     # Compare live mark price to the TP/SL bracket triggers each cycle and

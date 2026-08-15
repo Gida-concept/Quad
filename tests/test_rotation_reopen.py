@@ -24,6 +24,7 @@ def _make_orchestrator(**overrides) -> QuadOrchestrator:
             "rotation": {
                 "enabled": True,
                 "close_positions_on_start": True,
+                "close_open_position_each_cycle": False,
                 "max_hold_seconds": 0.0,
                 "price_bracket_check": True,
                 "price_bracket_tolerance_pct": 0.5,
@@ -35,6 +36,8 @@ def _make_orchestrator(**overrides) -> QuadOrchestrator:
     orch._log = MagicMock()
     orch._rotation_hold_since = {}
     orch._rotation_index = 0
+    orch._telegram_bot = None
+    orch._telegram_chat_id = 0
     return orch
 
 
@@ -249,6 +252,8 @@ def _ready_orch(orch):
     orch._scan_pair = AsyncMock(
         return_value={"action": "HOLD", "confidence": 0.5, "indicators": {}}
     )
+    orch._telegram_bot = None
+    orch._telegram_chat_id = 0
     return orch
 
 
@@ -391,3 +396,175 @@ async def test_max_hold_disabled_by_zero():
 
     assert result is True
     orch._close_all_positions.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 5. Roll every cycle: close old position + open fresh trade (1/cycle)
+# ---------------------------------------------------------------------------
+
+
+def test_rotation_config_close_each_cycle_default():
+    cfg = AiRotationConfig()
+    assert cfg.close_open_position_each_cycle is True
+
+
+def test_rotation_config_close_each_cycle_parse():
+    cfg = AiRotationConfig(close_open_position_each_cycle=False)
+    assert cfg.close_open_position_each_cycle is False
+
+
+def _roll_orch(**overrides):
+    """Orchestrator with close_open_position_each_cycle enabled (new default)."""
+    orch = _make_orchestrator(close_open_position_each_cycle=True, **overrides)
+    return orch
+
+
+@pytest.mark.asyncio
+async def test_roll_cycle_closes_open_position_and_scans_next_pair():
+    orch = _roll_orch()
+    groq = MagicMock()
+    groq.is_available = MagicMock(return_value=True)
+    orch._groq_client = groq
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._close_all_positions = AsyncMock(return_value=True)
+    orch._scan_pair = AsyncMock(
+        return_value={"action": "HOLD", "confidence": 0.5, "indicators": {}}
+    )
+
+    from quad.types.strategy import StrategyContext
+
+    result = await orch._run_ai_rotation(
+        account=None,
+        positions=[_open_position("BTCUSDT")],
+        open_orders=[],
+        context=StrategyContext(config=orch._config_dict),
+    )
+
+    assert result is True
+    # Old position closed, then flat scan ran.
+    orch._close_all_positions.assert_awaited_once()
+    orch._scan_pair.assert_awaited()
+    # Rotation advanced past the held pair (BTCUSDT -> ETHUSDT at index 1).
+    assert orch._rotation_index == 1
+    assert any(
+        "rotation_cycle_rolling_position" in str(call.args[0])
+        for call in orch._log.info.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_roll_cycle_notifies_exit_then_scan():
+    orch = _roll_orch()
+    groq = MagicMock()
+    groq.is_available = MagicMock(return_value=True)
+    orch._groq_client = groq
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._close_all_positions = AsyncMock(return_value=True)
+    orch._notify_trade = AsyncMock()
+    orch._scan_pair = AsyncMock(
+        return_value={"action": "HOLD", "confidence": 0.5, "indicators": {}}
+    )
+
+    from quad.types.strategy import StrategyContext
+
+    result = await orch._run_ai_rotation(
+        account=None,
+        positions=[_open_position("BTCUSDT")],
+        open_orders=[],
+        context=StrategyContext(config=orch._config_dict),
+    )
+
+    assert result is True
+    orch._notify_trade.assert_awaited_once()
+    call = orch._notify_trade.await_args
+    assert call.kwargs["action_type"] == "EXIT"
+    assert call.kwargs["contract"] == "BTCUSDT"
+    assert "Rotation cycle" in call.kwargs["reason"]
+
+
+@pytest.mark.asyncio
+async def test_roll_cycle_close_failure_does_not_scan():
+    orch = _roll_orch()
+    groq = MagicMock()
+    groq.is_available = MagicMock(return_value=True)
+    orch._groq_client = groq
+    orch._exchange_adapter = AsyncMock()
+    orch._close_all_positions = AsyncMock(return_value=False)
+    orch._scan_pair = AsyncMock(
+        return_value={"action": "ENTER", "confidence": 0.9, "indicators": {}}
+    )
+
+    from quad.types.strategy import StrategyContext
+
+    result = await orch._run_ai_rotation(
+        account=None,
+        positions=[_open_position("BTCUSDT")],
+        open_orders=[],
+        context=StrategyContext(config=orch._config_dict),
+    )
+
+    assert result is True
+    orch._close_all_positions.assert_awaited_once()
+    # A failed close must NOT open a second trade this cycle.
+    orch._scan_pair.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_roll_cycle_refreshes_positions_for_status():
+    orch = _roll_orch()
+    groq = MagicMock()
+    groq.is_available = MagicMock(return_value=True)
+    orch._groq_client = groq
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._close_all_positions = AsyncMock(return_value=True)
+    orch._scan_pair = AsyncMock(
+        return_value={"action": "HOLD", "confidence": 0.5, "indicators": {}}
+    )
+
+    from quad.types.strategy import StrategyContext
+
+    positions = [_open_position("BTCUSDT")]
+    result = await orch._run_ai_rotation(
+        account=None,
+        positions=positions,
+        open_orders=[],
+        context=StrategyContext(config=orch._config_dict),
+    )
+
+    assert result is True
+    # The caller's list is refreshed in place so cycle_status is accurate.
+    assert positions == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_hold_mode_keeps_position_when_flag_off():
+    orch = _make_orchestrator(close_open_position_each_cycle=False)
+    groq = MagicMock()
+    groq.is_available = MagicMock(return_value=True)
+    orch._groq_client = groq
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_mark_price = AsyncMock(return_value=Decimal("65000"))
+    orch._close_all_positions = AsyncMock(return_value=True)
+    orch._scan_pair = AsyncMock(
+        return_value={"action": "HOLD", "confidence": 0.5, "indicators": {}}
+    )
+
+    from quad.types.strategy import StrategyContext
+
+    pos = _open_position()
+    orders = [_bracket_order("STOP_MARKET", "60000"), _bracket_order("TAKE_PROFIT_MARKET", "70000")]
+
+    result = await orch._run_ai_rotation(
+        account=None,
+        positions=[pos],
+        open_orders=orders,
+        context=StrategyContext(config=orch._config_dict),
+    )
+
+    assert result is True
+    # Legacy mode: no roll close when the flag is off and price is inside bracket.
+    orch._close_all_positions.assert_not_awaited()
+    orch._scan_pair.assert_awaited_once()

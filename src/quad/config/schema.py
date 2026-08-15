@@ -1085,6 +1085,14 @@ class AiRotationConfig(BaseModel):
             "starts, so rotation begins flat and can open a fresh trade"
         ),
     )
+    close_open_position_each_cycle: bool = Field(
+        default=True,
+        description=(
+            "Close the current position at the start of every rotation cycle "
+            "and open a fresh trade (one trade per cycle) instead of holding "
+            "the position until its TP/SL bracket triggers"
+        ),
+    )
     max_hold_seconds: float = Field(
         default=0.0,
         ge=0.0,
