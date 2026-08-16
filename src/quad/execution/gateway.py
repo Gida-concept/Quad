@@ -262,7 +262,7 @@ class OrderGateway:
             symbol=order.symbol,
         )
         try:
-            cancelled = await self._exchange.cancel_order(order.id)
+            cancelled = await self._exchange.cancel_order(order.id, order.symbol)
             if cancelled:
                 order.status = "CANCELLED"
                 self._move_to_completed(client_order_id)
@@ -299,7 +299,9 @@ class OrderGateway:
             # Freshen from exchange if we have an exchange order ID
             if order.id is not None:
                 try:
-                    ex_order = await self._exchange.get_order_status(order.id)
+                    ex_order = await self._exchange.get_order_status(
+                        order.id, order.symbol
+                    )
                     order.status = ex_order.status
                     order.filled_qty = ex_order.filled_qty
                     order.updated_at = int(time.time() * 1000)
@@ -358,7 +360,9 @@ class OrderGateway:
             elif local_order.status in ("NEW", "PARTIALLY_FILLED"):
                 # No longer in open orders -- query individually
                 try:
-                    ex_order = await self._exchange.get_order_status(local_order.id)
+                    ex_order = await self._exchange.get_order_status(
+                        local_order.id, local_order.symbol
+                    )
                     local_order.status = ex_order.status
                     local_order.filled_qty = ex_order.filled_qty
                     local_order.updated_at = int(time.time() * 1000)

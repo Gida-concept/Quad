@@ -1186,7 +1186,15 @@ class QuadOrchestrator:
                                 if self._config_dict.get("trading", {}).get(
                                     "serial_trade_mode", True
                                 ):
-                                    await self._close_all_positions()
+                                    closed = await self._close_all_positions()
+                                    if closed:
+                                        self._log.debug(
+                                            "legacy_cycle_flattened",
+                                        )
+                                    else:
+                                        self._log.warning(
+                                            "legacy_cycle_flatten_incomplete",
+                                        )
                                 ai_decision = await self._run_ai_trading_cycle(
                                     underlyings, account, positions
                                 )
@@ -1476,15 +1484,6 @@ class QuadOrchestrator:
                     "rotation_cycle_rolling_position",
                     symbol=held_symbol,
                 )
-                await self._notify_trade(
-                    action_type="EXIT",
-                    strategy="rotation_roll",
-                    contract=held_symbol,
-                    side=str(getattr(held, "side", "?")),
-                    quantity=str(getattr(held, "quantity", "")),
-                    price=None,
-                    reason="Rotation cycle: closing previous trade before opening a new one",
-                )
                 closed = await self._close_all_positions()
                 self._rotation_hold_since.pop(held_symbol, None)
                 if closed:
@@ -1492,6 +1491,43 @@ class QuadOrchestrator:
                         "rotation_cycle_closed",
                         symbol=held_symbol,
                     )
+                    # Only announce the EXIT after the close is confirmed
+                    # flat -- a trade that is still open on Binance must not
+                    # be broadcast as closed.
+                    try:
+                        from decimal import Decimal as _D
+
+                        closed_pnl = self._compute_position_pnl(
+                            entry_price=_D(str(getattr(held, "entry_price", 0) or 0)),
+                            exit_price=_D(
+                                str(getattr(held, "current_price", 0) or 0)
+                            ),
+                            quantity=_D(str(getattr(held, "quantity", 0) or 0)),
+                            side=str(getattr(held, "side", "")),
+                        )
+                        pnl_text = self._format_pnl(
+                            closed_pnl,
+                            _D(str(getattr(held, "entry_price", 0) or 0)),
+                        )
+                        await self._notify_trade(
+                            action_type="EXIT",
+                            strategy="rotation_roll",
+                            contract=held_symbol,
+                            side=self._side_label(getattr(held, "side", "")),
+                            quantity=str(getattr(held, "quantity", "")),
+                            price=None,
+                            reason=(
+                                "Rotation cycle: closing previous trade "
+                                "before opening a new one"
+                            ),
+                            pnl=pnl_text,
+                        )
+                    except Exception as exc:
+                        self._log.warning(
+                            "rotation_exit_notify_failed",
+                            symbol=held_symbol,
+                            error=str(exc),
+                        )
                     # Advance the rotation index to the pair AFTER the closed
                     # position (ADR-080: "advance to the next pair when the
                     # position closes").  Deterministic regardless of the
@@ -2035,7 +2071,9 @@ class QuadOrchestrator:
             open_orders = await self._exchange_adapter.get_open_orders()
             for order in open_orders:
                 try:
-                    await self._exchange_adapter.cancel_order(order.id)
+                    await self._exchange_adapter.cancel_order(
+                        order.id, getattr(order, "symbol", "")
+                    )
                     log.info(
                         "close_all_positions_order_cancelled",
                         order_id=order.id,
@@ -2088,46 +2126,110 @@ class QuadOrchestrator:
                 order_type="MARKET",
                 price=None,
                 reason="Serial trade mode: closing position before new ENTER",
-                metadata={"serial_close": True},
+                metadata={
+                    "serial_close": True,
+                    # Entry price at close time so the engine can persist the
+                    # realized PnL for this trade.
+                    "entry_price": str(getattr(position, "entry_price", 0) or 0),
+                    # Position side (LONG/SHORT), NOT the closing trade side:
+                    # the PnL formula must know the held direction.
+                    "position_side": str(
+                        getattr(position, "side", "") or ""
+                    ),
+                },
             )
 
             # 4. Execute through execution engine
+            # Track the position alongside the task so per-position outcomes
+            # (and realized PnL, when derivable) can be reported accurately.
             task = asyncio.create_task(
                 self._execution_engine.execute(
                     action, StrategyContext(config=self._config_dict)
                 )
             )
-            close_tasks.append(task)
+            close_tasks.append((position, action, task))
 
         # 5. Wait for all close orders to complete
-        results = await asyncio.gather(*close_tasks, return_exceptions=True)
+        results: list[tuple[Any, Action, OrderResult | Exception | None]] = []
+        for position, action, task in close_tasks:
+            outcome = await task
+            results.append((position, action, outcome))
 
         success_count = 0
         fail_count = 0
-        for idx, result in enumerate(results):
+        closed_details: list[dict[str, Any]] = []
+        for position, action, result in results:
+            symbol = getattr(position, "symbol", "") or getattr(
+                position, "contract_symbol", ""
+            )
             if isinstance(result, Exception):
                 fail_count += 1
                 log.exception(
                     "close_all_positions_execution_error",
-                    position_index=idx,
+                    symbol=symbol,
                     error=str(result),
                 )
-            else:
-                success_count += 1
-                log.info(
-                    "close_all_positions_closed",
-                    position_index=idx,
+                continue
+            if result is None or result.status not in (
+                "FILLED",
+                "NEW",
+                "PARTIALLY_FILLED",
+            ):
+                fail_count += 1
+                log.warning(
+                    "close_all_positions_not_confirmed",
+                    symbol=symbol,
                     status=getattr(result, "status", "unknown"),
                 )
+                continue
+            success_count += 1
+            closed_details.append(
+                {
+                    "symbol": symbol,
+                    "side": str(getattr(position, "side", "")),
+                    "quantity": str(getattr(position, "quantity", "")),
+                    "status": getattr(result, "status", "unknown"),
+                }
+            )
+            log.info(
+                "close_all_positions_closed",
+                symbol=symbol,
+                status=getattr(result, "status", "unknown"),
+            )
+
+        # 6. Verify flat on the exchange: a "successful" submit is not proof
+        #    the position is gone (e.g. -1102 queries left it unseen, or the
+        #    close was accepted but a bracket re-opened it).  Only report
+        #    success once no OPEN position remains.
+        flat = False
+        try:
+            remaining = await self._exchange_adapter.get_positions()
+            from quad.types.domain import PositionStatus as _PS
+
+            still_open = [
+                p for p in remaining if getattr(p, "status", None) == _PS.OPEN
+            ]
+            flat = len(still_open) == 0
+            if still_open:
+                log.warning(
+                    "close_all_positions_remaining",
+                    symbols=[
+                        getattr(p, "symbol", "") or getattr(p, "contract_symbol", "")
+                        for p in still_open
+                    ],
+                )
+        except Exception as exc:
+            log.warning("close_all_positions_verify_failed", error=str(exc))
 
         log.info(
             "close_all_positions_complete",
             total=len(open_positions),
             closed=success_count,
             failed=fail_count,
+            flat_verified=flat,
         )
 
-        return fail_count == 0
+        return flat and fail_count == 0
 
     async def _execute_ai_action(
         self,
@@ -2216,7 +2318,47 @@ class QuadOrchestrator:
             )
             return False
 
-        # (Positions were already force-closed at cycle start via _main_cycle)
+        # One-trade-per-cycle: before ANY new ENTER, every existing position
+        # must be closed and the account confirmed flat.  This is the hard
+        # invariant for the user's "one trade in, one trade out" rule -- it
+        # must not rely on the cycle-start force-close alone, because a close
+        # can fail (or a stale local position list can hide a live position).
+        if action_type == "ENTER":
+            if self._config_dict.get("trading", {}).get("serial_trade_mode", True):
+                closed = await self._close_all_positions()
+                if not closed:
+                    self._log.warning(
+                        "ai_enter_blocked_positions_not_flat",
+                        contract=contract_symbol,
+                    )
+                    return False
+            else:
+                # Even with serial mode disabled, never stack a second
+                # position: if a position is open and we cannot confirm it is
+                # closed, refuse the ENTER.
+                try:
+                    live = await self._exchange_adapter.get_positions()
+                    from quad.types.domain import PositionStatus as _PS
+
+                    open_now = [
+                        p
+                        for p in live
+                        if getattr(p, "status", None) == _PS.OPEN
+                    ]
+                except Exception:
+                    open_now = []
+                if open_now:
+                    self._log.warning(
+                        "ai_enter_blocked_positions_open",
+                        contract=contract_symbol,
+                        open_symbols=[
+                            getattr(p, "symbol", "")
+                            or getattr(p, "contract_symbol", "")
+                            for p in open_now
+                        ],
+                    )
+                    return False
+
         self._log.debug(
             "ai_executing_action",
             action=action_type,
@@ -2233,6 +2375,22 @@ class QuadOrchestrator:
             stop_loss_price, take_profit_price = await self._compute_bracket_prices(
                 contract_symbol, side
             )
+            # A trade must never open without its SL/TP when the feature is
+            # enabled.  Prices are (None, None) only when every bracket is
+            # disabled or when the mark price could not be fetched -- in the
+            # latter case refuse the ENTER instead of opening a bare position.
+            risk_cfg = self._config_dict.get("risk", {})
+            sl_enabled = bool(risk_cfg.get("per_position_sl", {}).get("enabled", True))
+            tp_enabled = bool(risk_cfg.get("per_position_tp", {}).get("enabled", True))
+            if sl_enabled or tp_enabled:
+                if stop_loss_price is None or take_profit_price is None:
+                    self._log.warning(
+                        "ai_enter_blocked_missing_brackets",
+                        contract=contract_symbol,
+                        stop_loss=str(stop_loss_price),
+                        take_profit=str(take_profit_price),
+                    )
+                    return False
 
         # Build Action dataclass
         from quad.types.risk import Action
@@ -2256,9 +2414,28 @@ class QuadOrchestrator:
                 "ai_confidence": decision.get(
                     "confidence",
                     self._config_dict.get("ai", {}).get("default_confidence", 0.8),
-                )
+                ),
             },
         )
+        # Attach the position entry price on EXIT so the execution engine can
+        # persist the realized PnL for this closing trade.
+        if action_type == "EXIT":
+            try:
+                ctx_positions = getattr(context, "positions", None) or []
+                held_ctx = next(
+                    (
+                        p
+                        for p in ctx_positions
+                        if (getattr(p, "symbol", "") or getattr(p, "contract_symbol", ""))
+                        == contract_symbol
+                    ),
+                    None,
+                )
+                action.metadata["entry_price"] = str(
+                    getattr(held_ctx, "entry_price", 0) or 0
+                )
+            except Exception:
+                action.metadata["entry_price"] = "0"
 
         # Risk check
         try:
@@ -2299,8 +2476,17 @@ class QuadOrchestrator:
                 status=getattr(order_result, "status", "unknown"),
             )
 
-            # Notify on successful execution (ENTER, EXIT, ADJUST, ROLL)
+            # Notify on successful execution (ENTER, EXIT, ADJUST, ROLL).
+            # ENTER alerts always include the computed SL/TP brackets.
             if action_type in ("ENTER", "EXIT"):
+                exit_pnl: str | None = None
+                if action_type == "EXIT":
+                    exit_pnl = await self._build_exit_pnl_text(
+                        contract_symbol,
+                        side,
+                        Decimal(str(sized_action.quantity or 0)),
+                        order_result,
+                    )
                 await self._notify_trade(
                     action_type=action_type,
                     strategy=strategy_name,
@@ -2312,6 +2498,9 @@ class QuadOrchestrator:
                     quantity=str(sized_action.quantity),
                     price=str(action.price) if action.price else None,
                     reason=action.reason,
+                    stop_loss=stop_loss_price,
+                    take_profit=take_profit_price,
+                    pnl=exit_pnl,
                 )
             return True
         except Exception as exc:
@@ -2322,6 +2511,59 @@ class QuadOrchestrator:
                 error=str(exc),
             )
             return False
+
+    async def _build_exit_pnl_text(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        order_result: Any,
+    ) -> str | None:
+        """Build the ``$x.xx (y%)`` PnL line for a closed position.
+
+        Uses the exchange fill price when available, otherwise the live mark
+        price, against the position's stored entry price.  Returns ``None``
+        (no PnL line) when no entry price or exit price can be derived.
+        """
+        try:
+            positions = await self._exchange_adapter.get_positions()
+            held = next(
+                (
+                    p
+                    for p in positions
+                    if (getattr(p, "symbol", "") or getattr(p, "contract_symbol", ""))
+                    == symbol
+                ),
+                None,
+            )
+            entry_price = (
+                Decimal(str(getattr(held, "entry_price", 0) or 0))
+                if held is not None
+                else Decimal(0)
+            )
+            # Prefer the exchange fill price; fall back to the mark price.
+            exit_price = Decimal(0)
+            fills = getattr(order_result, "fills", None) or []
+            if fills:
+                try:
+                    exit_price = Decimal(str(fills[-1].get("price", "0")))
+                except (TypeError, ValueError):
+                    exit_price = Decimal(0)
+            if not exit_price:
+                mark = await self._exchange_adapter.get_mark_price(symbol)
+                exit_price = Decimal(str(mark))
+            if not entry_price or not exit_price:
+                return None
+            pnl = self._compute_position_pnl(
+                entry_price=entry_price,
+                exit_price=exit_price,
+                quantity=quantity,
+                side=(str(getattr(held, "side", "")) or side),
+            )
+            return self._format_pnl(pnl, entry_price)
+        except Exception as exc:
+            self._log.warning("ai_exit_pnl_compute_failed", symbol=symbol, error=str(exc))
+            return None
 
     async def _compute_bracket_prices(
         self,
@@ -2619,6 +2861,66 @@ class QuadOrchestrator:
     # Telegram trade notifications
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _side_label(side: Any) -> str:
+        """Normalize a position/order side to ``LONG``/``SHORT``/``BUY``/``SELL``.
+
+        Binance positions carry ``PositionSide.LONG`` enums while order sides
+        are ``BUY``/``SELL`` strings; the Telegram alert should never show the
+        raw ``PositionSide.LONG`` repr.
+        """
+        if side is None:
+            return ""
+        from quad.types.domain import PositionSide as PS
+
+        if isinstance(side, PS):
+            return side.value
+        text = str(side).strip()
+        if text.startswith("PositionSide."):
+            text = text.split(".", 1)[1]
+        return text.upper()
+
+    @staticmethod
+    def _compute_position_pnl(
+        entry_price: Decimal | None,
+        exit_price: Decimal | None,
+        quantity: Decimal,
+        side: str,
+    ) -> Decimal:
+        """Realized PnL for a closed position in quote (USDT) terms.
+
+        ``(exit - entry) * qty`` for LONG, ``(entry - exit) * qty`` for
+        SHORT.  Returns ``Decimal(0)`` when the prices are unavailable so a
+        close never fails on missing data.
+        """
+        try:
+            if entry_price is None or exit_price is None or not quantity:
+                return Decimal(0)
+            is_long = str(side or "").strip().upper() in ("BUY", "LONG")
+            diff = exit_price - entry_price
+            if not is_long:
+                diff = -diff
+            return diff * quantity
+        except Exception:
+            return Decimal(0)
+
+    @staticmethod
+    def _format_pnl(pnl: Decimal, entry_price: Decimal | None) -> str:
+        """Format realized PnL as ``$x.xx (y.y%)``.
+
+        The percentage is relative to the entry notional (``entry * qty`` is
+        unavailable here, so it is relative to the entry price instead);
+        pass ``None`` to omit the percentage.
+        """
+        try:
+            amount = f"${float(pnl):,.2f}"
+            if entry_price and entry_price > 0:
+                pct = float(pnl) / float(entry_price) * 100.0
+                return f"{amount} ({pct:+.2f}%)"
+            return amount
+        except Exception:
+            return f"${float(pnl):,.2f}"
+
     async def _notify_trade(
         self,
         action_type: str,
@@ -2629,6 +2931,8 @@ class QuadOrchestrator:
         price: str | None,
         reason: str,
         pnl: str | None = None,
+        stop_loss: Decimal | None = None,
+        take_profit: Decimal | None = None,
     ) -> None:
         """Send trade notification via Telegram."""
         if not getattr(self, "_telegram_bot", None) or not getattr(
@@ -2649,6 +2953,11 @@ class QuadOrchestrator:
                 f"Side: {esc(side)} | Qty: {esc(quantity)}\n"
                 f"Price: {esc(price or 'MARKET')}\n"
             )
+            if stop_loss is not None and take_profit is not None:
+                msg += (
+                    f"SL: <code>{esc(str(stop_loss))}</code> | "
+                    f"TP: <code>{esc(str(take_profit))}</code>\n"
+                )
             if pnl:
                 msg += f"PnL: {esc(pnl)}\n"
             msg += f"Reason: {esc(reason)}"

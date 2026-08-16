@@ -3,7 +3,9 @@ _mode: "binance"
 _dry_run: true
 
 trading:
-  serial_trade_mode: false
+  # One trade per cycle: force-close every open position before a new ENTER.
+  # Only one position may ever be open (see also ai.rotation below).
+  serial_trade_mode: true
   default_strategy: "trend_following"
   ai_cycle_interval: 3600
   underlyings:

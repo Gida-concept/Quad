@@ -232,11 +232,13 @@ class MockAdapter(ExchangeAdapter):
         )
         return result
 
-    async def cancel_order(self, order_id: int) -> bool:
+    async def cancel_order(self, order_id: int, symbol: str = "") -> bool:
         """Simulate cancelling an order.
 
         Args:
             order_id: The order ID to cancel.
+            symbol: Optional contract symbol (kept for signature parity with
+                the real adapter).
 
         Returns:
             ``True`` if the order existed and was cancelled, ``False``
@@ -259,11 +261,13 @@ class MockAdapter(ExchangeAdapter):
         self._log.debug("mock_cancel_order", order_id=order_id)
         return True
 
-    async def get_order_status(self, order_id: int) -> Order:
+    async def get_order_status(self, order_id: int, symbol: str = "") -> Order:
         """Return the stored order with the given ID.
 
         Args:
             order_id: The order ID to look up.
+            symbol: Optional contract symbol (kept for signature parity with
+                the real adapter).
 
         Returns:
             The stored ``Order``.

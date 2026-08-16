@@ -114,7 +114,9 @@ class FillReconciler:
                 continue
 
             try:
-                ex_order = await self._exchange.get_order_status(order.id)
+                ex_order = await self._exchange.get_order_status(
+                    order.id, order.symbol
+                )
             except Exception as exc:
                 self._log.warning(
                     "reconcile_query_failed",

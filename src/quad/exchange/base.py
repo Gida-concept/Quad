@@ -134,11 +134,13 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
-    async def cancel_order(self, order_id: int) -> bool:
+    async def cancel_order(self, order_id: int, symbol: str = "") -> bool:
         """Cancel an order by exchange order ID.
 
         Args:
             order_id: The exchange-assigned order identifier.
+            symbol: Optional contract symbol.  Binance requires ``symbol``
+                (or ``origClientOrderId``) for ``DELETE /fapi/v1/order``.
 
         Returns:
             ``True`` if the cancellation was accepted, ``False`` if the
@@ -147,11 +149,13 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
-    async def get_order_status(self, order_id: int) -> Order:
+    async def get_order_status(self, order_id: int, symbol: str = "") -> Order:
         """Get the current status of an order from the exchange.
 
         Args:
             order_id: The exchange-assigned order identifier.
+            symbol: Optional contract symbol.  Binance requires ``symbol``
+                for ``GET /fapi/v1/order``.
 
         Returns:
             An ``Order`` dataclass with the latest status.

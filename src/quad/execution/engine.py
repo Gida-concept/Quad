@@ -8,6 +8,7 @@ between strategy decisions and the exchange adapter.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from decimal import Decimal
 from typing import Any
@@ -66,6 +67,7 @@ class ExecutionEngine:
         # ``execute_twap``) and the quantity-normalization helpers, so it must
         # be stored on the instance as well as passed to the sub-components.
         self._exchange_adapter: ExchangeAdapter = exchange_adapter
+        self._db_manager = db_manager
 
         self._gateway = OrderGateway(exchange_adapter, config=self._config)
         # Build the twap sub-config: TwapSlicer expects flat keys from
@@ -310,6 +312,7 @@ class ExecutionEngine:
         self._stats["total_submitted"] += 1
         if result.status == "FILLED":
             self._stats["total_filled"] += 1
+            await self._persist_trade(action, result)
         self._stats["active_order_count"] = self._gateway.get_active_order_count()
 
         self._log.info(
@@ -322,6 +325,67 @@ class ExecutionEngine:
             status=result.status,
         )
         return result
+
+    async def _persist_trade(self, action: Action, result: OrderResult) -> None:
+        """Persist an executed fill to the ``trades`` table (best effort).
+
+        ENTER fills are recorded with ``pnl='0'``; EXIT fills carry the
+        realized PnL computed from the entry price attached to the action
+        metadata at the orchestrator and the exit fill price, so the daily
+        PnL report can sum today's closed-trade PnL.
+        """
+        if self._db_manager is None or not getattr(
+            self._db_manager, "is_connected", False
+        ):
+            return
+        try:
+            from quad.persistence.models import TradeModel
+            from quad.persistence.repositories import TradeRepository
+
+            fill_price = Decimal(0)
+            fills = getattr(result, "fills", None) or []
+            if fills:
+                try:
+                    fill_price = Decimal(str(fills[-1].get("price", "0")))
+                except (TypeError, ValueError):
+                    fill_price = Decimal(0)
+            if not fill_price and result.price:
+                fill_price = result.price
+
+            realized_pnl = Decimal(0)
+            entry_str = (action.metadata or {}).get("entry_price")
+            pos_side = (action.metadata or {}).get("position_side")
+            if action.type == "EXIT" and entry_str and pos_side:
+                try:
+                    entry = Decimal(str(entry_str))
+                    is_long = str(pos_side).strip().upper() in (
+                        "BUY",
+                        "LONG",
+                    )
+                    diff = fill_price - entry
+                    if not is_long:
+                        diff = -diff
+                    realized_pnl = diff * action.quantity
+                except Exception:
+                    realized_pnl = Decimal(0)
+
+            repo = TradeRepository(self._db_manager)
+            await repo.create(
+                TradeModel(
+                    id=0,
+                    position_id=0,
+                    order_id=result.order_id,
+                    symbol=result.symbol or action.contract or "",
+                    side=str(action.side or result.side or ""),
+                    quantity=str(result.quantity or action.quantity),
+                    price=str(fill_price),
+                    fee="0",
+                    pnl=str(realized_pnl),
+                    timestamp=int(time.time() * 1000),
+                )
+            )
+        except Exception as exc:
+            self._log.warning("trade_persist_failed", error=str(exc))
 
     async def execute_twap(
         self,
@@ -643,7 +707,13 @@ class ExecutionEngine:
             or exec_cfg.get("default_order_type", "MARKET"),
             quantity=action.quantity,
             price=action.price,
-            reduce_only=exec_cfg.get("reduce_only", False),
+            # Serial-close EXITs (metadata["serial_close"]) must be flagged
+            # reduceOnly so they can never open a position; e.g. closing a
+            # BTC LONG at 0.3 qty must not open a SELL short when the local
+            # position book is stale, and a fresh position must only open on
+            # a confirmed-flat account.
+            reduce_only=bool(action.metadata.get("serial_close"))
+            or exec_cfg.get("reduce_only", False),
             post_only=exec_cfg.get("post_only", False),
         )
 

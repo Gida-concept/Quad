@@ -701,13 +701,15 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         )
         return result
 
-    async def cancel_order(self, order_id: int) -> bool:
+    async def cancel_order(self, order_id: int, symbol: str = "") -> bool:
         """Cancel an order on Binance Futures.
 
         Calls ``DELETE /fapi/v1/order``.
 
         Args:
             order_id: The exchange order ID.
+            symbol: The contract symbol.  Required by Binance for regular
+                orders (``-1102`` when missing); algo cancels use ``algoId``.
 
         Returns:
             ``True`` if the cancellation was accepted.
@@ -720,9 +722,9 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                 self._log.info("algo_order_cancelled", algo_id=order_id, status=status)
                 self._algo_order_ids.discard(order_id)
                 return True
-            cancel_params: dict[str, Any] = {
-                "orderId": order_id,
-            }
+            cancel_params: dict[str, Any] = {"orderId": order_id}
+            if symbol:
+                cancel_params["symbol"] = symbol
             data = await self._request("DELETE", "/fapi/v1/order", data=cancel_params)
             status = data.get("status", "")
             self._log.info("order_cancelled", order_id=order_id, status=status)
@@ -732,13 +734,15 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         except ExchangeError:
             return False
 
-    async def get_order_status(self, order_id: int) -> Order:
+    async def get_order_status(self, order_id: int, symbol: str = "") -> Order:
         """Query a single order status.
 
         Calls ``GET /fapi/v1/order``.
 
         Args:
             order_id: The exchange order ID.
+            symbol: The contract symbol.  Required by Binance for regular
+                orders (``-1102`` when missing); algo lookups use ``algoId``.
 
         Returns:
             An ``Order`` dataclass.
@@ -750,6 +754,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             return await self._get_algo_order_status(order_id)
 
         params: dict[str, Any] = {"orderId": order_id}
+        if symbol:
+            params["symbol"] = symbol
         data = await self._request("GET", "/fapi/v1/order", data=params)
 
         order = Order(

@@ -52,6 +52,7 @@ class RiskManager:
         self._breakers = CircuitBreakerManager(self._config)
         self._sizer = PositionSizer(self._config, db_manager=db_manager)
         self._tracker = FuturesPositionTracker(self._config)
+        self._db = db_manager
 
         self._log.info(
             "risk_manager_initialized",
@@ -168,8 +169,15 @@ class RiskManager:
         gate_status = self._gates.get_gate_status()
 
         drawdown = Decimal(0)
-        daily_pnl = Decimal(0)
-        daily_loss_limit = Decimal(500)
+        daily_pnl = await self._compute_daily_pnl()
+        daily_loss_limit = Decimal(
+            str(
+                self._config.get(
+                    "max_daily_loss_usd",
+                    self._config.get("risk", {}).get("max_daily_loss_usd", 500.0),
+                )
+            )
+        )
 
         return RiskStatus(
             drawdown_percent=drawdown,
@@ -178,6 +186,40 @@ class RiskManager:
             circuit_breakers={name: s for name, s in cb_status.items()},
             gates=gate_status,
         )
+
+    async def _compute_daily_pnl(self) -> Decimal:
+        """Realized PnL for the current UTC day from persisted trades.
+
+        Only closed (EXIT-side) trades carry a realized PnL; ENTER fills are
+        recorded with ``pnl='0'`` so summing the column is safe.  Falls back
+        to ``Decimal(0)`` when persistence is unavailable.
+
+        Returns
+        -------
+        Decimal
+            Sum of today's realized PnL in USDT.
+        """
+        if self._db is None or not getattr(self._db, "is_connected", False):
+            return Decimal(0)
+        try:
+            import time as _time
+
+            from quad.persistence.repositories import TradeRepository
+
+            now_ms = int(_time.time() * 1000)
+            day_start_ms = now_ms - (now_ms % 86_400_000)
+            repo = TradeRepository(self._db)
+            trades = await repo.get_by_date_range(day_start_ms, now_ms)
+            total = Decimal(0)
+            for t in trades:
+                try:
+                    total += Decimal(str(getattr(t, "pnl", "0") or "0"))
+                except Exception:
+                    continue
+            return total
+        except Exception as exc:
+            self._log.warning("daily_pnl_compute_failed", error=str(exc))
+            return Decimal(0)
 
     def is_trading_allowed(self) -> bool:
         """Quick check: returns True if no circuit breaker is active."""
