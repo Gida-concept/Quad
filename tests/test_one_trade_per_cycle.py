@@ -17,6 +17,8 @@ from quad.exchange.base import ExchangeAdapter
 from quad.exchange.binance import BinanceFuturesAdapter
 from quad.exchange.mock import MockAdapter
 from quad.orchestrator.orchestrator import QuadOrchestrator
+from quad.risk.sizing import PositionSizer
+from quad.types.risk import Action
 from quad.types.domain import Order, Position, PositionSide, PositionStatus
 from quad.types.strategy import StrategyContext
 
@@ -505,3 +507,52 @@ async def test_engine_persists_trade_after_fill():
         assert Decimal(trade.pnl) == Decimal("10")  # (61000 - 60000) * 0.01
     finally:
         TradeRepository.create = original
+
+
+# ---------------------------------------------------------------------------
+# 5. Serial-close quantity is preserved through risk sizing (2026-08-17)
+# ---------------------------------------------------------------------------
+
+
+def test_sizer_preserves_serial_close_quantity():
+    """A serial-close EXIT must keep its exact held quantity.
+
+    Regression for 2026-08-17 runtime logs: every hourly rotation failed with
+    ``order quantity is zero/negative after sizing (0.00)`` because the
+    PositionSizer replaced the close quantity with a Kelly/default notional
+    derived from the portfolio value.  With no trade history the default
+    fraction of a $10k portfolio is far larger than the held BTC qty, and
+    the resulting "sized" quantity was zeroed by the engine's normalize step
+    for a symbol with a large minQty, leaving both positions open forever.
+    """
+    sizer = PositionSizer.__new__(PositionSizer)
+    sizer._log = MagicMock()
+    sizer._default_fraction = 0.02
+    sizer._max_pos_usd = Decimal("1000")
+    sizer._min_pos_usd = Decimal("5")
+    sizer._kelly_multiplier = 0.25
+    sizer._trade_capital_usd = Decimal("5")
+    sizer._max_leverage = 50
+    sizer._sl_enabled = True
+    sizer._cfg = {"per_position_sl": {"enabled": True}}
+
+    from quad.types.strategy import StrategyContext
+    from quad.types.domain import Account
+
+    context = StrategyContext(
+        config={},
+        account=Account(id="x", exchange="mock", total_usdt=Decimal("10000")),
+    )
+    close = Action(
+        type="EXIT",
+        strategy="serial_close",
+        contract="BTCUSDT",
+        side="SELL",
+        quantity=Decimal("0.3"),
+        order_type="MARKET",
+        metadata={"serial_close": True, "entry_price": "62000"},
+    )
+
+    sized = __import__("asyncio").run(sizer.compute_size(close, context))
+
+    assert sized.quantity == Decimal("0.3")  # exact held quantity preserved

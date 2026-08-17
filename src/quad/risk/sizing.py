@@ -124,18 +124,31 @@ class PositionSizer:
             kelly_f = self._kelly_fraction(win_rate, avg_win, avg_loss)
             sized_qty = self._adjusted_kelly(kelly_f, portfolio_value)
 
-        # Cap at the original requested quantity (don't oversize)
-        if action.quantity > Decimal(0) and sized_qty > action.quantity:
+        # Serial close / reduce-only orders carry the EXACT held quantity
+        # (metadata["serial_close"] or reduce_only actions built from a live
+        # position).  Risk sizing must NEVER re-quantify them: position
+        # sizer output is an ENTRY notional; replacing a close quantity with
+        # a Kelly-derived number would zero or resize the close.  Preserve
+        # the exact quantity and skip TP/SL caps for these exits.
+        protected_qty = bool(
+            (action.metadata or {}).get("serial_close")
+            or (action.metadata or {}).get("reduce_only")
+        )
+        if protected_qty:
             sized_qty = action.quantity
+        else:
+            # Cap at the original requested quantity (don't oversize)
+            if action.quantity > Decimal(0) and sized_qty > action.quantity:
+                sized_qty = action.quantity
 
-        # Ensure non-negative
-        sized_qty = max(sized_qty, Decimal(0))
+            # Ensure non-negative
+            sized_qty = max(sized_qty, Decimal(0))
 
-        # TP/SL size cap: ensure position isn't larger than what the bracket
-        # stop-loss can protect given the trade capital
-        tp_sl_max = self._max_size_from_tp_sl(action, portfolio_value)
-        if sized_qty > tp_sl_max > Decimal(0):
-            sized_qty = tp_sl_max
+            # TP/SL size cap: ensure position isn't larger than what the
+            # bracket stop-loss can protect given the trade capital
+            tp_sl_max = self._max_size_from_tp_sl(action, portfolio_value)
+            if sized_qty > tp_sl_max > Decimal(0):
+                sized_qty = tp_sl_max
 
         self._log.debug(
             "position_sized",

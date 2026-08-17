@@ -403,8 +403,13 @@ class QuadBotJobs:
                     symbol = getattr(
                         pos, "symbol", getattr(pos, "contract_symbol", "?")
                     )
-                    raw_side = getattr(pos, "position_side", getattr(pos, "side", "?"))
-                    side = str(raw_side) if not isinstance(raw_side, str) else raw_side
+                    raw_side = getattr(pos, "side", getattr(pos, "position_side", "?"))
+                    side = str(raw_side)
+                    # FuturesPositionSide.BOTH / PositionSide enums render
+                    # with their qualified name; keep the alert readable.
+                    if "." in side:
+                        side = side.rsplit(".", 1)[-1]
+                    side = side.upper()
                     lev = int(getattr(pos, "leverage", 1))
 
                     warnings.append(
