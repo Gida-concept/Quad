@@ -27,7 +27,7 @@ The `.env` file at the project root holds secrets and environment-specific value
 | `QUAD_CONFIG_PATH` | No | `config/config.local.yaml` | Path to local config YAML file |
 | `QUAD_LOG_DIR` | No | `./data/logs` | Log output directory |
 | `QUAD_AI_ENABLED` | No | `false` | Enable AI-driven trading analysis |
-| `QUAD_AI_MODEL` | No | `llama-3.3-70b-versatile` | Groq LLM model identifier for AI analysis |
+| `QUAD_AI_MODEL` | No | `groq/compound` | Groq LLM model identifier for AI analysis |
 | `QUAD_AI_TIMEOUT` | No | `30` | LLM API request timeout in seconds |
 | `QUAD_AI_MAX_REQUESTS_PER_DAY` | No | `950` | Maximum LLM API requests per day |
 | `TELEGRAM_NOTIFICATION_CHAT_ID` | No | `--` | Chat ID for automated Telegram notifications |

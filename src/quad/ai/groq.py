@@ -59,21 +59,35 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL = "llama-3.1-8b-instant"
-"""Default model: fast, high-quality, 131K context, production-grade."""
+_DEFAULT_MODEL = "groq/compound"
+"""Default model: Groq-native LLM, returns clean parseable structured JSON.
 
-_FALLBACK_MODEL = "llama-3.1-8b-instant"
-"""Fallback model if the primary is unavailable or rate-limited."""
+Verified against the configured GROQ_API_KEY (2026-08): the old default
+``llama-3.1-8b-instant`` is no longer served and returns 404 model_not_found,
+which the client treats as fatal (no retry/fallback). ``groq/compound`` is
+served and returns action/reasoning JSON directly in ``content`` (unlike
+``openai/gpt-oss-120b``, which puts output in a separate ``reasoning`` field
+that would fail JSON parsing).
+"""
+
+_FALLBACK_MODEL = "groq/compound-mini"
+"""Fallback model if the primary is unavailable or rate-limited.
+
+Deliberately distinct from ``_DEFAULT_MODEL`` so a 404 on the primary does not
+dead-end the rotation. ``groq/compound-mini`` is served on the same key and
+returns clean parseable JSON in ``content``."""
+
+_DEFAULT_MAX_TOKENS_PER_DAY = 500_000
+"""Daily token budget for the default model (groq/compound).
+
+The previous budget note referenced the llama-3.1-8b-instant free tier, which
+is no longer served. The Groq free tier is quota-bound by TOKENS per day, not
+requests, so the budget stays conservative; a ~10K-token prompt allows ~50
+requests/day before hitting the wall (the old 70b model hit exactly
+``429 tokens per day: Limit 100000, used 97364``)."""
 
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.3
-
-_DEFAULT_MAX_TOKENS_PER_DAY = 500_000
-"""Daily token budget for the default model (llama-3.1-8b-instant free tier).
-
-The Groq free tier is quota-bound by TOKENS per day, not requests.  With a
-~10K-token prompt this allows only ~50 requests/day — the old 70b model hit
-exactly this wall (``429 tokens per day: Limit 100000, used 97364``)."""
 
 _TOKEN_CHARS_PER_TOKEN = 4
 """Chars-per-token heuristic for dependency-light token estimation."""
@@ -175,7 +189,7 @@ class GroqClient:
         the environment.
     model:
         Groq model ID to use for chat completions.
-        Defaults to ``llama-3.1-8b-instant``.
+        Defaults to ``groq/compound``.
     timeout:
         Request timeout in seconds.
     max_retries:

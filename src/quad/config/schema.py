@@ -976,7 +976,7 @@ class TokenBudgetConfig(BaseModel):
         default=500_000,
         ge=1,
         description=(
-            "Daily token budget (default matches llama-3.1-8b-instant "
+            "Daily token budget (default matches groq/compound "
             "free tier: 500K tokens/day)"
         ),
     )
@@ -1194,7 +1194,7 @@ class AiConfig(BaseModel):
         description="Enable AI-driven trading analysis",
     )
     model: str = Field(
-        default="llama-3.1-8b-instant",
+        default="groq/compound",
         description="Groq LLM model identifier",
     )
     timeout: int = Field(
