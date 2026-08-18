@@ -59,32 +59,37 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL = "groq/compound"
+_DEFAULT_MODEL = "groq/compound-mini"
 """Default model: Groq-native LLM, returns clean parseable structured JSON.
 
-Verified against the configured GROQ_API_KEY (2026-08): the old default
-``llama-3.1-8b-instant`` is no longer served and returns 404 model_not_found,
-which the client treats as fatal (no retry/fallback). ``groq/compound`` is
-served and returns action/reasoning JSON directly in ``content`` (unlike
-``openai/gpt-oss-120b``, which puts output in a separate ``reasoning`` field
-that would fail JSON parsing).
+Verified against the configured GROQ_API_KEY (2026-08): the original default
+``llama-3.1-8b-instant`` is no longer served (404 model_not_found, fatal).
+``groq/compound-mini`` is served and returns action/reasoning JSON directly in
+``content``, AND accepts the bot's realistic ~8KB prompt. NOTE: the larger
+``groq/compound`` advertises a 131K context_window but rejects the bot's prompt
+with 413 request_too_large (empirically ~2.5K-token input is rejected), so it
+is NOT usable. ``groq/compound-mini`` handled the full prompt and returned
+clean JSON.
 """
 
-_FALLBACK_MODEL = "groq/compound-mini"
+_FALLBACK_MODEL = "qwen/qwen3.6-27b"
 """Fallback model if the primary is unavailable or rate-limited.
 
-Deliberately distinct from ``_DEFAULT_MODEL`` so a 404 on the primary does not
-dead-end the rotation. ``groq/compound-mini`` is served on the same key and
-returns clean parseable JSON in ``content``."""
+Deliberately distinct from ``_DEFAULT_MODEL`` so a failure of the primary does
+not dead-end the rotation. ``qwen/qwen3.6-27b`` is served on the same key and
+accepts the full prompt, but MAY prefix a ``thinking`` block in its output;
+``safe_parse_ai_response`` strips non-JSON prose and extracts the final JSON
+object, so this is handled. (``openai/gpt-oss-20b``/``-120b`` are not used:
+they return output in a separate ``reasoning`` field and empty ``content``,
+which would fail JSON parsing; ``groq/compound`` returns 413 on this prompt.)"""
 
 _DEFAULT_MAX_TOKENS_PER_DAY = 500_000
-"""Daily token budget for the default model (groq/compound).
+"""Daily token budget for the default model (groq/compound-mini).
 
-The previous budget note referenced the llama-3.1-8b-instant free tier, which
-is no longer served. The Groq free tier is quota-bound by TOKENS per day, not
-requests, so the budget stays conservative; a ~10K-token prompt allows ~50
-requests/day before hitting the wall (the old 70b model hit exactly
-``429 tokens per day: Limit 100000, used 97364``)."""
+The Groq free tier is quota-bound by TOKENS per day, not requests (the old
+llama-3.1-8b-instant free tier, and the prior 70b model's ``429 tokens per
+day: Limit 100000, used 97364`` wall). Budget stays conservative: a ~10K-token
+prompt allows ~50 requests/day before the wall."""
 
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.3
@@ -189,7 +194,7 @@ class GroqClient:
         the environment.
     model:
         Groq model ID to use for chat completions.
-        Defaults to ``groq/compound``.
+        Defaults to ``groq/compound-mini``.
     timeout:
         Request timeout in seconds.
     max_retries:

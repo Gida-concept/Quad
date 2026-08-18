@@ -976,7 +976,7 @@ class TokenBudgetConfig(BaseModel):
         default=500_000,
         ge=1,
         description=(
-            "Daily token budget (default matches groq/compound "
+            "Daily token budget (default matches groq/compound-mini "
             "free tier: 500K tokens/day)"
         ),
     )
@@ -1194,7 +1194,7 @@ class AiConfig(BaseModel):
         description="Enable AI-driven trading analysis",
     )
     model: str = Field(
-        default="groq/compound",
+        default="groq/compound-mini",
         description="Groq LLM model identifier",
     )
     timeout: int = Field(

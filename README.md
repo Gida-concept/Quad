@@ -439,7 +439,7 @@ The Groq AI subsystem is **optional** -- it only activates when a `GROQ_API_KEY`
             QuadOrchestrator
                   |
           GroqClient (wraps groq.AsyncGroq)
-           +-- Model: groq/compound (default)
+           +-- Model: groq/compound-mini (default)
            +-- 131K context window
            +-- Automatic retry with exponential backoff + jitter
            +-- Rate-limit handling (RateLimitError -> backoff)
