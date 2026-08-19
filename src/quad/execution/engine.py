@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import replace
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
 import structlog
@@ -25,6 +25,35 @@ from quad.types.strategy import StrategyContext
 from .gateway import OrderGateway, OrderRejectedError, OrderTimeoutError
 from .reconciler import FillReconciler
 from .twap import TwapSlicer
+
+
+def _floor_to_compliant(
+    qty: Decimal,
+    min_qty: Decimal,
+    min_notional: Decimal,
+    step_size: Decimal,
+    mark_price: Decimal | None,
+) -> Decimal:
+    """Raise ``qty`` to a step-aligned size that clears minQty AND minNotional.
+
+    The engine floors a sized quantity that fell below the exchange filters
+    UP to the smallest valid size: at least ``minQty``, and enough quantity so
+    that ``qty * mark_price >= min_notional`` (rounded UP to ``step_size``).
+    Returns the raised quantity; the caller must verify it does not exceed the
+    pre-cap (the original requested quantity) before submitting.
+    """
+    target = max(qty, min_qty)
+    if min_notional > Decimal(0) and mark_price is not None and mark_price > Decimal(0):
+        needed = min_notional / mark_price
+        if needed > target:
+            target = needed
+            if step_size > Decimal(0):
+                target = (
+                    (needed / step_size).to_integral_value(rounding=ROUND_CEILING)
+                    * step_size
+                )
+    return target
+
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -647,23 +676,45 @@ class ExecutionEngine:
         try:
             return await self._exchange_adapter.normalize_quantity(symbol, qty)
         except Exception:
-            # Floor a sub-minQty sized quantity up to minQty, but only when it
-            # does not exceed the pre-cap (the original requested quantity).
+            # Floor a sub-minQty / sub-minNotional sized quantity UP to the
+            # smallest size that clears BOTH the minQty and minNotional
+            # filters.  (The previous code only floored to minQty, which could
+            # make a sub-minNotional order even smaller and still get bounced
+            # with -4164.)  Never exceed the pre-cap (the original requested
+            # quantity); otherwise re-raise the original, already-clear
+            # rejection so the caller returns a clean REJECTED result.
             if pre_cap is not None and pre_cap > Decimal(0):
                 try:
                     filters = await self._exchange_adapter.get_symbol_filters(symbol)
                     min_qty = filters.get("min_qty", Decimal(0))
+                    min_notional = filters.get("min_notional", Decimal(0))
+                    step_size = filters.get("step_size", Decimal(0))
                 except Exception:
                     min_qty = Decimal(0)
-                if min_qty > Decimal(0) and min_qty <= pre_cap:
+                    min_notional = Decimal(0)
+                    step_size = Decimal(0)
+                try:
+                    mark_price = await self._exchange_adapter.get_mark_price(symbol)
+                except Exception:
+                    mark_price = None
+                target = _floor_to_compliant(
+                    qty,
+                    min_qty,
+                    min_notional,
+                    step_size,
+                    mark_price,
+                )
+                if target <= pre_cap:
                     self._log.info(
                         "order_quantity_floored_to_min_qty",
                         symbol=symbol,
                         original=str(qty),
-                        floored=str(min_qty),
+                        floored=str(target),
+                        min_qty=str(min_qty),
+                        min_notional=str(min_notional),
                         pre_cap=str(pre_cap),
                     )
-                    return min_qty
+                    return target
             raise
 
     async def _reconciliation_loop(self) -> None:

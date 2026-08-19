@@ -973,11 +973,11 @@ class TokenBudgetConfig(BaseModel):
         description="Enable the daily token-budget throttle",
     )
     max_tokens_per_day: int = Field(
-        default=500_000,
+        default=100_000,
         ge=1,
         description=(
-            "Daily token budget (default matches groq/compound-mini "
-            "free tier: 500K tokens/day)"
+            "Daily token budget (matches groq/compound-mini free tier: "
+            "the served model enforces a 100K tokens/day 429 wall)"
         ),
     )
     window_seconds: int = Field(
@@ -986,17 +986,17 @@ class TokenBudgetConfig(BaseModel):
         description="Rolling token-usage window in seconds (default 24h)",
     )
     warning_level_1: int = Field(
-        default=400_000,
+        default=80_000,
         ge=1,
         description="First warning level (estimated tokens used in window)",
     )
     warning_level_2: int = Field(
-        default=450_000,
+        default=90_000,
         ge=1,
         description="Second warning level (estimated tokens used in window)",
     )
     warning_level_3: int = Field(
-        default=480_000,
+        default=95_000,
         ge=1,
         description="Third warning level (estimated tokens used in window)",
     )

@@ -85,7 +85,10 @@ ai:
   groq:
     token_budget:
       enabled: true
-      max_tokens_per_day: 500000
+      # Matches the real groq/compound-mini free-tier wall (100K tokens/day
+      # for the served llama-3.3-70b model).  Aligning the local throttle to
+      # this lets is_available() trip before the API starts hammering 429s.
+      max_tokens_per_day: 100000
       window_seconds: 86400
   validator:
     gate_mode: "warn"

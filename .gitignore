@@ -107,6 +107,7 @@ secrets/
 CLAUDE.md
 .claude/
 .pm-agent/
+.reasonix/
 .mcp.json
 
 # === Misc ===

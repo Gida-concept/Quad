@@ -74,7 +74,6 @@ clean JSON.
 
 _FALLBACK_MODEL = "qwen/qwen3.6-27b"
 """Fallback model if the primary is unavailable or rate-limited.
-
 Deliberately distinct from ``_DEFAULT_MODEL`` so a failure of the primary does
 not dead-end the rotation. ``qwen/qwen3.6-27b`` is served on the same key and
 accepts the full prompt, but MAY prefix a ``thinking`` block in its output;
@@ -83,27 +82,91 @@ object, so this is handled. (``openai/gpt-oss-20b``/``-120b`` are not used:
 they return output in a separate ``reasoning`` field and empty ``content``,
 which would fail JSON parsing; ``groq/compound`` returns 413 on this prompt.)"""
 
-_DEFAULT_MAX_TOKENS_PER_DAY = 500_000
+_DEFAULT_MAX_TOKENS_PER_DAY = 100_000
 """Daily token budget for the default model (groq/compound-mini).
 
-The Groq free tier is quota-bound by TOKENS per day, not requests (the old
-llama-3.1-8b-instant free tier, and the prior 70b model's ``429 tokens per
-day: Limit 100000, used 97364`` wall). Budget stays conservative: a ~10K-token
-prompt allows ~50 requests/day before the wall."""
+The Groq free tier is quota-bound by TOKENS per day.  ``groq/compound-mini``
+(served behind ``llama-3.3-70b-versatile`` in 2026-08) reports a hard 429
+wall of ``Limit 100000`` tokens/day — NOT the 500K/day budget of the retired
+llama-3.1-8b-instant free tier.  The local throttle is deliberately set to
+match that real quota so ``is_available()`` trips *before* the API starts
+burning HTTP 429s instead of hammering the wall every cycle.  With a
+~6-10K-token per-request estimate that allows roughly 10-16 requests/day;
+the rotation therefore pauses (``ai_rate_limit_hit_stopping_scan``) for the
+rest of the UTC day and resumes after the 24h window slides past the spend."""
 
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.3
 
+_FALLBACK_LONG_WAIT_S = 60.0
+"""Server-computed ``retry_after`` threshold (seconds) above which the primary
+429 is treated as a coarse daily/TPM quota wall.
+
+When the server asks us to wait at least this long, retrying the SAME model
+(which would sleep minutes per attempt) is pointless within one rotation
+cycle, so ``chat`` routes to the fallback model immediately instead of
+sleeping.  Below this threshold (a momentary TPM burst) the normal backoff
+retry loop still applies.
+"""
+
 _TOKEN_CHARS_PER_TOKEN = 4
 """Chars-per-token heuristic for dependency-light token estimation."""
 
-_RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
-"""Matches Groq 429 bodies: ``... Please try again in 21.84s.``
+_RETRY_AFTER_TEXT_RE = re.compile(
+    r"try again in\s+([0-9a-zA-Z.]+)", re.IGNORECASE
+)
+"""Captures the duration token after ``try again in`` in Groq 429 bodies.
 
 The per-minute (TPM) and per-day token quotas both report the
 server-computed wait this way; honouring it lets a retry land after the
 token bucket refills instead of burning retries on an early resend.
+
+The token is deliberately character-classed (digits, letters, dots) rather
+than ``[\\d.]+s`` because the daily-token-quota refusals spell the wait with
+minute components, e.g. ``... Please try again in 43m52.608s`` or
+``2h3m5s`` — a plain ``([\\d.]+)s`` regex fails on the ``m`` and the retry
+would fall back to a tiny exponential backoff against a ~43-minute wall.
 """
+
+_DURATION_PARTS_RE = re.compile(
+    r"^\s*"
+    r"(?:(?P<hours>\d+)\s*h\s*)?"
+    r"(?:(?P<minutes>\d+)\s*m\s*)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)\s*s\s*)?"
+    r"$",
+    re.IGNORECASE,
+)
+"""Parses a compact duration string into its hour/minute/second parts.
+
+Handles seconds (``21.84s``), minutes+seconds (``43m52.608s``), and
+hours+minutes+seconds (``2h3m5s``) with optional inter-unit whitespace.
+"""
+
+
+def _parse_duration(raw: str | None) -> float | None:
+    """Parse a compact duration like ``43m52.608s`` to total seconds.
+
+    Accepts seconds (``21.84s``), minutes+seconds (``43m52.608s``), and
+    hours+minutes+seconds (``2h3m5s``).  Returns ``None`` when no valid
+    duration parts are present so the caller can fall back to its own
+    backoff.
+    """
+    if not raw:
+        return None
+    text = raw.strip().rstrip(".")
+    if not text:
+        return None
+    match = _DURATION_PARTS_RE.match(text)
+    if not match or not any(match.groupdict().values()):
+        return None
+    total = 0.0
+    if match.group("hours"):
+        total += int(match.group("hours")) * 3600
+    if match.group("minutes"):
+        total += int(match.group("minutes")) * 60
+    if match.group("seconds"):
+        total += float(match.group("seconds"))
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +282,12 @@ class GroqClient:
             logger.warning("groq_api_key_missing")
 
         self._model = model or self._ai_config.get("model", _DEFAULT_MODEL)
+        # Fallback model for graceful degradation when the primary is
+        # rate-limited or token-budget exhausted.  Configurable via
+        # ``ai.groq.fallback_model``; falls back to the module constant.
+        self._fallback_model = self._groq_config.get(
+            "fallback_model", _FALLBACK_MODEL
+        )
         self._timeout = timeout or self._groq_config.get("timeout_seconds")
         self._max_retries = max_retries or self._groq_config.get("max_retries")
 
@@ -246,13 +315,13 @@ class GroqClient:
         )
         self._token_window_s = float(token_budget_cfg.get("window_seconds") or 86400)
         self._token_warning_level_1 = int(
-            token_budget_cfg.get("warning_level_1") or 400_000
+            token_budget_cfg.get("warning_level_1") or 80_000
         )
         self._token_warning_level_2 = int(
-            token_budget_cfg.get("warning_level_2") or 450_000
+            token_budget_cfg.get("warning_level_2") or 90_000
         )
         self._token_warning_level_3 = int(
-            token_budget_cfg.get("warning_level_3") or 480_000
+            token_budget_cfg.get("warning_level_3") or 95_000
         )
 
         self._log = logger.bind(model=self._model)
@@ -471,11 +540,11 @@ class GroqClient:
     def _extract_retry_after(exc: RateLimitError) -> float | None:
         """Extract the server-recommended retry delay from a Groq 429.
 
-        Groq 429 bodies carry ``... Please try again in 21.84s.`` for both
-        the per-minute (TPM) and per-day token quotas.  ``APIStatusError``
-        surfaces the parsed JSON body as ``exc.body``; some proxies set the
-        standard ``Retry-After`` header instead, which is honoured as a
-        fallback.
+        Groq 429 bodies carry ``... Please try again in 21.84s.`` for the
+        per-minute (TPM) quota and ``... try again in 43m52.608s`` /
+        ``2h3m5s`` for the daily-token quota.  ``APIStatusError`` surfaces
+        the parsed JSON body as ``exc.body``; some proxies set the standard
+        ``Retry-After`` header instead, which is honoured as a fallback.
 
         Returns the wait in seconds, or ``None`` when no usable value is
         present so the caller can fall back to its exponential backoff.
@@ -487,12 +556,11 @@ class GroqClient:
                 message = str(body["error"].get("message", ""))
         else:
             message = str(body or "")
-        match = _RETRY_AFTER_RE.search(message)
-        if match:
-            try:
-                return float(match.group(1))
-            except ValueError:
-                return None
+        match = _RETRY_AFTER_TEXT_RE.search(message)
+        if match and match.group(1):
+            parsed = _parse_duration(match.group(1))
+            if parsed is not None:
+                return parsed
 
         headers = getattr(getattr(exc, "response", None), "headers", None) or {}
         raw = headers.get("retry-after") or headers.get("Retry-After")
@@ -631,7 +699,6 @@ class GroqClient:
         await self._ensure_client()
 
         active_model = model or self._model
-        last_error: Exception | None = None
 
         # Estimate the token cost of this request BEFORE sending so the
         # daily token budget can refuse before the API burns a 429.  Input is
@@ -642,6 +709,37 @@ class GroqClient:
         estimated_total_tokens = (input_chars // _TOKEN_CHARS_PER_TOKEN) + int(
             max_tokens or _DEFAULT_MAX_TOKENS
         )
+
+        return await self._chat(
+            active_model=active_model,
+            msgs=msgs,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+            estimated_total_tokens=estimated_total_tokens,
+            allow_fallback=True,
+        )
+
+    async def _chat(
+        self,
+        *,
+        active_model: str,
+        msgs: list[dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+        estimated_total_tokens: int,
+        allow_fallback: bool,
+    ) -> str:
+        """Run the request/retry loop for one model, with fallback support.
+
+        ``allow_fallback`` gates the graceful-degradation path: when the
+        active model is exhausted (daily-token 429 or local token-budget
+        refusal) and a different fallback model is configured, the request is
+        retried ONCE with the fallback instead of letting the error propagate
+        (which would otherwise log ``ai_scan_failed`` and force a HOLD).
+        """
+        last_error: Exception | None = None
 
         for attempt in range(1, self._max_retries + 1):
             try:
@@ -684,17 +782,78 @@ class GroqClient:
 
                 self._log.warning(
                     "groq_rate_limited",
+                    model=active_model,
+                    fallback=(active_model == self._fallback_model),
                     attempt=attempt,
                     wait_s=round(wait, 2),
                     retry_after_s=retry_after,
                     max_retries=self._max_retries,
                 )
 
+                # Long server-computed wait (e.g. the daily-token-quota 429
+                # "try again in 43m52.608s"): retrying the SAME primary after
+                # minutes-per-attempt is pointless within this cycle, so route
+                # to the fallback model immediately instead of sleeping.
+                if (
+                    retry_after is not None
+                    and retry_after >= _FALLBACK_LONG_WAIT_S
+                    and self._try_fallback(active_model, allow_fallback)
+                ):
+                    self._log.warning(
+                        "groq_primary_rate_limited_trying_fallback",
+                        model=active_model,
+                        fallback_model=self._fallback_model,
+                        retry_after_s=round(retry_after, 2),
+                    )
+                    return await self._chat(
+                        active_model=self._fallback_model,
+                        msgs=msgs,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        json_mode=json_mode,
+                        estimated_total_tokens=estimated_total_tokens,
+                        allow_fallback=False,
+                    )
+
                 if attempt < self._max_retries:
                     await asyncio.sleep(wait)
                     last_error = exc
+                elif self._try_fallback(active_model, allow_fallback):
+                    return await self._chat(
+                        active_model=self._fallback_model,
+                        msgs=msgs,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        json_mode=json_mode,
+                        estimated_total_tokens=estimated_total_tokens,
+                        allow_fallback=False,
+                    )
                 else:
                     raise
+
+            except RuntimeError as exc:
+                # Local request / token-budget refusal (is_available-trip).
+                # Route to the fallback model once before propagating; an
+                # exhausted fallback still raises so the orchestrator breaks.
+                if self._is_budget_refusal(exc) and self._try_fallback(
+                    active_model, allow_fallback
+                ):
+                    self._log.warning(
+                        "groq_primary_budget_exhausted_trying_fallback",
+                        model=active_model,
+                        fallback_model=self._fallback_model,
+                        reason=str(exc),
+                    )
+                    return await self._chat(
+                        active_model=self._fallback_model,
+                        msgs=msgs,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        json_mode=json_mode,
+                        estimated_total_tokens=estimated_total_tokens,
+                        allow_fallback=False,
+                    )
+                raise
 
             except APIConnectionError as exc:
                 self._total_retries += 1
@@ -702,6 +861,7 @@ class GroqClient:
 
                 self._log.warning(
                     "groq_connection_error",
+                    model=active_model,
                     attempt=attempt,
                     wait_s=round(wait, 2),
                 )
@@ -715,6 +875,7 @@ class GroqClient:
             except APIStatusError as exc:
                 self._log.error(
                     "groq_api_error",
+                    model=active_model,
                     status_code=exc.status_code,
                     response=str(exc.response)[:500],
                 )
@@ -724,6 +885,20 @@ class GroqClient:
         if last_error:
             raise last_error
         return ""
+
+    @staticmethod
+    def _is_budget_refusal(exc: RuntimeError) -> bool:
+        """True when ``exc`` is a local request/token-budget refusal."""
+        text = str(exc).lower()
+        return "rate limit" in text or "token budget" in text
+
+    def _try_fallback(self, active_model: str, allow_fallback: bool) -> bool:
+        """Whether a fallback retry should be attempted for ``active_model``."""
+        return (
+            allow_fallback
+            and bool(self._fallback_model)
+            and active_model != self._fallback_model
+        )
 
     # ------------------------------------------------------------------
     # Structured trading decision
