@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 
 import structlog
 
@@ -248,7 +248,60 @@ class ExchangeAdapter(ABC):
             "step_size": step,
             "min_qty": min_qty,
             "min_notional": min_notional,
+            "tick_size": await self.get_tick_size(symbol),
         }
+
+    async def get_tick_size(self, symbol: str) -> Decimal:
+        """Return the symbol's PRICE_FILTER ``tickSize`` (cached).
+
+        The full exchange info is fetched once per symbol and cached for
+        ``_exchange_info_ttl`` seconds (default 60), mirroring
+        ``_get_lot_filters``.
+        """
+        cache: dict[str, tuple[float, Decimal]]
+        if not hasattr(self, "_price_filter_cache"):
+            self._price_filter_cache: dict[str, tuple[float, Decimal]] = {}
+        cache = self._price_filter_cache
+        ttl = float(getattr(self, "_exchange_info_ttl", 60))
+
+        now = time.monotonic()
+        cached = cache.get(symbol)
+        if cached is not None and (now - cached[0]) < ttl:
+            return cached[1]
+
+        info = await self.get_exchange_info()
+        tick = Decimal(0)
+        for s in info.get("symbols", []):
+            if s.get("symbol") != symbol:
+                continue
+            for f in s.get("filters", []):
+                if f.get("filterType") == "PRICE_FILTER":
+                    tick = Decimal(str(f.get("tickSize", "0")))
+            break
+
+        cache[symbol] = (now, tick)
+        return tick
+
+    async def normalize_price(
+        self,
+        symbol: str,
+        price: Decimal | str | None,
+    ) -> Decimal | None:
+        """Round ``price`` UP/DOWN to the symbol's PRICE_FILTER ``tickSize``.
+
+        Binance rejects a STOP_MARKET / TAKE_PROFIT_MARKET ``triggerPrice``
+        (and any limit ``price``) whose decimal precision exceeds the
+        symbol's tick with error -1111 ("Precision is over the maximum
+        defined for this asset").  Rounds to the nearest tick; returns the
+        price unchanged when no tick size is available.
+        """
+        if price is None:
+            return None
+        q = Decimal(str(price))
+        tick = await self.get_tick_size(symbol)
+        if tick <= Decimal(0):
+            return q
+        return (q / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
 
     async def normalize_quantity(
         self,

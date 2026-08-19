@@ -577,9 +577,13 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         }
 
         if request.price is not None:
-            params["price"] = str(request.price)
+            params["price"] = str(
+                await self.normalize_price(request.symbol, request.price)
+            )
         if request.stop_price is not None:
-            params["stopPrice"] = str(request.stop_price)
+            params["stopPrice"] = str(
+                await self.normalize_price(request.symbol, request.stop_price)
+            )
         if request.time_in_force:
             params["timeInForce"] = request.time_in_force.upper()
         if request.reduce_only:
@@ -649,7 +653,11 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             "quantity": str(quantity),
         }
         if request.stop_price is not None:
-            params["triggerPrice"] = str(request.stop_price)
+            # Quantize the trigger to the symbol's PRICE_FILTER tickSize so
+            # Binance does not reject the bracket with -1111 (precision over
+            # the maximum defined for this asset).
+            trigger = await self.normalize_price(request.symbol, request.stop_price)
+            params["triggerPrice"] = str(trigger)
         if request.time_in_force:
             params["timeInForce"] = request.time_in_force.upper()
         if request.reduce_only:
