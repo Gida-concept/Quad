@@ -743,10 +743,17 @@ class GroqClient:
 
         for attempt in range(1, self._max_retries + 1):
             try:
-                # Check request rate limit before making the request
-                await self._check_rate_limit()
-                # Check the daily TOKEN budget before making the request
-                await self._check_token_budget(estimated_total_tokens)
+                # Local rate / token-budget pre-checks guard the PRIMARY's
+                # quota.  A fallback rescue (``allow_fallback=False``) must NOT
+                # be blocked by them: the fallback model has its own server-side
+                # quota, which the real 429 + backoff path below enforces.  If
+                # the primary was refused solely because its local budget is
+                # spent (shared deque), the fallback would otherwise re-raise
+                # the same refusal and the rescue would never fire -- producing
+                # ai_scan_failed instead of a decision.
+                if allow_fallback:
+                    await self._check_rate_limit()
+                    await self._check_token_budget(estimated_total_tokens)
 
                 create_kwargs: dict[str, Any] = {
                     "model": active_model,

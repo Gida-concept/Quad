@@ -271,3 +271,33 @@ def test_try_fallback_false_when_primary_and_fallback_same():
     c = _make_client()
     c._fallback_model = c._model  # same model: nothing to fall back to
     assert c._try_fallback(c._model, allow_fallback=True) is False
+
+
+def test_primary_budget_exhausted_still_falls_back():
+    """Rescue must fire even when the LOCAL token budget is the wall.
+
+    The fallback has its own server quota; it must not be blocked by the
+    primary's shared budget pre-check (which would re-raise the same refusal
+    and turn the rescue into ai_scan_failed).
+    """
+    import asyncio
+
+    c = _make_client()
+    c._fallback_model = "qwen/qwen3.6-27b"
+    # Exhaust the shared daily token budget (real clock so it stays in window).
+    c._record_token_usage(c._max_tokens_per_day)
+    assert c.is_available() is False
+
+    called = []
+
+    async def fake_create(**kwargs):
+        called.append(kwargs["model"])
+        return _success_response('{"action":"ENTER"}')
+
+    c._client.chat.completions.create = fake_create
+
+    out = asyncio.run(c.chat(system="s", user="u", max_tokens=64))
+    assert out == '{"action":"ENTER"}'
+    # The primary was refused locally (never reached HTTP); only the fallback
+    # made the request and succeeded -- no ai_scan_failed / scanned=0.
+    assert called == ["qwen/qwen3.6-27b"]
