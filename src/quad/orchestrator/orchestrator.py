@@ -1816,6 +1816,11 @@ class QuadOrchestrator:
                 )
                 indicators[key] = {}
 
+        # Merge per-timeframe indicators for this symbol and resolve the
+        # open position side — both needed before the local signal build.
+        indicator_snapshot = self._merge_indicators_for_symbol(indicators, symbol)
+        position_side = self._position_side_for_symbol(context, symbol)
+
         from quad.ai.ta import generate_local_signal
 
         # Extract funding rate for the symbol from the market context.
@@ -1863,8 +1868,6 @@ class QuadOrchestrator:
         # ----------------------------------------------------------------
         from quad.ai.validator import normalize_decision
 
-        position_side = self._position_side_for_symbol(context, symbol)
-        indicator_snapshot = self._merge_indicators_for_symbol(indicators, symbol)
         validator_cfg = cfg.get("ai", {}).get("validator", {})
         gate_mode = validator_cfg.get("gate_mode", "warn")
         min_confidence_to_trade = validator_cfg.get("min_confidence_to_trade", 0.0)
