@@ -642,3 +642,154 @@ def compute_indicators(candles: list[Candle]) -> dict[str, Any]:
             result[f"pattern_{pattern_name}"] = detected
 
     return result
+
+
+# ============================================================================
+# Local signal generator (feeds AI final-judgement prompt)
+# ============================================================================
+
+
+def generate_local_signal(
+    indicators: dict[str, Any],
+    symbol: str,
+    funding_rate: float | None = None,
+    funding_annual_pct: float | None = None,
+) -> dict[str, Any]:
+    """Synthesize a compact local trading signal from pre-computed indicators.
+
+    This is the deterministic, code-based analysis that replaces raw candle
+    feeding to the LLM.  It distills the full indicator set into a single
+    signal dict the AI uses as input for its final ENTER/HOLD/EXIT judgement.
+
+    Parameters
+    ----------
+    indicators:
+        Output of :func:`compute_indicators` for one pair+timeframe.
+    symbol:
+        Trading pair, e.g. ``"BTCUSDT"``.
+    funding_rate:
+        Current per-period funding rate (e.g. ``0.0001`` = 1 bps).
+    funding_annual_pct:
+        Annualized funding cost in percent (e.g. ``10.95``).
+
+    Returns
+    -------
+    dict
+        Compact signal with keys:
+        ``symbol``, ``trend``, ``momentum``, ``volatility``,
+        ``volume``, ``local_direction``, ``local_strength``, ``funding``,
+        ``price``.
+    """
+    trend = indicators.get("trend_regime", "unknown")
+    adx = indicators.get("trend_adx")
+    rsi = indicators.get("momentum_rsi_14")
+    rsi_regime = indicators.get("momentum_rsi_regime", "neutral")
+    macd_cross = indicators.get("momentum_macd_cross", "neutral")
+    macd_hist = indicators.get("momentum_macd_histogram")
+    bb_position = indicators.get("volatility_bb_position")
+    atr_pct = indicators.get("volatility_atr_pct")
+    vol_ratio = indicators.get("volume_sma_20_ratio")
+    vol_spike = indicators.get("volume_spike", False)
+    price_change_pct = indicators.get("price_change_pct")
+    price_current = indicators.get("price_current")
+    stoch_k = indicators.get("momentum_stoch_k")
+    stoch_d = indicators.get("momentum_stoch_d")
+    ema20 = indicators.get("trend_ema_20")
+    ema50 = indicators.get("trend_ema_50")
+
+    # ---- Local directional bias (deterministic) ----
+    score = 0.0  # positive = LONG bias, negative = SHORT bias
+
+    # Trend filter: EMA alignment
+    if ema20 and ema50:
+        if ema20 > ema50:
+            score += 1.0
+        elif ema20 < ema50:
+            score -= 1.0
+
+    # ADX strength amplifier
+    if adx is not None and adx > 20:
+        adx_amp = min(adx / 50, 1.0)
+        if adx > 25:
+            score *= (1.0 + adx_amp)
+
+    # RSI signal
+    if rsi is not None:
+        if rsi < 30:
+            score += 0.5
+        elif rsi > 70:
+            score -= 0.5
+        elif rsi < 45:
+            score += 0.15
+        elif rsi > 55:
+            score -= 0.15
+
+    # MACD cross
+    if macd_cross == "bullish":
+        score += 0.7
+    elif macd_cross == "bearish":
+        score -= 0.7
+
+    # MACD histogram direction
+    if macd_hist is not None:
+        if macd_hist > 0:
+            score += 0.2
+        elif macd_hist < 0:
+            score -= 0.2
+
+    # Volume confirmation
+    if vol_spike and vol_ratio is not None:
+        score *= 1.2  # amplify on volume spike
+
+    # Clamp and classify
+    clamped = max(-3.0, min(3.0, score))
+    raw_strength = abs(clamped) / 3.0
+    strength = round(min(raw_strength, 1.0), 3)
+
+    if clamped > 0.4:
+        local_direction = "LONG"
+    elif clamped < -0.4:
+        local_direction = "SHORT"
+    else:
+        local_direction = "NEUTRAL"
+
+    # ---- Volatility regime ----
+    vol_regime = "normal"
+    if atr_pct is not None:
+        if atr_pct > 3.0:
+            vol_regime = "high"
+        elif atr_pct < 0.8:
+            vol_regime = "low"
+
+    # ---- Funding sentiment ----
+    funding_sentiment = "neutral"
+    if funding_rate is not None:
+        if funding_rate > 0.0005:
+            funding_sentiment = "crowded_long"
+        elif funding_rate < -0.0005:
+            funding_sentiment = "crowded_short"
+
+    return {
+        "symbol": symbol,
+        "price": price_current,
+        "price_change_pct": price_change_pct,
+        "trend": trend,
+        "adx": adx,
+        "rsi": rsi,
+        "rsi_regime": rsi_regime,
+        "macd_cross": macd_cross,
+        "macd_hist": macd_hist,
+        "stoch_k": stoch_k,
+        "stoch_d": stoch_d,
+        "bb_position": bb_position,
+        "volatility": vol_regime,
+        "atr_pct": atr_pct,
+        "volume_ratio": vol_ratio,
+        "volume_spike": vol_spike,
+        "price_vs_ema20": indicators.get("trend_price_vs_ema20"),
+        "funding_rate": funding_rate,
+        "funding_annual_pct": funding_annual_pct,
+        "funding_sentiment": funding_sentiment,
+        "local_direction": local_direction,
+        "local_strength": strength,
+    }

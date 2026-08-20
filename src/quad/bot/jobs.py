@@ -99,13 +99,14 @@ class QuadBotJobs:
         """
         # Gather status
         position_count = 0
-        daily_pnl = Decimal(0)
+        realized_pnl = Decimal(0)
+        unrealized_pnl = Decimal(0)
         circuit_breakers_active = 0
 
         if self._risk_manager:
             try:
                 rs = await self._risk_manager.get_status()
-                daily_pnl = rs.daily_pnl
+                realized_pnl = rs.daily_pnl
                 circuit_breakers_active = sum(
                     1 for cb in rs.circuit_breakers.values() if cb.active
                 )
@@ -122,19 +123,35 @@ class QuadBotJobs:
                 )
                 if exchange_adapter is not None:
                     positions = await exchange_adapter.get_positions()
-                    position_count = (
-                        len(positions) if isinstance(positions, list) else 0
-                    )
+                    if isinstance(positions, list):
+                        position_count = len(positions)
+                        # Hourly message reflects *current* total PnL: today's
+                        # realized (closed) plus floating (unrealized) on any
+                        # open positions.
+                        from quad.types.domain import PositionStatus
+
+                        for p in positions:
+                            if getattr(p, "status", None) != PositionStatus.OPEN:
+                                continue
+                            try:
+                                unrealized_pnl += Decimal(
+                                    str(getattr(p, "unrealized_pnl", "0") or "0")
+                                )
+                            except Exception:
+                                continue
             except Exception as exc:
                 self._log.warning("job_status_positions_error", error=str(exc))
 
-        pnl_emoji = "🟢" if daily_pnl >= 0 else "🔴"
+        total_pnl = realized_pnl + unrealized_pnl
+        pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
         cb_emoji = "⚠️" if circuit_breakers_active > 0 else "✅"
 
         msg = (
             f"📊 *Hourly Status Summary*\n\n"
             f"*Positions:* {position_count} open\n"
-            f"*Daily PnL:* {pnl_emoji} ${float(daily_pnl):,.2f}\n"
+            f"*Total PnL:* {pnl_emoji} ${float(total_pnl):,.2f}\n"
+            f"  · Realized (today): ${float(realized_pnl):,.2f}\n"
+            f"  · Unrealized (open): ${float(unrealized_pnl):,.2f}\n"
             f"*Circuit Breakers:* {cb_emoji} {circuit_breakers_active} active"
         )
 
@@ -143,7 +160,9 @@ class QuadBotJobs:
             "job_status_summary",
             sent=sent,
             positions=position_count,
-            daily_pnl=str(daily_pnl),
+            realized_pnl=str(realized_pnl),
+            unrealized_pnl=str(unrealized_pnl),
+            total_pnl=str(total_pnl),
             breakers_active=circuit_breakers_active,
         )
 

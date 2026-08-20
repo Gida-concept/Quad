@@ -382,36 +382,18 @@ class GroqClient:
     def is_available(self, now: float | None = None) -> bool:
         """Check if the client is available for trading decisions.
 
-        Returns ``True`` only when ALL of:
-        - an API key is configured, AND
-        - the request sliding-window count is below the daily request limit,
-          AND
-        - the rolling daily token usage is below the token budget (when the
-          token throttle is enabled).
+        Availability is determined solely by the presence of an API key.
+        The daily request and token-budget caps were removed: local quota
+        arithmetic no longer gates AI.  Real quota exhaustion is surfaced by
+        the Groq API's own 429s and handled by the retry/backoff/fallback
+        path instead of a local ``is_available()`` veto.
 
         Parameters
         ----------
         now:
-            Optional timestamp override for offline tests.  Production
-            callers omit it.
-
-        The ``_run_ai_rotation`` loop consults this between pairs so it stops
-        scanning (instead of burning HTTP 429s) once the daily token budget
-        is spent.
+            Kept for signature compatibility; unused.
         """
-        if not self._api_key:
-            return False
-        if now is None:
-            now = time.time()
-        self._prune_timestamps(now)
-        if len(self._request_timestamps) >= self._max_requests_per_day:
-            return False
-        self._prune_token_usages(now)
-        if self._token_budget_enabled:
-            used = sum(t for _, t in self._token_usages)
-            if used >= self._max_tokens_per_day:
-                return False
-        return True
+        return bool(self._api_key)
 
     # ------------------------------------------------------------------
     # Token budget (daily token-quota throttle)
@@ -468,69 +450,27 @@ class GroqClient:
         estimate: int,
         now: float | None = None,
     ) -> None:
-        """Refuse a request whose estimate would exceed the daily token budget.
+        """Daily token-budget throttle.
 
-        Also emits one-shot warnings as usage approaches the budget (mirrors
-        the request limiter's warning ladder).
+        No-op: the daily token-budget cap was removed.  Kept for call-site
+        compatibility; real quota limits surface as API 429s and are handled
+        by the retry/backoff/fallback path rather than a local veto.
 
         Parameters
         ----------
         estimate:
-            Estimated token cost of the pending request.
+            Kept for signature compatibility; unused.
         now:
-            Optional timestamp override for offline tests.  Production
-            callers omit it.
+            Kept for signature compatibility; unused.
 
         Raises
         ------
         RuntimeError
-            When ``used + estimate`` would exceed ``max_tokens_per_day``.
-            The message deliberately contains the words "rate limit" so the
-            orchestrator's existing ``RuntimeError`` + "rate limit" break in
-            ``_run_ai_rotation`` also stops the scan for token-budget refusals.
+            Previously raised when ``used + estimate`` would exceed
+            ``max_tokens_per_day``; the daily token-budget cap was removed,
+            so this no longer raises.
         """
-        if not self._token_budget_enabled:
-            return
-        if now is None:
-            now = time.time()
-        self._prune_token_usages(now)
-        used = sum(t for _, t in self._token_usages)
-
-        if used + estimate > self._max_tokens_per_day:
-            self._log.error(
-                "groq_token_budget_exceeded",
-                used=used,
-                estimate=estimate,
-                max_per_day=self._max_tokens_per_day,
-            )
-            raise RuntimeError(
-                f"Groq rate limit reached: daily token budget "
-                f"(used={used}, estimate={estimate}, max_per_day="
-                f"{self._max_tokens_per_day}). "
-                "Skipping AI trading cycle until the window resets."
-            )
-
-        if used >= self._token_warning_level_3 and self._token_warning_sent < 3:
-            self._log.warning(
-                "groq_token_budget_critical",
-                used=used,
-                max_per_day=self._max_tokens_per_day,
-            )
-            self._token_warning_sent = 3
-        elif used >= self._token_warning_level_2 and self._token_warning_sent < 2:
-            self._log.warning(
-                "groq_token_budget_high",
-                used=used,
-                max_per_day=self._max_tokens_per_day,
-            )
-            self._token_warning_sent = 2
-        elif used >= self._token_warning_level_1 and self._token_warning_sent < 1:
-            self._log.warning(
-                "groq_token_budget_warning",
-                used=used,
-                max_per_day=self._max_tokens_per_day,
-            )
-            self._token_warning_sent = 1
+        return
 
     # ------------------------------------------------------------------
     # Rate limiter
@@ -580,49 +520,13 @@ class GroqClient:
             self._request_timestamps.popleft()
 
     async def _check_rate_limit(self) -> None:
-        """Check rate limit and issue warnings if approaching the limit.
+        """Request-rate throttle.
 
-        Raises ``RuntimeError`` if the daily limit has been reached.
+        No-op: the daily request cap was removed.  Kept for call-site
+        compatibility; real quota limits surface as API 429s and are handled
+        by the retry/backoff/fallback path rather than a local veto.
         """
-        now = time.time()
-        self._prune_timestamps(now)
-
-        count = len(self._request_timestamps)
-
-        # Check if limit reached
-        if count >= self._max_requests_per_day:
-            self._log.error(
-                "groq_rate_limit_exceeded",
-                count=count,
-                max_per_day=self._max_requests_per_day,
-            )
-            raise RuntimeError(
-                f"Groq daily request limit reached: {count}/{self._max_requests_per_day}. "
-                "Skipping AI trading cycle until window resets."
-            )
-
-        # Warning levels
-        if count >= self._warning_level_3 and self._rate_limit_warning_sent < 3:
-            self._log.warning(
-                "groq_rate_limit_critical",
-                count=count,
-                max_per_day=self._max_requests_per_day,
-            )
-            self._rate_limit_warning_sent = 3
-        elif count >= self._warning_level_2 and self._rate_limit_warning_sent < 2:
-            self._log.warning(
-                "groq_rate_limit_high",
-                count=count,
-                max_per_day=self._max_requests_per_day,
-            )
-            self._rate_limit_warning_sent = 2
-        elif count >= self._warning_level_1 and self._rate_limit_warning_sent < 1:
-            self._log.warning(
-                "groq_rate_limit_warning",
-                count=count,
-                max_per_day=self._max_requests_per_day,
-            )
-            self._rate_limit_warning_sent = 1
+        return
 
     # ------------------------------------------------------------------
     # Chat completion

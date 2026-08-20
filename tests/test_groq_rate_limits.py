@@ -155,33 +155,40 @@ def _make_client(**token_budget_overrides):
         return GroqClient(api_key="test-key", config=cfg)
 
 
-def test_is_available_false_once_budget_spent():
+def test_is_available_key_only_regardless_of_usage():
     c = _make_client()
     now = 1_700_000_000.0
     assert c.is_available(now) is True
     c._record_token_usage(60_000, now=now - 100)
     assert c.is_available(now) is True
     c._record_token_usage(45_000, now=now - 50)  # 105_000 >= 100_000 budget
-    assert c.is_available(now) is False
+    # Caps removed: availability is key-only and never trips on usage.
+    assert c.is_available(now) is True
 
 
-def test_check_token_budget_raises_rate_limit_error_when_exceeded():
+def test_is_available_false_only_without_api_key():
+    c = _make_client()
+    c._api_key = ""
+    assert c.is_available() is False
+
+
+def test_check_token_budget_noop_after_caps_removed():
     import asyncio
 
     c = _make_client()
     now = 1_700_000_000.0
     c._record_token_usage(90_000, now=now)
-    with pytest.raises(RuntimeError) as ei:
-        asyncio.run(c._check_token_budget(20_000, now=now))
-    assert "rate limit" in str(ei.value).lower()
+    # Cap removed: exceeds use but must not raise.
+    asyncio.run(c._check_token_budget(20_000, now=now))
 
 
-def test_token_usage_resumes_after_window_slides_past_reset():
+def test_availability_ignores_token_usage_window():
     c = _make_client()
     t0 = 1_700_000_000.0
-    c._record_token_usage(100_000, now=t0)  # exhaust the daily budget
+    c._record_token_usage(100_000, now=t0)  # would have exhausted the budget
     assert c.tokens_used_in_window(t0) == 100_000
-    assert c.is_available(t0) is False
+    # Cap removed: availability stays True regardless of usage/window.
+    assert c.is_available(t0) is True
     # One full day + 1s later the spend rolls out of the 86400s window.
     later = t0 + 86_400 + 1
     assert c.tokens_used_in_window(later) == 0
@@ -273,20 +280,20 @@ def test_try_fallback_false_when_primary_and_fallback_same():
     assert c._try_fallback(c._model, allow_fallback=True) is False
 
 
-def test_primary_budget_exhausted_still_falls_back():
-    """Rescue must fire even when the LOCAL token budget is the wall.
+def test_primary_called_even_after_budget_counters_high():
+    """Caps removed: a healthy primary is used even if usage counters are high.
 
-    The fallback has its own server quota; it must not be blocked by the
-    primary's shared budget pre-check (which would re-raise the same refusal
-    and turn the rescue into ai_scan_failed).
+    Previously a full local token budget refused the primary locally and
+    forced a fallback.  With caps removed there is no local veto, so the
+    primary is called directly.
     """
     import asyncio
 
     c = _make_client()
     c._fallback_model = "qwen/qwen3.6-27b"
-    # Exhaust the shared daily token budget (real clock so it stays in window).
+    # Fill the (now-inert) budget counters; must NOT force a fallback.
     c._record_token_usage(c._max_tokens_per_day)
-    assert c.is_available() is False
+    assert c.is_available() is True  # not vetoed
 
     called = []
 
@@ -298,6 +305,4 @@ def test_primary_budget_exhausted_still_falls_back():
 
     out = asyncio.run(c.chat(system="s", user="u", max_tokens=64))
     assert out == '{"action":"ENTER"}'
-    # The primary was refused locally (never reached HTTP); only the fallback
-    # made the request and succeeded -- no ai_scan_failed / scanned=0.
-    assert called == ["qwen/qwen3.6-27b"]
+    assert called == [c._model]  # primary used; no local budget veto

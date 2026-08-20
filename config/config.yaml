@@ -84,12 +84,8 @@ ai:
     price_bracket_tolerance_pct: 0.5
   groq:
     token_budget:
-      enabled: true
-      # Matches the real groq/compound-mini free-tier wall (100K tokens/day
-      # for the served llama-3.3-70b model).  Aligning the local throttle to
-      # this lets is_available() trip before the API starts hammering 429s.
-      max_tokens_per_day: 100000
-      window_seconds: 86400
+      # Daily token-budget cap removed (no local quota veto on AI).
+      enabled: false
   validator:
     gate_mode: "warn"
     min_confidence_to_trade: 0.0

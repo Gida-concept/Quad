@@ -1816,11 +1816,34 @@ class QuadOrchestrator:
                 )
                 indicators[key] = {}
 
-        from quad.ai.prompt import build_trading_prompt
+        from quad.ai.ta import generate_local_signal
 
-        prompts = build_trading_prompt(
-            context=context,
-            indicators=indicators,
+        # Extract funding rate for the symbol from the market context.
+        funding_rate = None
+        funding_annual_pct = None
+        if context.funding_rates:
+            fr = context.funding_rates.get(symbol)
+            if fr is not None:
+                funding_rate = float(getattr(fr, "funding_rate", 0) or 0)
+                # Annualize: funding_rate * 3 per-day * 365 days * 100 = %
+                funding_annual_pct = round(funding_rate * 3 * 365 * 100, 2)
+
+        # Build a compact local signal from the computed indicators.
+        # The AI receives this distilled signal (not raw candles) and makes
+        # only the final ENTER/HOLD/EXIT decision.
+        local_signal = generate_local_signal(
+            indicator_snapshot,
+            symbol=symbol,
+            funding_rate=funding_rate,
+            funding_annual_pct=funding_annual_pct,
+        )
+
+        from quad.ai.prompt import build_final_judgement_prompt
+
+        prompts = build_final_judgement_prompt(
+            local_signal=local_signal,
+            positions=context.positions,
+            account=context.account,
             config=cfg,
         )
         decision = await self._groq_client.decide_trades(  # may raise (rate-limit/API)

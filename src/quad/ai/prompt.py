@@ -394,8 +394,159 @@ def build_trading_prompt(
 
 
 # ============================================================================
-# Optimisation Cycle Prompts
+# Compact final-judgement prompt (local analysis → AI decides)
 # ============================================================================
+
+_FINAL_JUDGEMENT_SYSTEM = """You are a Binance Futures trading AI acting as the FINAL DECISION MAKER.
+
+The bot has already computed all technical analysis locally.  You receive a
+pre-computed LOCAL SIGNAL (indicators, direction, strength, volatility,
+funding) and the current POSITION state.  Your job is ONLY to make the
+final ENTER / HOLD / EXIT call — do NOT re-derive analysis from raw data.
+
+## Rules
+1. Capital preservation first — never risk more than the setup justifies.
+2. The local_direction and local_strength are the bot's analytical view;
+   use them as a strong prior, but you may override when the position
+   context or funding sentiment justifies it.
+3. All orders are MARKET — never suggest limit orders or prices.
+4. ENTER requires a clear LONG or SHORT direction and non-trivial
+   strength (> 0.3).  If strength is too low, HOLD.
+5. EXIT only when the position is open; if flat, you cannot EXIT.
+6. HOLD means no edge — the most common outcome.
+
+## Output — valid JSON only, no prose outside the JSON
+{{
+  "reasoning": "1-2 sentence explanation",
+  "direction": "LONG" | "SHORT" | "NEUTRAL",
+  "action": "ENTER" | "EXIT" | "HOLD",
+  "confidence": 0.0-1.0,
+  "contract": "BTCUSDT" or null,
+  "quantity": 0.001-10 or null
+}}
+
+## Direction & Side
+- State direction only; the bot derives the order side (BUY/SELL) from your
+  direction and the current position.  Never output a side yourself.
+- ENTER requires a clear LONG or SHORT.  NEVER enter with NEUTRAL.
+- EXIT closes the held position.  If flat, HOLD instead."""
+
+
+def build_final_judgement_prompt(
+    local_signal: dict[str, Any],
+    positions: list,
+    account: Any,
+    config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Build a compact prompt for the AI final-judgement call.
+
+    The bot has already computed indicators and derived a local signal
+    via :func:`quad.ai.ta.generate_local_signal`.  This prompt packages
+    that signal plus position/account context into a minimal user prompt
+    so the LLM makes only the final ENTER/HOLD/EXIT call — no raw
+    candles, no full indicator tables.
+
+    Parameters
+    ----------
+    local_signal:
+        Output of :func:`~quad.ai.ta.generate_local_signal`.
+    positions:
+        List of Position objects (from exchange adapter).
+    account:
+        Account summary (total_usdt, balances).
+    config:
+        Optional full config dict (for risk params).
+
+    Returns
+    -------
+    dict
+        With keys ``"system"`` and ``"user"``.
+    """
+    symbol = local_signal.get("symbol", "?")
+
+    # ---- Build compact user prompt ----
+    sections: list[str] = [
+        f"# Final Trade Decision — {symbol}",
+        "",
+    ]
+
+    # Local signal (the bot's own analysis)
+    sections.append("## Local Signal (bot-computed)")
+    sections.append(f"  Trend: {local_signal.get('trend', 'unknown')}")
+    sections.append(f"  ADX: {local_signal.get('adx', 'N/A')}")
+    sections.append(f"  RSI(14): {local_signal.get('rsi', 'N/A')} ({local_signal.get('rsi_regime', 'neutral')})")
+    sections.append(f"  MACD cross: {local_signal.get('macd_cross', 'neutral')}")
+    sections.append(f"  MACD hist: {local_signal.get('macd_hist', 'N/A')}")
+    sections.append(f"  Stoch: %K={local_signal.get('stoch_k', 'N/A')} %D={local_signal.get('stoch_d', 'N/A')}")
+    sections.append(f"  BB position: {local_signal.get('bb_position', 'N/A')}")
+    sections.append(f"  Volatility: {local_signal.get('volatility', 'normal')} (ATR%={local_signal.get('atr_pct', 'N/A')})")
+    sections.append(f"  Volume ratio: {local_signal.get('volume_ratio', 'N/A')} (spike={local_signal.get('volume_spike', False)})")
+    sections.append(f"  Price: {local_signal.get('price', 'N/A')} ({local_signal.get('price_change_pct', 'N/A'):+}%)")
+    sections.append(f"  Price vs EMA20: {local_signal.get('price_vs_ema20', 'N/A')}")
+    sections.append(f"  Funding: rate={local_signal.get('funding_rate', 'N/A')} annual={local_signal.get('funding_annual_pct', 'N/A')}% sentiment={local_signal.get('funding_sentiment', 'neutral')}")
+    sections.append(f"  ➜ LOCAL DIRECTION: {local_signal.get('local_direction', 'NEUTRAL')} (strength: {local_signal.get('local_strength', 0.0)})")
+    sections.append("")
+
+    # Position
+    open_positions = [
+        p for p in positions
+        if getattr(p, "status", None).__class__.__name__ == "OPEN"
+        or str(getattr(p, "status", "")).lower() in ("open", "positionstatus.open")
+    ]
+    # Fallback: just show everything the caller passes
+    if not open_positions:
+        open_positions = [
+            p for p in positions
+            if str(getattr(p, "status", "")).lower().endswith("open")
+        ]
+
+    if open_positions:
+        for p in open_positions:
+            side = getattr(p, "side", "")
+            pos_symbol = getattr(p, "symbol", "") or getattr(p, "contract_symbol", "")
+            entry = getattr(p, "entry_price", 0)
+            mark = getattr(p, "current_price", 0) or getattr(p, "mark_price", 0)
+            upnl = getattr(p, "unrealized_pnl", 0)
+            liq = getattr(p, "liquidation_price", 0)
+            sections.append(f"## Position: {side} {pos_symbol}")
+            sections.append(f"  Entry: {entry} | Mark: {mark} | Liq: {liq}")
+            sections.append(f"  Unrealized PnL: ${upnl}")
+            sections.append("")
+        sections.append("Note: You hold an open position. EXIT to close it.")
+    else:
+        sections.append("## Position: flat")
+        sections.append("Note: No open position. ENTER to open one (requires strong local_direction).")
+    sections.append("")
+
+    # Account
+    if account is not None:
+        total = getattr(account, "total_usdt", 0)
+        sections.append(f"## Account: ${float(total):,.2f} USDT")
+    sections.append("")
+
+    # Risk params (compact)
+    if config:
+        risk = config.get("risk", {}) or {}
+        trading = config.get("trading", {}) or {}
+        max_leverage = trading.get("max_leverage", "?")
+        max_daily_loss = risk.get("max_daily_loss_usd", "?")
+        sections.append(f"## Risk: max_leverage={max_leverage}x, max_daily_loss=${max_daily_loss}")
+        sections.append("")
+
+    sections.append("## Decision")
+    sections.append(
+        "Based on the local signal and position state above, choose exactly one action: "
+        "ENTER (open new), EXIT (close current), or HOLD (do nothing). "
+        "Reply with valid JSON only."
+    )
+
+    user_prompt = "\n".join(sections)
+
+    return {
+        "system": _FINAL_JUDGEMENT_SYSTEM,
+        "user": user_prompt,
+    }
+
 
 OPTIMIZATION_SYSTEM_PROMPT: str = """You are a futures trading strategy optimization analyst. Your job is to review recent trading performance and recommend concrete, actionable improvements.
 
