@@ -2502,16 +2502,59 @@ class QuadOrchestrator:
                 status=getattr(order_result, "status", "unknown"),
             )
 
+            # Inspect the exchange-side status before treating the action as
+            # successful.  The execution engine returns ``REJECTED`` (via
+            # ``_rejected_result``) when the dry-run guard trips, the risk gate
+            # rejects, quantity normalization fails, or submission raises.
+            # Returning ``True`` for a rejected order would make the rotation
+            # loop advance as if a position opened — producing phantom trades,
+            # skipped rotation cycles, and stale ``outcome='open'`` rows.
+            # Mirror the confirmation logic in ``_close_all_positions``.
+            order_status = getattr(order_result, "status", "unknown")
+            if order_status not in ("FILLED", "NEW", "PARTIALLY_FILLED"):
+                self._log.warning(
+                    "ai_action_not_confirmed",
+                    action=action_type,
+                    contract=contract_symbol,
+                    status=order_status,
+                )
+                return False
+
+            # Mark the logged decision row as executed so the Phase-3 metrics
+            # / prompt context (prompt.py counts ``executed``) reflects reality.
+            # ``decision["db_id"]`` is stashed by _log_ai_decision; when the
+            # DB path was skipped it is absent and we simply no-op.
+            decision_id = decision.get("db_id")
+            if decision_id is not None and self._db_manager is not None:
+                try:
+                    from quad.persistence.repositories import DecisionRepository
+
+                    DecisionRepository(self._db_manager).update(
+                        decision_id, executed=1
+                    )
+                except Exception:
+                    self._log.warning(
+                        "ai_decision_executed_flag_update_failed",
+                        decision_id=decision_id,
+                    )
+
             # Notify on successful execution (ENTER, EXIT, ADJUST, ROLL).
             # ENTER alerts always include the computed SL/TP brackets.
             if action_type in ("ENTER", "EXIT"):
                 exit_pnl: str | None = None
                 if action_type == "EXIT":
+                    # Pass the entry price stashed on the EXIT action's
+                    # metadata (captured from the live position at decision
+                    # time) as a fallback for stale position books.
+                    entry_hint = Decimal(
+                        str(sized_action.metadata.get("entry_price", "0") or "0")
+                    ) or None
                     exit_pnl = await self._build_exit_pnl_text(
                         contract_symbol,
                         side,
                         Decimal(str(sized_action.quantity or 0)),
                         order_result,
+                        entry_price_hint=entry_hint,
                     )
                 await self._notify_trade(
                     action_type=action_type,
@@ -2544,12 +2587,21 @@ class QuadOrchestrator:
         side: str,
         quantity: Decimal,
         order_result: Any,
+        entry_price_hint: Decimal | None = None,
     ) -> str | None:
         """Build the ``$x.xx (y%)`` PnL line for a closed position.
 
         Uses the exchange fill price when available, otherwise the live mark
         price, against the position's stored entry price.  Returns ``None``
         (no PnL line) when no entry price or exit price can be derived.
+
+        ``entry_price_hint`` is the entry price captured on the closing
+        action's metadata at decision time (see ``_execute_ai_action`` EXIT
+        branch).  It is used as a fallback when the local position book is
+        stale / the position has already been removed from the exchange's
+        open-positions list at the moment of the EXIT — the common case where
+        the bot closes a position and the exchange drops it before the PnL
+        notification fires.
         """
         try:
             positions = await self._exchange_adapter.get_positions()
@@ -2562,11 +2614,13 @@ class QuadOrchestrator:
                 ),
                 None,
             )
-            entry_price = (
-                Decimal(str(getattr(held, "entry_price", 0) or 0))
-                if held is not None
-                else Decimal(0)
-            )
+            # Primary source: the live position's entry price.  Fallback:
+            # the entry price stashed on the EXIT action's metadata (captured
+            # before submission), so a stale/no position still yields PnL.
+            raw_entry = getattr(held, "entry_price", 0) if held is not None else None
+            if not raw_entry and entry_price_hint is not None:
+                raw_entry = entry_price_hint
+            entry_price = Decimal(str(raw_entry or 0))
             # Prefer the exchange fill price; fall back to the mark price.
             exit_price = Decimal(0)
             fills = getattr(order_result, "fills", None) or []
@@ -2669,10 +2723,15 @@ class QuadOrchestrator:
         self,
         decision: dict[str, Any],
         context: Any,
-    ) -> None:
-        """Log an AI decision to the database DecisionModel table."""
+    ) -> int | None:
+        """Log an AI decision to the database DecisionModel table.
+
+        Returns the generated ``decision_id`` (or ``None`` when the DB is
+        unavailable / the INSERT failed) so callers can later mark the row
+        as ``executed=1`` after a confirmed fill.
+        """
         if self._db_manager is None:
-            return
+            return None
 
         from quad.persistence.models import DecisionModel
         from quad.persistence.repositories import DecisionRepository
@@ -2698,7 +2757,7 @@ class QuadOrchestrator:
                     entry_price = str(mark_prices.get(symbol) or "")
                 except Exception:
                     entry_price = ""
-            await repo.create(
+            decision_id = await repo.create(
                 DecisionModel(
                     id=0,  # auto-generated by AUTOINCREMENT
                     timestamp=int(time.time()),
@@ -2728,8 +2787,14 @@ class QuadOrchestrator:
                     outcome="open" if action == "ENTER" else "flat",
                 )
             )
+            # Stash the DB id back on the decision dict so the execution
+            # path (_execute_ai_action) can flip `executed=1` after a
+            # confirmed fill, instead of leaving every row at 0.
+            decision["db_id"] = decision_id
+            return decision_id
         except Exception as exc:
             self._log.warning("ai_decision_db_log_error", error=str(exc))
+            return None
 
     async def _reconcile_decision_outcomes(self, positions: Any) -> None:
         """Resolve open ENTER decision outcomes against the live position set.

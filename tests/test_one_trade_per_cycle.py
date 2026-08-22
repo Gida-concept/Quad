@@ -556,3 +556,198 @@ def test_sizer_preserves_serial_close_quantity():
     sized = __import__("asyncio").run(sizer.compute_size(close, context))
 
     assert sized.quantity == Decimal("0.3")  # exact held quantity preserved
+
+
+# ---------------------------------------------------------------------------
+# 5. Bug fixes: REJECTED order result + executed flag + stale PnL
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_ai_action_returns_false_on_rejected_status():
+    """Bug 1: a REJECTED OrderResult must return False so the rotation loop
+    does not advance as if a position opened."""
+    from quad.types.domain import OrderResult
+
+    orch = _orch()
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._close_all_positions = AsyncMock(return_value=True)
+    orch._risk_manager = AsyncMock()
+    orch._risk_manager.evaluate = AsyncMock(
+        return_value=MagicMock(passed=True, reason="", gate="", details={})
+    )
+    orch._execution_engine = AsyncMock()
+    orch._execution_engine.execute = AsyncMock(
+        return_value=OrderResult(
+            order_id=0,
+            symbol="BTCUSDT",
+            side="BUY",
+            status="REJECTED",
+            fills=[],
+        )
+    )
+    orch._db_manager = None
+    orch._compute_bracket_prices = AsyncMock(
+        return_value=(Decimal("64610"), Decimal("65650"))
+    )
+    orch._notify_trade = AsyncMock()
+
+    decision = {
+        "action": "ENTER",
+        "contract": "BTCUSDT",
+        "quantity": 0.01,
+        "side": "BUY",
+        "direction": "LONG",
+        "strategy": "ai_default",
+        "reasoning": "test",
+        "confidence": 0.9,
+    }
+    result = await orch._execute_ai_action(
+        decision, StrategyContext(config=orch._config_dict)
+    )
+
+    assert result is False
+    orch._notify_trade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_ai_action_updates_executed_flag_on_fill():
+    """Bug 2: on a FILLED order the decision row must be marked executed=1."""
+    from quad.types.domain import OrderResult
+    from quad.types.risk import Action
+
+    orch = _orch()
+    # Wire a mock DB manager with a DecisionRepository that records update() calls.
+    mock_db = MagicMock()
+    orch._db_manager = mock_db
+
+    repo_calls: list = []
+
+    class FakeRepo:
+        def __init__(self, *a, **kw):
+            pass
+
+        def update(self, id, **updates):
+            repo_calls.append((id, updates))
+
+    import quad.persistence.repositories as repos_mod
+
+    orig_repo = getattr(repos_mod, "DecisionRepository", None)
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._close_all_positions = AsyncMock(return_value=True)
+    orch._risk_manager = AsyncMock()
+    orch._risk_manager.evaluate = AsyncMock(
+        return_value=MagicMock(passed=True, reason="", gate="", details={})
+    )
+    orch._execution_engine = AsyncMock()
+    orch._execution_engine.execute = AsyncMock(
+        return_value=OrderResult(
+            order_id=1,
+            symbol="BTCUSDT",
+            side="BUY",
+            status="FILLED",
+            fills=[{"price": "65000", "qty": "0.01"}],
+        )
+    )
+    orch._compute_bracket_prices = AsyncMock(
+        return_value=(Decimal("64610"), Decimal("65650"))
+    )
+    orch._notify_trade = AsyncMock()
+
+    decision = {
+        "action": "ENTER",
+        "contract": "BTCUSDT",
+        "quantity": 0.01,
+        "side": "BUY",
+        "direction": "LONG",
+        "strategy": "ai_default",
+        "reasoning": "test",
+        "confidence": 0.9,
+        "db_id": 42,
+    }
+
+    # Monkeypatch DecisionRepository inside the method's local import.
+    import src.quad.orchestrator.orchestrator as orch_mod_mod
+
+    orig = orch_mod_mod.DecisionRepository if hasattr(orch_mod_mod, "DecisionRepository") else None
+
+    # The method does `from quad.persistence.repositories import DecisionRepository`
+    # at call time, so patch the module attribute.
+    import sys
+
+    quad_repos = sys.modules.get("quad.persistence.repositories")
+    if quad_repos:
+        orig_repo_obj = quad_repos.DecisionRepository
+        quad_repos.DecisionRepository = FakeRepo
+    try:
+        result = await orch._execute_ai_action(
+            decision, StrategyContext(config=orch._config_dict)
+        )
+    finally:
+        if quad_repos:
+            quad_repos.DecisionRepository = orig_repo_obj
+
+    assert result is True
+    assert repo_calls == [(42, {"executed": 1})]
+
+
+@pytest.mark.asyncio
+async def test_build_exit_pnl_uses_entry_price_hint_when_position_stale():
+    """Bug 2 (PnL): when the live position book is stale (held=None), the
+    entry price from the action metadata must be used instead of returning None."""
+    from quad.types.domain import OrderResult
+
+    orch = _orch()
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._exchange_adapter.get_mark_price = AsyncMock(return_value="66000")
+
+    order_result = OrderResult(
+        order_id=1,
+        symbol="BTCUSDT",
+        side="SELL",
+        status="FILLED",
+        fills=[{"price": "66000", "qty": "0.01"}],
+    )
+
+    pnl = await orch._build_exit_pnl_text(
+        "BTCUSDT",
+        "LONG",
+        Decimal("0.01"),
+        order_result,
+        entry_price_hint=Decimal("60000"),
+    )
+    # (66000 - 60000) * 0.01 = 60.00
+    assert pnl is not None
+    assert "$60.00" in pnl
+
+
+@pytest.mark.asyncio
+async def test_build_exit_pnl_returns_none_when_no_entry_or_exit_price():
+    """Bug 2 (PnL): when neither the live position nor the hint provides an
+    entry price AND no exit price can be derived, return None."""
+    from quad.types.domain import OrderResult
+
+    orch = _orch()
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._exchange_adapter.get_mark_price = AsyncMock(return_value="0")
+
+    order_result = OrderResult(
+        order_id=1,
+        symbol="BTCUSDT",
+        side="SELL",
+        status="FILLED",
+        fills=[{"price": "0", "qty": "0.01"}],
+    )
+
+    pnl = await orch._build_exit_pnl_text(
+        "BTCUSDT",
+        "LONG",
+        Decimal("0.01"),
+        order_result,
+        entry_price_hint=None,
+    )
+    assert pnl is None
