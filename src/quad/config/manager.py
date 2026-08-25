@@ -48,6 +48,9 @@ ENV_VAR_MAP: dict[str, str] = {
     "QUAD_DSN": "persistence.dsn",
     "QUAD_CONFIG_DIR": "config_dir",
     "BINANCE_API_KEY": "exchange.api_key",
+    "BYBIT_API_KEY": "exchange.api_key",
+    "BYBIT_API_SECRET": "exchange.api_secret",
+    "BYBIT_TESTNET": "exchange.testnet",
     "BINANCE_API_SECRET": "exchange.api_secret",
     "BINANCE_TESTNET": "exchange.testnet",
     "QUAD_AI_ENABLED": "ai.enabled",
@@ -231,11 +234,11 @@ class ConfigManager:
         """Return the current trading mode.
 
         Returns:
-            ``"binance"`` or ``"dry_run"``, retrieved from
+            ``"bybit"`` or ``"dry_run"``, retrieved from
             the ``_mode`` internal key (set via ``QUAD_MODE`` env var
-            or runtime override). Defaults to ``"binance"``.
+            or runtime override). Defaults to ``"bybit"``.
         """
-        return str(self.get("_mode", "binance"))
+        return str(self.get("_mode", "bybit"))
 
     def get_default_strategy(self) -> str:
         """Return the configured default strategy name.

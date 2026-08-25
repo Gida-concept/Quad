@@ -33,10 +33,11 @@ def _gateway(adapter) -> OrderGateway:
 
 
 def test_refresh_state_resolves_ghost_order_not_polled_again():
-    """A tracked order Binance says doesn't exist is removed from active once."""
+    """A tracked order the exchange says doesn't exist is removed from active once."""
     adapter = MagicMock()
     adapter.get_open_orders = AsyncMock(return_value=[])  # not an open order
     adapter.get_order_status = AsyncMock(side_effect=_NOT_FOUND_ERR)
+    adapter.is_order_not_found = MagicMock(return_value=True)
 
     gw = _gateway(adapter)
     ghost = Order(
@@ -66,6 +67,7 @@ def test_refresh_state_keeps_order_on_transient_error():
     adapter.get_order_status = AsyncMock(
         side_effect=RuntimeError("Connection reset by peer")
     )
+    adapter.is_order_not_found = MagicMock(return_value=False)
     gw = _gateway(adapter)
     order = Order(
         id=42,

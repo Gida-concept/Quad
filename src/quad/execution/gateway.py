@@ -367,7 +367,7 @@ class OrderGateway:
                     local_order.filled_qty = ex_order.filled_qty
                     local_order.updated_at = int(time.time() * 1000)
                 except Exception as exc:
-                    if self._is_order_not_found(exc):
+                    if self._exchange.is_order_not_found(exc):
                         # The exchange no longer knows this order (cancelled
                         # / expired / filled-and-closed -- e.g. TP-SL brackets
                         # left behind after a position was flattened).  It
@@ -419,18 +419,6 @@ class OrderGateway:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _is_order_not_found(exc: Exception) -> bool:
-        """True when the exchange reports the order no longer exists (-2013).
-
-        Binance returns ``-2013 "Order does not exist."`` (HTTP 400) when a
-        queried order has been cancelled, expired, or filled-and-removed (or
-        is an algo/conditional order that is no longer tracked).  These can
-        never return to open orders, so they should be resolved locally.
-        """
-        text = str(exc).lower()
-        return "does not exist" in text or "-2013" in text
 
     def _move_to_completed(self, client_order_id: str) -> None:
         """Move an order from active tracking to the completed ring buffer."""

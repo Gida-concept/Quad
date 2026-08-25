@@ -1,7 +1,7 @@
-"""Pluggable exchange adapter ABC for Binance Futures trading.
+"""Pluggable exchange adapter ABC for USD-margin futures trading.
 
-Every exchange adapter — live Binance, testnet, or mock — implements
-this interface so the rest of the application remains exchange-agnostic.
+Every exchange adapter — live, testnet, or backtest — implements this
+interface so the rest of the application remains exchange-agnostic.
 
 All monetary values use ``Decimal`` for precision.
 """
@@ -21,11 +21,42 @@ from quad.types.domain import (
     OrderRequest,
     OrderResult,
     Position,
+    Trade,
 )
 from quad.types.exchange import AccountUpdate
 from quad.types.market import FundingRate
 
 log = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Shared exchange error hierarchy
+# ---------------------------------------------------------------------------
+# Both adapters raise these so higher layers (gateway, orchestrator) can catch
+# exchange failures by type regardless of which exchange produced them.
+
+class ExchangeError(Exception):
+    """Base exception for exchange errors."""
+
+
+class ExchangeConnectionError(ExchangeError):
+    """Raised when the exchange is unreachable."""
+
+
+class ExchangeAuthError(ExchangeError):
+    """Raised on authentication failure (401/403)."""
+
+
+class ExchangeRateLimitError(ExchangeError):
+    """Raised on 429 rate-limit breach."""
+
+
+class ExchangeBannedError(ExchangeError):
+    """Raised on 418 IP ban."""
+
+
+class ExchangeOrderError(ExchangeError):
+    """Raised on order-related errors."""
 
 
 class ExchangeAdapter(ABC):
@@ -172,6 +203,31 @@ class ExchangeAdapter(ABC):
 
         Returns:
             A list of ``Order`` dataclasses for every open order.
+        """
+        ...
+
+    @abstractmethod
+    async def get_user_trades(
+        self, symbol: str | None = None, limit: int = 500
+    ) -> list[Trade]:
+        """Fetch executed fills (income history) for the account.
+
+        This is the source of truth for CLOSED legs.  The bot's
+        ``trades`` journal only captured opening fills before this method
+        existed, so SELL/exit legs (TP/SL brackets, exchange-triggered
+        closes) never appeared and any daily-PnL computed from the journal
+        was meaningless.  Implementing it lets the execution engine ingest
+        both legs so the journal and daily PnL match reality.
+
+        Args:
+            symbol: Optional symbol filter.  If ``None``, returns trades
+                for all symbols the account has traded.
+            limit: Maximum number of fills to return (most-recent first).
+
+        Returns:
+            A list of ``Trade`` dataclasses.  Each fill carries ``side``
+            (BUY/SELL), ``price``, ``quantity``, ``fee``, and (where the
+            exchange provides it) an aggregate ``pnl``.
         """
         ...
 
@@ -447,3 +503,26 @@ class ExchangeAdapter(ABC):
             Server time in unix milliseconds.
         """
         ...
+
+    # ------------------------------------------------------------------
+    # Exchange-specific error semantics (override per adapter)
+    # ------------------------------------------------------------------
+
+    def is_margin_mode_already_set(self, exc: Exception) -> bool:
+        """Whether an exception means the requested margin mode is already active.
+
+        Some exchanges raise an error when you try to set a margin/position
+        mode that is already in effect. The orchestrator traps this as a benign
+        no-op rather than a setup failure. Default ``False``; adapters override
+        with their own error-code check.
+        """
+        return False
+
+    def is_order_not_found(self, exc: Exception) -> bool:
+        """Whether an exception means the order no longer exists on the exchange.
+
+        Used to resolve ghost orders locally (cancelled / expired / filled-and-
+        removed). Default ``False``; adapters override with their own error-code
+        check.
+        """
+        return False

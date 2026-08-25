@@ -8,7 +8,7 @@
 |---|---|---|
 | Python | 3.12+ | Required |
 | Docker & Docker Compose | Docker 24+, Compose 2.20+ | Optional, recommended for production |
-| Binance Options Account | -- | API keys with trading permissions |
+| Bybit USDT Perpetual Account | -- | API keys with trading permissions (V5 API, category=linear) |
 | Telegram Bot Token | -- | From @BotFather (required for Telegram interface) |
 | NTP Sync | -- | Clock must be within 1 second of UTC |
 | Memory | 256 MB minimum | 512 MB recommended |
@@ -40,7 +40,7 @@ mkdir -p config data
 # Copy environment template
 cp .env.example .env
 
-# Edit .env with your Binance API keys
+# Edit .env with your Bybit API keys
 # (Only needed for live or testnet trading)
 
 # Create local config overrides
@@ -141,19 +141,17 @@ services:
 quad start --dry-run
 ```
 
-**Staging:**
+**Staging (testnet):**
 ```bash
-# Docker, testnet, paper trading
-# Set BINANCE_TESTNET=true in .env
-# Set QUAD_MODE=paper
+# Bybit testnet (default)
+# BYBIT_TESTNET=true in .env (or omit — testnet is the default)
 docker-compose up -d
 ```
 
-**Production:**
+**Production (live):**
 ```bash
-# Docker, live trading
-# Set BINANCE_TESTNET=false in .env
-# Set QUAD_MODE=live
+# Bybit live trading
+# Set BYBIT_TESTNET=false in .env
 # Ensure API keys have trading-only permissions
 docker-compose up -d
 ```
@@ -384,7 +382,7 @@ curl http://localhost:9090/metrics
 | Area | Action | Notes |
 |---|---|---|
 | Firewall | Allow only port 22 (SSH) and 9090 (health, internal only) | Never expose 9090 to the public internet |
-| Binance API Keys | Create keys with trading only (disable withdrawals) | Rotate keys every 90 days |
+| Bybit API Keys | Create keys with trading only (disable withdrawals) | Rotate keys every 90 days |
 | Docker Security | Run container as non-root | Add `user: "1000:1000"` to compose services |
 | Database Access | Restrict PostgreSQL access to trusted network | Use firewall or pg_hba.conf rules |
 | Secrets | Store API keys in `.env`, never in code | Keep `.env` out of version control |

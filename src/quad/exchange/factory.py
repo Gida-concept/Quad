@@ -11,8 +11,7 @@ import os
 import structlog
 
 from quad.exchange.base import ExchangeAdapter
-from quad.exchange.binance import BinanceFuturesAdapter
-from quad.exchange.mock import MockAdapter
+from quad.exchange.bybit import BybitFuturesAdapter
 
 logger = structlog.get_logger(__name__)
 
@@ -27,50 +26,50 @@ def create_exchange(
     1. ``config["exchange.mode"]`` (explicit mode key)
     2. ``config["exchange"]["name"]`` (nested config section)
     3. ``config.get("exchange.name")`` (flat/dot-notation)
-    4. Defaults to ``"binance"``
+    4. Defaults to ``"bybit"``
+
+    Only Bybit USDT-perpetual is supported.  The bot targets Bybit's
+    ``category=linear`` (USDT perpetual) market; testnet is the default
+    safety environment and live is opt-in via ``exchange.testnet: false``.
 
     Args:
         config: Application configuration dictionary.  May be ``None``
-            (all defaults are used, which resolves to binance testnet).
+            (all defaults are used, which resolves to Bybit testnet).
 
     Returns:
         An initialized ``ExchangeAdapter`` instance.
 
     Raises:
-        ValueError: If the configured mode is not one of
-            ``binance`` or ``mock``.
+        ValueError: If the configured mode is not ``bybit``.
 
     Examples::
 
-        # Binance (testnet or live)
+        # Bybit (testnet or live)
         adapter = create_exchange({
-            "exchange.name": "binance",
+            "exchange.name": "bybit",
             "exchange.testnet": True,
         })
-
-        # Mock for testing
-        adapter = create_exchange({"exchange.name": "mock"})
     """
     cfg = config or {}
 
     # Determine mode using nested lookup (flat dot-notation keys don't work with dict.get)
-    mode = _nested_get(cfg, "exchange", "name") or "binance"
+    mode = _nested_get(cfg, "exchange", "name") or "bybit"
 
     mode = str(mode).lower().strip()
     logger.info("create_exchange", mode=mode)
 
-    if mode == "binance":
+    if mode == "bybit":
         exchange_cfg = cfg["exchange"]
-        api_key = exchange_cfg.get("api_key") or os.environ.get("BINANCE_API_KEY", "")
+        api_key = exchange_cfg.get("api_key") or os.environ.get("BYBIT_API_KEY", "")
         api_secret = exchange_cfg.get("api_secret") or os.environ.get(
-            "BINANCE_API_SECRET", ""
+            "BYBIT_API_SECRET", ""
         )
         testnet = _coerce_bool(
-            exchange_cfg.get("testnet") or os.environ.get("BINANCE_TESTNET", "")
+            exchange_cfg.get("testnet") or os.environ.get("BYBIT_TESTNET", "")
         )
         rate_limit = exchange_cfg.get("rate_limit") or {}
 
-        return BinanceFuturesAdapter(
+        return BybitFuturesAdapter(
             api_key=api_key,
             api_secret=api_secret,
             testnet=testnet,
@@ -78,10 +77,7 @@ def create_exchange(
             config=cfg,
         )
 
-    if mode == "mock":
-        return MockAdapter()
-
-    msg = f"Unknown exchange mode: '{mode}'. Expected one of: binance, mock."
+    msg = f"Unknown exchange mode: '{mode}'. Expected one of: bybit."
     raise ValueError(msg)
 
 

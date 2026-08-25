@@ -1,7 +1,7 @@
 """Regression tests for the 2026-08-16 one-trade-per-cycle fixes.
 
 Covers:
-- Binance order status/cancel calls now include the required ``symbol``.
+- Order status/cancel calls now include the required ``symbol``.
 - ENTER is blocked unless the account is flat (serial mode).
 - ENTER is blocked when SL/TP brackets cannot be computed.
 - ENTER / EXIT Telegram alerts include SL/TP and PnL.
@@ -14,8 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from quad.exchange.base import ExchangeAdapter
-from quad.exchange.binance import BinanceFuturesAdapter
-from quad.exchange.mock import MockAdapter
+from quad.exchange.bybit import BybitFuturesAdapter
 from quad.orchestrator.orchestrator import QuadOrchestrator
 from quad.risk.sizing import PositionSizer
 from quad.types.risk import Action
@@ -74,11 +73,9 @@ def test_base_adapter_signatures_accept_symbol():
     assert "symbol" in sig.parameters
     sig = inspect.signature(ExchangeAdapter.get_order_status)
     assert "symbol" in sig.parameters
-    sig = inspect.signature(BinanceFuturesAdapter.cancel_order)
+    sig = inspect.signature(BybitFuturesAdapter.cancel_order)
     assert "symbol" in sig.parameters
-    sig = inspect.signature(BinanceFuturesAdapter.get_order_status)
-    assert "symbol" in sig.parameters
-    sig = inspect.signature(MockAdapter.get_order_status)
+    sig = inspect.signature(BybitFuturesAdapter.get_order_status)
     assert "symbol" in sig.parameters
 
 
@@ -86,7 +83,7 @@ def test_base_adapter_signatures_accept_symbol():
 async def test_gateway_passes_symbol_to_get_order_status():
     from quad.execution.gateway import OrderGateway
 
-    exchange = AsyncMock(spec=MockAdapter)
+    exchange = AsyncMock(spec=BybitFuturesAdapter)
     exchange.get_order_status = AsyncMock(
         return_value=Order(id=42, symbol="BTCUSDT", status="FILLED")
     )
@@ -117,7 +114,7 @@ async def test_gateway_passes_symbol_to_get_order_status():
 async def test_gateway_passes_symbol_to_cancel():
     from quad.execution.gateway import OrderGateway
 
-    exchange = AsyncMock(spec=MockAdapter)
+    exchange = AsyncMock(spec=BybitFuturesAdapter)
     exchange.cancel_order = AsyncMock(return_value=True)
     gateway = OrderGateway(
         exchange,
@@ -146,7 +143,7 @@ async def test_gateway_passes_symbol_to_cancel():
 async def test_reconciler_passes_symbol():
     from quad.execution.reconciler import FillReconciler
 
-    exchange = AsyncMock(spec=MockAdapter)
+    exchange = AsyncMock(spec=BybitFuturesAdapter)
     exchange.get_order_status = AsyncMock(
         return_value=Order(id=42, symbol="BTCUSDT", status="FILLED")
     )
@@ -441,7 +438,7 @@ async def test_engine_persists_trade_after_fill():
             "execution": {"default_order_type": "MARKET"},
         }
         engine = ExecutionEngine(
-            exchange_adapter=AsyncMock(spec=MockAdapter),
+            exchange_adapter=AsyncMock(spec=BybitFuturesAdapter),
             risk_manager=MagicMock(),
             db_manager=db,
             config=gateway_cfg,
@@ -541,7 +538,7 @@ def test_sizer_preserves_serial_close_quantity():
 
     context = StrategyContext(
         config={},
-        account=Account(id="x", exchange="mock", total_usdt=Decimal("10000")),
+        account=Account(id="x", exchange="bybit", total_usdt=Decimal("10000")),
     )
     close = Action(
         type="EXIT",

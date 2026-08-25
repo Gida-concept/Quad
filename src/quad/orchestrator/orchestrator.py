@@ -4,7 +4,7 @@ Wires all subsystems together and manages the full trading lifecycle:
 
     - Configuration loading (4-layer merge)
     - Database initialization and migrations
-    - Exchange adapter creation (binance / mock)
+    - Exchange adapter creation (bybit)
     - Market data engine (WebSocket + cache + buffers)
     - Risk management (gates, circuit breakers, position sizing)
     - Strategy evaluation (all registered strategies)
@@ -111,7 +111,7 @@ class QuadOrchestrator:
 
         # Cached config dict (used by multiple subsystems)
         self._config_dict: dict[str, Any] = {}
-        self._mode: str = "binance"
+        self._mode: str = "bybit"
         self._cycle_interval: int = 60
 
         # AI-first mode tracking
@@ -418,18 +418,18 @@ class QuadOrchestrator:
         """Create and connect the exchange adapter.
 
         Maps ``QUAD_MODE`` to the exchange implementation:
-            - ``"dry_run"`` -> binance with testnet=True
-            - ``"binance"`` -> configured exchange (testnet or live)
+            - ``"dry_run"`` -> bybit with testnet=True
+            - ``"bybit"`` -> configured exchange (testnet or live)
         """
         # Override exchange name based on mode
         mode = self._mode
         exchange_cfg: dict[str, Any] = dict(self._config_dict["exchange"])
 
         if mode == "dry_run":
-            exchange_cfg["name"] = "binance"
+            exchange_cfg["name"] = "bybit"
             exchange_cfg["testnet"] = True
 
-        # Ensure rate_limit is a dict (for Binance adapter)
+        # Ensure rate_limit is a dict (for the exchange adapter)
         if not isinstance(exchange_cfg.get("rate_limit"), dict):
             exchange_cfg["rate_limit"] = {}
 
@@ -490,7 +490,7 @@ class QuadOrchestrator:
                     margin_mode=margin_mode,
                 )
             except Exception as exc:
-                if _is_margin_mode_already_set(exc):
+                if self._exchange_adapter.is_margin_mode_already_set(exc):
                     # Binance -4046 "No need to change margin type." — the
                     # symbol is already in the requested margin mode, so the
                     # call is a benign no-op.  Log at info, not a warning.
@@ -3331,13 +3331,3 @@ def _dot_get(d: dict[str, Any], key: str, default: Any = None) -> Any:
     return current
 
 
-def _is_margin_mode_already_set(exc: Exception) -> bool:
-    """Whether an exception is Binance's -4046 "no need to change margin type".
-
-    ``POST /fapi/v1/marginType`` returns HTTP 400 with code ``-4046`` when the
-    symbol is already in the requested margin mode.  The adapter raises this as
-    an ``ExchangeOrderError``; the orchestrator treats it as a benign no-op
-    (the desired mode is already active) rather than a setup failure.
-    """
-    text = str(exc)
-    return "-4046" in text and "No need to change margin type" in text

@@ -1,5 +1,5 @@
-# Quad — Minimal Configuration for BTCUSDT Futures Bot
-_mode: "binance"
+# Quad — Minimal Configuration for BTCUSDT USDT-Perpetual Bot (Bybit)
+_mode: "bybit"
 _dry_run: true
 
 trading:
@@ -18,7 +18,7 @@ trading:
   position_mode: "one_way"
 
 exchange:
-  name: "binance"
+  name: "bybit"
   testnet: true
 
 risk:

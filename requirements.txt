@@ -13,6 +13,7 @@ groq==1.5.0
 typing-extensions==4.16.0
 pydantic==2.13.4
 python-telegram-bot[job-queue]==22.8
+pybit==1.4.1
 
 # Build
 setuptools>=68

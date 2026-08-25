@@ -97,123 +97,35 @@ class RateLimitConfig(BaseModel):
     )
 
 
-class BinanceConfig(BaseModel):
-    """Binance-specific adapter configuration.
+class BybitConfig(BaseModel):
+    """Bybit-specific adapter configuration (USDT perpetual / category=linear).
 
-    Controls URLs, rate-limit warning thresholds, WebSocket reconnection
-    backoff, listen-key refresh, request timeouts, and default order params.
+    Controls REST base URLs and a few adapter-tuning parameters.  Auth keys are
+    supplied via the ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET`` environment
+    variables (or the top-level ``exchange.api_key`` / ``api_secret`` config).
     """
 
     base_url: str = Field(
-        default="https://fapi.binance.com",
-        description="Binance Futures REST API base URL",
+        default="https://api.bybit.com",
+        description="Bybit V5 REST API base URL (live)",
     )
     testnet_base_url: str = Field(
-        default="https://testnet.binancefuture.com",
-        description="Binance Futures testnet REST API base URL",
+        default="https://api-testnet.bybit.com",
+        description="Bybit V5 REST API base URL (testnet)",
     )
     ws_base_url: str = Field(
-        default="wss://fstream.binance.com/ws",
-        description="Binance Futures WebSocket base URL",
-    )
-    ws_testnet_base_url: str = Field(
-        default="wss://stream.binancefuture.com/ws",
-        description="Binance Futures testnet WebSocket base URL",
-    )
-    header_used_weight: str = Field(
-        default="X-MBX-USED-WEIGHT-",
-        description="Response header key for used request weight",
-    )
-    header_order_count: str = Field(
-        default="X-MBX-ORDER-COUNT-",
-        description="Response header key for order count",
-    )
-    rate_limit_warn_threshold: float = Field(
-        default=0.80,
-        ge=0.0,
-        le=1.0,
-        description="Rate-limit warning threshold as fraction of max weight",
-    )
-    rate_limit_hard_threshold: float = Field(
-        default=0.95,
-        ge=0.0,
-        le=1.0,
-        description="Rate-limit hard threshold as fraction of max weight",
-    )
-    ws_backoff_base_seconds: float = Field(
-        default=1.0,
-        ge=0.1,
-        description="Initial WebSocket reconnection backoff in seconds",
-    )
-    ws_backoff_max_seconds: float = Field(
-        default=30.0,
-        ge=1.0,
-        description="Maximum WebSocket reconnection backoff in seconds",
-    )
-    ws_backoff_multiplier: float = Field(
-        default=2.0,
-        ge=1.0,
-        description="WebSocket backoff multiplier per retry",
-    )
-    ws_backoff_jitter_factor: float = Field(
-        default=0.1,
-        ge=0.0,
-        le=1.0,
-        description="WebSocket backoff jitter factor",
-    )
-    ws_max_retries: int = Field(
-        default=10,
-        ge=1,
-        description="Maximum WebSocket reconnection retries",
-    )
-    listen_key_refresh_seconds: int = Field(
-        default=3300,
-        ge=60,
-        description="Interval between listen-key refreshes (default 55 min)",
-    )
-    request_timeout_seconds: float = Field(
-        default=30.0,
-        ge=5.0,
-        description="REST API request timeout in seconds",
-    )
-    connect_timeout_seconds: float = Field(
-        default=10.0,
-        ge=1.0,
-        description="REST API connection timeout in seconds",
+        default="wss://stream.bybit.com/v5/public/linear",
+        description="Bybit V5 public WebSocket base URL (linear/perp)",
     )
     recv_window: int = Field(
         default=5000,
         ge=1000,
         description="Default receive window for signed requests (ms)",
     )
-    heartbeat_seconds: float = Field(
-        default=30.0,
-        ge=5.0,
-        description="WebSocket heartbeat interval in seconds",
-    )
-    max_retries: int = Field(
-        default=3,
-        ge=1,
-        description="Maximum REST API request retries",
-    )
-    new_order_resp_type: str = Field(
-        default="ACK",
-        description="newOrderRespType parameter for Binance order placement",
-    )
-    rate_limiter_wait_seconds: float = Field(
-        default=1.0,
-        ge=0.1,
-        description="Seconds to wait when rate-limited",
-    )
-    retry_after_fallback_seconds: float = Field(
-        default=5.0,
+    exchange_info_ttl_seconds: float = Field(
+        default=60.0,
         ge=1.0,
-        description="Fallback retry-after seconds when header is missing",
-    )
-    retry_backoff_base: float = Field(
-        default=2.0,
-        ge=0.1,
-        description="Exponential retry backoff base in seconds for REST API requests",
+        description="TTL for the cached instrument-info filter data (seconds)",
     )
 
 
@@ -266,12 +178,12 @@ class ExchangeConfig(BaseModel):
     """Exchange connection and rate limit configuration."""
 
     name: str = Field(
-        default="binance",
+        default="bybit",
         description="Exchange adapter name",
     )
     testnet: bool = Field(
-        default=False,
-        description="Use testnet environment",
+        default=True,
+        description="Use testnet environment (default True for safety; live is opt-in)",
     )
     api_key: str | None = Field(
         default=None,
@@ -285,9 +197,9 @@ class ExchangeConfig(BaseModel):
         default_factory=RateLimitConfig,
         description="Rate limiting configuration",
     )
-    binance: BinanceConfig = Field(
-        default_factory=BinanceConfig,
-        description="Binance-specific connection parameters",
+    bybit: BybitConfig = Field(
+        default_factory=BybitConfig,
+        description="Bybit-specific connection parameters",
     )
     gateway: OrderGatewayConfig = Field(
         default_factory=OrderGatewayConfig,
@@ -302,7 +214,7 @@ class ExchangeConfig(BaseModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         """Validate exchange name is supported."""
-        allowed = {"binance", "mock"}
+        allowed = {"bybit"}
         if value.lower() not in allowed:
             raise ValueError(f"exchange name must be one of {allowed}, got '{value}'")
         return value.lower()

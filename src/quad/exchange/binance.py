@@ -38,7 +38,7 @@ import json
 import os
 import time
 from collections.abc import AsyncGenerator
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import aiohttp
@@ -56,6 +56,7 @@ from quad.types.domain import (
     OrderResult,
     Position,
     PositionSide,
+    Trade,
 )
 from quad.types.exchange import AccountUpdate
 from quad.types.market import FundingRate
@@ -82,29 +83,17 @@ _HEADER_ORDER_COUNT = "X-MBX-ORDER-COUNT-"
 # ---------------------------------------------------------------------------
 
 
-class ExchangeError(Exception):
-    """Base exception for exchange errors."""
-
-
-class ExchangeConnectionError(ExchangeError):
-    """Raised when the exchange is unreachable."""
-
-
-class ExchangeAuthError(ExchangeError):
-    """Raised on authentication failure (401/403)."""
-
-
-class ExchangeRateLimitError(ExchangeError):
-    """Raised on 429 rate-limit breach."""
-
-
-class ExchangeBannedError(ExchangeError):
-    """Raised on 418 IP ban."""
-
-
-class ExchangeOrderError(ExchangeError):
-    """Raised on order-related errors."""
-
+# Exchange error hierarchy is defined once in quad.exchange.base and shared by
+# all adapters.  Re-exported here for backward compatibility with any module
+# that imported them from binance.
+from quad.exchange.base import (  # noqa: E402
+    ExchangeAuthError,
+    ExchangeBannedError,
+    ExchangeConnectionError,
+    ExchangeError,
+    ExchangeOrderError,
+    ExchangeRateLimitError,
+)
 
 # ---------------------------------------------------------------------------
 # Binance Futures Adapter
@@ -425,6 +414,75 @@ class BinanceFuturesAdapter(ExchangeAdapter):
                 positions.append(pos)
 
         return positions
+
+    async def get_user_trades(
+        self, symbol: str | None = None, limit: int = 500
+    ) -> list[Trade]:
+        """Fetch executed fills (income history) via ``GET /fapi/v1/userTrades``.
+
+        This is the source of truth for CLOSED legs.  Before it existed the
+        bot's ``trades`` journal only captured opening fills, so SELL/exit
+        legs (TP/SL brackets, exchange-triggered closes) never appeared and
+        daily-PnL derived from the journal was meaningless.  The execution
+        engine ingests these to make the journal and PnL match reality.
+
+        ``GET /fapi/v1/userTrades`` requires a signed request and a
+        ``symbol`` argument.  When ``symbol`` is omitted we iterate the
+        symbols with currently open positions (the realistic set of symbols
+        the bot has actually traded) so the call still succeeds.
+        """
+        import aiohttp
+
+        symbols = [symbol] if symbol else [
+            getattr(p, "symbol", "") for p in (await self.get_positions() or [])
+        ]
+        symbols = [s for s in symbols if s]
+        if not symbols:
+            return []
+
+        trades: list[Trade] = []
+        for sym in symbols:
+            try:
+                params: dict[str, Any] = {"symbol": sym, "limit": int(limit)}
+                data = await self._request(
+                    "GET", "/fapi/v1/userTrades", data=params
+                )
+            except aiohttp.ClientResponseError as exc:  # noqa: PERF203
+                # -1102 (mandatory param missing) or empty history — skip the
+                # symbol rather than failing the whole reconciliation sweep.
+                if "1102" in str(exc) or exc.status in (400, 404):
+                    self._log.warning(
+                        "user_trades_skipped", symbol=sym, error=str(exc)
+                    )
+                    continue
+                raise
+            for entry in data if isinstance(data, list) else []:
+                try:
+                    side = str(entry.get("side", "")).upper()
+                    price = Decimal(str(entry.get("price", "0")))
+                    qty = Decimal(str(entry.get("qty", entry.get("quantity", "0"))))
+                    commission = Decimal(
+                        str(entry.get("commission", entry.get("fee", "0")))
+                    )
+                    # Binance does not return per-fill realized PnL; the
+                    # journal computes it from entry/exit when both legs are
+                    # ingested.  We surface the fee so the journal is honest.
+                    trades.append(
+                        Trade(
+                            order_id=int(entry.get("orderId", 0) or 0),
+                            symbol=sym,
+                            side=side,
+                            quantity=qty,
+                            price=price,
+                            fee=commission,
+                            timestamp=int(
+                                (entry.get("time") or entry.get("timestamp") or 0)
+                            ),
+                        )
+                    )
+                except (TypeError, ValueError, InvalidOperation):
+                    continue
+        return trades
 
     # ======================================================================
     # REST — Futures Market Data

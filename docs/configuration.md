@@ -10,9 +10,9 @@ The `.env` file at the project root holds secrets and environment-specific value
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes* | -- | Telegram bot token from @BotFather (required for Telegram interface) |
 | `TELEGRAM_ADMIN_IDS` | No | `--` | Legacy -- left empty. Previously comma-separated Telegram chat IDs (no longer used) |
-| `BINANCE_API_KEY` | Yes* | -- | Binance USD-M Futures API key (not needed for paper/dry-run) |
-| `BINANCE_API_SECRET` | Yes* | -- | Binance USD-M Futures API secret |
-| `BINANCE_TESTNET` | No | `true` | Use Binance testnet instead of production |
+| `BYBIT_API_KEY` | Yes* | -- | Bybit V5 API key (USDT perpetual / category=linear; not needed for dry-run) |
+| `BYBIT_API_SECRET` | Yes* | -- | Bybit V5 API secret |
+| `BYBIT_TESTNET` | No | `true` | Use Bybit testnet (set to `false` for live trading) |
 | `QUAD_DATA_DIR` | No | `./data` | Data directory (databases, logs, cache) |
 | `QUAD_CONFIG_DIR` | No | `./config` | Configuration directory |
 | `QUAD_LOG_LEVEL` | No | `INFO` | Logging level: DEBUG, INFO, WARN, ERROR |
@@ -20,7 +20,7 @@ The `.env` file at the project root holds secrets and environment-specific value
 | `QUAD_LOG_FILE` | No | `./data/logs/quad.log` | Log file path |
 | `DATABASE_URL` | No | `postgresql://quad:quad@localhost:5432/quad` | PostgreSQL DSN (overrides persistence.dsn in config) |
 | `QUAD_HEALTH_PORT` | No | `9090` | Health check HTTP server port |
-| `QUAD_MODE` | No | `paper` | Default mode: paper, live, dry_run |
+| `QUAD_MODE` | No | `bybit` | Exchange mode: `bybit` (USDT perpetual). `dry_run` runs testnet in dry-run mode. |
 | `QUAD_DEFAULT_STRATEGY` | No | `cash_secured_put` | Default strategy to load on start |
 | `QUAD_MAX_CYCLE_INTERVAL` | No | `60` | Trading cycle interval in seconds |
 | `QUAD_DRY_RUN` | No | `true` | Run in dry-run mode (no real orders) |
@@ -67,15 +67,8 @@ trading:
 
 # Exchange
 exchange:
-  name: binance
-  testnet: true
-  rate_limit:
-    max_requests_per_second: 10
-    max_order_weight_per_minute: 1200
-  websocket:
-    reconnect_delay: 1  # seconds, doubles each attempt
-    max_reconnect_delay: 60
-    heartbeat_interval: 30
+  name: bybit
+  testnet: true  # testnet is the default safety environment; set false for live
 
 # Risk Management
 risk:
@@ -285,7 +278,7 @@ Before starting the bot, verify the following:
 | 1 | Binance API keys are valid | `quad health` shows "Exchange: connected" |
 | 2 | API permissions are correct | Disable withdrawal permission; enable trading only |
 | 3 | Telegram bot token is set | Verify `TELEGRAM_BOT_TOKEN` is set in `.env` |
-| 4 | Testnet mode is enabled for initial runs | Set `BINANCE_TESTNET=true` or use `quad start --dry-run` |
+| 4 | Testnet mode is enabled for initial runs | Set `BYBIT_TESTNET=true` or use `quad start --dry-run` |
 | 5 | Database path is writable | `quad health` shows "Database: connected" |
 | 6 | Configuration syntax is valid | `quad config` shows expected values |
 | 7 | Data directory has sufficient space | Check `./data/` free space (500 MB minimum) |
@@ -296,15 +289,15 @@ Before starting the bot, verify the following:
 
 ## Security Warnings
 
-**Never commit your `.env` file.** The `.env` file contains API keys and secrets (Binance API keys, Telegram bot token) that would compromise your trading account and Telegram bot. The `.gitignore` explicitly excludes `.env` from version control. Always use `.env.example` as a template.
+**Never commit your `.env` file.** The `.env` file contains API keys and secrets (Bybit API keys, Telegram bot token) that would compromise your trading account and Telegram bot. The `.gitignore` explicitly excludes `.env` from version control. Always use `.env.example` as a template.
 
 **Protect your Telegram bot token.** The `TELEGRAM_BOT_TOKEN` gives full control of your Telegram bot. Anyone with this token can send messages as your bot and intercept bot commands. Never share it or commit it to version control. If compromised, regenerate immediately via @BotFather.
 
-**Use dedicated API keys.** Create Binance USD-M Futures API keys specifically for this bot with only minimum required permissions: enable trading, disable withdrawals. Never use keys from your main account or keys with withdrawal permissions.
+**Use dedicated API keys.** Create Bybit V5 API keys specifically for this bot with only minimum required permissions: enable trading, disable withdrawals. Never use keys from your main account or keys with withdrawal permissions.
 
-**Rotate keys regularly.** Change your Binance API keys every 90 days.
+**Rotate keys regularly.** Change your Bybit API keys every 90 days.
 
-**Start in dry-run or paper trading mode.** Before risking real capital, run the bot with `quad start --dry-run` or `quad start --mode paper` and testnet configuration.
+**Start in dry-run or testnet mode.** Before risking real capital, run the bot with `quad start --dry-run` or `BYBIT_TESTNET=true` (testnet is the default).
 
 **Restrict database access.** The PostgreSQL database contains your trading history and configuration. Use a strong database password, restrict network access via `pg_hba.conf`, and never expose the database port to the public internet.
 

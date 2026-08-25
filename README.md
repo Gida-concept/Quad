@@ -1,6 +1,6 @@
 # Quad
 
-_Production-Grade USD-M Futures Trading Bot for Binance_
+_USDT Perpetual Futures Trading Bot for Bybit_
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.12%2B-blue" alt="Python 3.12+">
@@ -12,7 +12,7 @@ _Production-Grade USD-M Futures Trading Bot for Binance_
 
 ## Executive Summary
 
-Quad is a production-grade, open-source USD-M futures trading bot purpose-built for Binance Futures. It is a **single-process Python 3.12+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, futures strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
+Quad is a production-grade, open-source USDT perpetual futures trading bot purpose-built for Bybit (category=linear). It is a **single-process Python 3.12+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, futures strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
 
 Unlike the previous Quadrant project (Node.js/Python dual-runtime, Binance Futures), Quad is:
 
@@ -69,12 +69,12 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐
 │   RISK MANAGER   │  │    STRATEGY      │  │  EXCHANGE ADAPTER    │
 │                  │  │    PLUGIN        │  │                      │
-│  9 Pre-Trade     │  │                  │  │ Binance USD-M       │
-│   Gates          │  │  Trend Following │  │  Futures API         │
-│  7 Circuit       │  │  Grid Trading    │  │  (REST + WebSocket)  │
-│   Breakers       │  │  Mean Reversion  │  │                      │
-│  Position Sizing │  │  DCA Bot         │  │  Paper Trading       │
-│  (Leverage-Adj.) │  │  Market Making   │  │  Mock Exchange       │
+│  9 Pre-Trade     │  │                  │  │ Bybit USDT Perp    │
+│   Gates          │  │  Trend Following │  │  (category=linear)  │
+│  7 Circuit       │  │  Grid Trading    │  │  REST + WebSocket   │
+│   Breakers       │  │  Mean Reversion  │  │                     │
+│  Position Sizing │  │  DCA Bot         │  │  Testnet / Live     │
+│  (Leverage-Adj.) │  │  Market Making   │  │  only               │
 └──────────────────┘  └──────────────────┘  └──────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -92,7 +92,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 ## Key Features
 
-- **Futures-Native** -- Built for Binance USD-M perpetual and delivery futures with dual position mode (HEDGE/ONE_WAY), isolated or cross margin, and full leverage control
+- **Futures-Native** -- Built for Bybit USDT perpetual futures with one-way and hedge position modes, isolated or cross margin, and full leverage control
 - **Telegram Commands** -- 18+ user commands (/start, /status, /help, /balance, /positions, /orders, /funding_rate, /book, /strategies, /execute, /risk, /kill, /cancel, /settings, /set, /analyze, /ai_strategy, /ai_status, /ai_decision)
 - **5 Built-in Strategies** -- Trend following, grid trading, mean reversion, DCA bot, market making, each with leverage-aware sizing and configurable position limits
 - **Plugin Architecture** -- Write custom strategies as Python classes with setuptools entry point registration
@@ -115,11 +115,11 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 | Runtime | Python 3.12+ asyncio | Single-process event-driven architecture |
 | Telegram Bot | python-telegram-bot v20+ | Primary user interface via Telegram |
 | CLI Framework | Typer | Secondary command-line interface for debugging |
-| Exchange API | Binance USD-M Futures (REST + WebSocket) | Market data, account, order execution |
+| Exchange API | Bybit V5 (USDT perpetual / category=linear) | Market data, account, order execution |
 | Persistence | SQLite + aiosqlite | Single file, zero config |
 | Configuration | PyYAML + python-dotenv | Layered config with hot-reload |
 | Logging | structlog | Structured JSON logging |
-| Async HTTP | aiohttp / httpx | REST API calls to Binance |
+| Async HTTP | aiohttp | REST API calls to Bybit |
 | Containerization | Docker | Single-container deployment |
 | Monitoring | Built-in HTTP server | Health checks, Prometheus metrics |
 
@@ -139,7 +139,7 @@ pip install -e .
 
 # Configure
 cp .env.example .env
-# Edit .env with your Binance API keys (optional for dry-run)
+# Edit .env with your Bybit API keys (optional for dry-run)
 # Set TELEGRAM_BOT_TOKEN from @BotFather (required for Telegram interface)
 cp config/config.default.yaml config/config.local.yaml
 # Edit config.local.yaml with your preferences
@@ -244,7 +244,7 @@ quad/
 │   ├── telegram/             # Telegram bot interface (primary interface)
 │   ├── config/               # Configuration manager
 │   ├── engine/               # Orchestrator, state machine
-│   ├── exchange/             # Exchange adapters (Binance, paper, mock)
+│   ├── exchange/             # Exchange adapters (Bybit USDT perpetual via pybit)
 │   ├── strategy/             # Strategy base class + built-in strategies
 │   ├── risk/                 # Risk manager, gates, circuit breakers
 │   ├── execution/            # Order gateway, TWAP
@@ -289,7 +289,7 @@ __main__.py  -->  QuadOrchestrator()  -->  orchestrator.run_forever()
    |-------|-----------|-------------|
    | 1 | ConfigManager | Loads `config.default.yaml`, overlays `config.local.yaml`, overlays env vars. Resolves `${VAR}` substitutions. |
    | 2 | DatabaseManager | Connects to SQLite, runs DDL and migrations. |
-   | 3 | ExchangeAdapter | Created via factory (`binance`/`paper`/`mock` based on mode). Connects and authenticates. |
+   | 3 | ExchangeAdapter | Created via factory (`bybit` based on mode). Connects and authenticates. |
    | 4 | MarketDataEngine | Starts WebSocket subscriptions, initialises price buffers, funding rate cache, order book cache, and mark price cache. |
    | 5 | RiskManager | Initialises 9 pre-trade gates, 7 circuit breakers, leverage-adjusted position sizer. |
    | 6 | ExecutionEngine | Starts order gateway (UUID idempotency), background reconciliation loop. |
@@ -416,7 +416,7 @@ Binance USD-M Futures API
         |
         v
   ExecutionEngine.execute()
-   +-- OrderGateway.submit() --- Binance Futures REST API
+   +-- OrderGateway.submit() --- Bybit V5 REST API
    +-- Background reconciliation loop (60s)
    +-- FillReconciler (detects missed fills, stale orders)
         |
