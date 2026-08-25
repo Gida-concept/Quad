@@ -491,7 +491,8 @@ class QuadOrchestrator:
                 )
             except Exception as exc:
                 if self._exchange_adapter.is_margin_mode_already_set(exc):
-                    # Binance -4046 "No need to change margin type." — the
+                    # Binance -4046 "No need to change margin type." (now handled
+                    # by the adapter's is_margin_mode_already_set() method).
                     # symbol is already in the requested margin mode, so the
                     # call is a benign no-op.  Log at info, not a warning.
                     self._log.info(
@@ -1492,7 +1493,7 @@ class QuadOrchestrator:
                         symbol=held_symbol,
                     )
                     # Only announce the EXIT after the close is confirmed
-                    # flat -- a trade that is still open on Binance must not
+                    # flat -- a trade that is still open on the exchange must not
                     # be broadcast as closed.
                     try:
                         from decimal import Decimal as _D
@@ -2956,7 +2957,7 @@ class QuadOrchestrator:
     def _side_label(side: Any) -> str:
         """Normalize a position/order side to ``LONG``/``SHORT``/``BUY``/``SELL``.
 
-        Binance positions carry ``PositionSide.LONG`` enums while order sides
+        Positions carry ``PositionSide.LONG`` enums while order sides
         are ``BUY``/``SELL`` strings; the Telegram alert should never show the
         raw ``PositionSide.LONG`` repr.
         """

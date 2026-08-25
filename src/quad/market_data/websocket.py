@@ -4,7 +4,7 @@ Provides ``WebSocketManager`` that manages subscriptions to named streams,
 handles automatic reconnection with exponential backoff, and routes incoming
 messages to registered callbacks.
 
-Supports Binance Futures WebSocket streams including:
+Supports Bybit V5 public/private WebSocket streams including:
   - ``!miniTicker@arr`` — 24-hour mini ticker array
   - ``!markPrice@arr@1s`` — mark price + funding rate array (1s updates)
   - ``!bookTicker`` — real-time best bid/ask for all symbols
@@ -558,7 +558,7 @@ class WebSocketManager:
     ) -> None:
         """Parse a JSON message and dispatch to registered handlers.
 
-        Messages from the Binance WebSocket API are typically raw JSON
+        Messages from the WebSocket API are typically raw JSON
         (not wrapped in a ``stream`` / ``data`` envelope).  This method
         dispatches the parsed message to all handlers registered for
         *stream_name*.

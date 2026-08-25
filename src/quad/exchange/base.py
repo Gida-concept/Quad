@@ -60,7 +60,7 @@ class ExchangeOrderError(ExchangeError):
 
 
 class ExchangeAdapter(ABC):
-    """Pluggable exchange adapter for Binance Futures trading.
+    """Pluggable exchange adapter for USD-margin futures trading.
 
     Subclasses must implement every abstract method.  The adapter is
     responsible for its own connection lifecycle (REST session and
@@ -99,7 +99,7 @@ class ExchangeAdapter(ABC):
     def is_testnet(self) -> bool:
         """Whether this adapter targets a testnet environment.
 
-        Defaults to ``False``.  Live Binance adapters override this to
+        Defaults to ``False``.  Live adapters override this to
         report their ``testnet`` flag so higher layers (execution engine,
         orchestrator) can enforce a hard dry-run guard without trusting
         the raw config (which may be inconsistent with the adapter's
@@ -170,8 +170,8 @@ class ExchangeAdapter(ABC):
 
         Args:
             order_id: The exchange-assigned order identifier.
-            symbol: Optional contract symbol.  Binance requires ``symbol``
-                (or ``origClientOrderId``) for ``DELETE /fapi/v1/order``.
+            symbol: Optional contract symbol.  Required by the exchange
+                for ``DELETE /v5/order/cancel``.
 
         Returns:
             ``True`` if the cancellation was accepted, ``False`` if the
@@ -185,8 +185,8 @@ class ExchangeAdapter(ABC):
 
         Args:
             order_id: The exchange-assigned order identifier.
-            symbol: Optional contract symbol.  Binance requires ``symbol``
-                for ``GET /fapi/v1/order``.
+            symbol: Optional contract symbol.  Required by the exchange
+                for ``GET /v5/order/realtime``.
 
         Returns:
             An ``Order`` dataclass with the latest status.
@@ -345,7 +345,7 @@ class ExchangeAdapter(ABC):
     ) -> Decimal | None:
         """Round ``price`` UP/DOWN to the symbol's PRICE_FILTER ``tickSize``.
 
-        Binance rejects a STOP_MARKET / TAKE_PROFIT_MARKET ``triggerPrice``
+        The exchange may reject a STOP_MARKET / TAKE_PROFIT_MARKET ``triggerPrice``
         (and any limit ``price``) whose decimal precision exceeds the
         symbol's tick with error -1111 ("Precision is over the maximum
         defined for this asset").  Rounds to the nearest tick; returns the
@@ -372,14 +372,15 @@ class ExchangeAdapter(ABC):
         current mark price).
 
         Raises ``RuntimeError`` with a clear, exchange-error-mapped message
-        when the quantity is below ``minQty`` (Binance ``-1113``/``-1111``)
-        or when the implied notional is below ``minNotional`` (Binance
+        when the quantity is below ``minQty`` (exchange rejects with a
+        "precision over the maximum" error) or when the implied notional is below ``minNotional`` (exchange
+        rejects with "notional is too small")
         ``-4164``) — the exchange would reject such an order anyway, so we
         fail loudly before it is ever sent.
 
         Filter data is cached per symbol for a short TTL
         (``_exchange_info_ttl``, default 60s) to avoid re-fetching the full
-        ``/fapi/v1/exchangeInfo`` dump on every order.
+        ``/v5/market/instruments-info`` dump on every order.
 
         Parameters
         ----------
@@ -420,7 +421,7 @@ class ExchangeAdapter(ABC):
         if qty < min_qty:
             raise RuntimeError(
                 f"quantity {qty} below minQty {min_qty} for {symbol} "
-                f"(exchange would reject; Binance -1113/-1111)"
+                f"(exchange would reject; quantity below minimum)"
             )
 
         # Below minNotional -> the exchange would reject with -4164.
@@ -437,7 +438,7 @@ class ExchangeAdapter(ABC):
                     raise RuntimeError(
                         f"notional {notional} (qty {qty} x mark {px}) below "
                         f"minNotional {min_notional} for {symbol} "
-                        f"(exchange would reject; Binance -4164)"
+                        f"(exchange would reject; notional below minimum)"
                     )
 
         log.debug(

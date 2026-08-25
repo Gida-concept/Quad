@@ -608,7 +608,7 @@ class ExecutionEngine:
         The bot only persisted *opening* fills before this method existed,
         so SELL/exit legs (TP/SL brackets, exchange-triggered closes) never
         appeared and the daily-PnL number computed from the journal was
-        meaningless (all zeros).  This pulls ``GET /fapi/v1/userTrades`` and
+        meaningless (all zeros).  This pulls ``GET /v5/execution/list`` and
         upserts every fill that is not already in the journal, pairing BUY
         and SELL fills per symbol (FIFO) to assign a signed realized PnL to
         each close (SELL) leg:
@@ -904,7 +904,7 @@ class ExecutionEngine:
         if order_request.order_type not in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
             order_request.order_type = "MARKET"
 
-        # Handle TP/SL action types.  Binance's STOP_MARKET / TAKE_PROFIT_MARKET
+        # Handle TP/SL action types.  STOP_MARKET / TAKE_PROFIT_MARKET
         # are market-on-trigger conditional orders that require only a
         # stopPrice (no limit price), keeping the whole trade path
         # market-execution only.  The legacy STOP_LOSS / TAKE_PROFIT types are
@@ -927,7 +927,7 @@ class ExecutionEngine:
             order_request.price_protect = True
 
         # timeInForce is only valid for LIMIT-family orders.  MARKET,
-        # STOP_MARKET and TAKE_PROFIT_MARKET reject a sent TIF with Binance
+        # STOP_MARKET and TAKE_PROFIT_MARKET reject a sent TIF with the exchange
         # error -1114 (TIF_NOT_REQUIRED), so clear the GTC default.
         if order_request.order_type in ("MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
             order_request.time_in_force = ""

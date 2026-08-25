@@ -1,7 +1,7 @@
 """Market context collector for AI trading decisions.
 
 Gathers all market data needed for AI-driven futures trading: candles (from
-Binance Futures klines API), current positions and account state from the
+the exchange adapter's klines API), current positions and account state from the
 exchange adapter, and futures market data (funding rates, mark prices, order
 books, ticker info).
 
@@ -41,7 +41,7 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Mapping from our timeframe strings to Binance interval strings
+# Mapping from our timeframe strings to exchange interval strings
 _TIMEFRAME_MAP: dict[str, str] = {
     "15m": "15m",
     "1h": "1h",
@@ -123,7 +123,7 @@ async def _fetch_klines(
     pair:
         Trading pair, e.g. ``"BTCUSDT"``.
     interval:
-        Binance interval string, e.g. ``"15m"``, ``"1h"``.
+        Exchange interval string, e.g. ``"15m"``, ``"1h"``.
     limit:
         Number of candles to fetch (max 1000).
 
@@ -149,7 +149,7 @@ def _klines_to_candles(
     pair: str,
     klines: list[tuple[float, ...]],
 ) -> list[Candle]:
-    """Convert raw Binance kline tuples to ``Candle`` dataclasses.
+    """Convert raw exchange kline tuples to ``Candle`` dataclasses.
 
     Parameters
     ----------
@@ -191,7 +191,7 @@ async def collect_market_context(
 ) -> MarketContext:
     """Collect a complete market snapshot for AI trading decisions.
 
-    Fetches candles (from Binance Futures klines), current positions and
+    Fetches candles (from the exchange adapter's klines endpoint), current positions and
     account state (from the exchange adapter), and futures market data
     (funding rates, mark prices, order books, ticker info) from the
     market data engine.
@@ -233,7 +233,7 @@ async def collect_market_context(
     context = MarketContext(timestamp=time.time())
 
     # ------------------------------------------------------------------
-    # 1. Fetch candles via Binance Futures klines API (via exchange adapter)
+    # 1. Fetch candles via exchange klines API (via exchange adapter)
     # ------------------------------------------------------------------
     try:
         tasks: list[Any] = []

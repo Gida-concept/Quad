@@ -201,7 +201,7 @@ class _BaseTTLCache(Generic[T]):
 class FundingRateCache(_BaseTTLCache[FundingRate]):
     """TTL-backed cache for funding rate data.
 
-    Default TTL is 8 hours (28_800 seconds), matching Binance's 8-hour
+    Default TTL is 8 hours (28_800 seconds), matching the exchange's 8-hour
     funding interval.  Stores :class:`FundingRate` objects keyed by symbol.
     """
 
