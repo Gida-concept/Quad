@@ -64,7 +64,7 @@ class MarketDataEngine:
         ----------
         exchange_adapter:
             The exchange adapter used for live data fetching.  Must be
-            compatible with Binance Futures (e.g. ``BinanceFuturesAdapter``).
+            compatible with Bybit USDT perpetual (e.g. ``BybitFuturesAdapter``).
         config:
             Optional configuration dict.  Sub-keys under ``market_data``:
 

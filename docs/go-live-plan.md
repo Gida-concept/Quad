@@ -7,8 +7,8 @@ Created: 2026-08-15 ? Source: 2026-08-14 runtime log (`pasted-text.txt`) + `conf
 The 2026-08-14 log shows the bot is **healthy and running**, but it is **deliberately not opening new trades** for two compounding reasons:
 
 1. **`_dry_run: true` in `config/config.yaml` (top-level key).**
-   - Executed everywhere: `ExecutionEngine._is_dry_run`, `BinanceFuturesAdapter` dry-run guard, `orchestrator.cycle_status dry_run=true`.
-   - `dry_run_guard_active: false` because the exchange is also `testnet: true`; a true dry-run+live guard is only armed when `_dry_run=true AND testnet=false`. Here the bot runs on Binance testnet in dry-run mode, so no real money is at risk, but **it also never places a real order** ? it is a simulation layer.
+   - Executed everywhere: `ExecutionEngine._is_dry_run`, `BybitFuturesAdapter` dry-run guard, `orchestrator.cycle_status dry_run=true`.
+   - `dry_run_guard_active: false` because the exchange is also `testnet: true`; a true dry-run+live guard is only armed when `_dry_run=true AND testnet=false`. Here the bot runs on Bybit testnet in dry-run mode, so no real money is at risk, but **it also never places a real order** ? it is a simulation layer.
 2. **A position is open on BTCUSDT (`positions: 1`) and the rotation is in ?manage open position? mode.**
    - `rotation_managing_open_position symbol=BTCUSDT` at `11:00:31` ? CASE A of `_run_ai_rotation`: with an open position, the bot scans **only that symbol** and refuses `ENTER`, holding until the TP/SL bracket closes it (`rotation_hold_until_tp_sl`).
    - A decision row was created (`row_created table=decisions id=84`) and `cycle_status` reported `positions: 1`, `ai_used: true` ? the AI cycle runs fine, it just never sees a flat account.
@@ -22,13 +22,13 @@ So the bot is NOT broken: **it is configured to dry-run and it is sitting on an 
   - (a) let `close_positions_on_start: true` flatten BTCUSDT on next start and rotation opens fresh; or
   - (b) keep the position and wait for the bracket to close it.
   `close_positions_on_start` and `max_hold_seconds: 21600` are already implemented (ADR-95/96), so a clean restart is the fastest path.
-- [ ] **Confirm testnet has usable balance** (`/fapi/v2/balance`) before expecting entries to fill; testnet faucets are often empty, which makes ENTER orders fail at the exchange.
+- [ ] **Confirm testnet has usable balance** (`/v5/account/wallet-balance`, USDT) before expecting entries to fill; Bybit testnet USDT needs to be requested via the testnet faucet (`/v5/trace/linear`), so an empty wallet makes ENTER orders fail at the exchange.
 - [ ] Re-run the bot and confirm `cycle_status` shows `positions: 0` then `rotation_opened_position` on an ENTER with a filled order.
 
 ## 3. What the log confirms works (already built)
 
 - Health endpoint `200`, both scheduled jobs (`risk_alert`, `liquidation_warning`) run on time.
-- Binance testnet connected, position mode read OK, account setup OK (no `account_setup_*_failed`).
+- Bybit testnet connected, position mode read OK, account setup OK (no `account_setup_*_failed`).
 - AI cycle produces decisions (`ai_used: true`, decision `id=84` written) ? no Groq 429 / validator veto in this window.
 - Rotation guards behave as designed: open position ? manage only; TP/SL bracket is the close path.
 - `liquidation_warning sent=true warnings=1` every 5 min is a **routine alert**, not an error.
@@ -49,7 +49,7 @@ So the bot is NOT broken: **it is configured to dry-run and it is sitting on an 
 - Move leverage from `50x` to a conservative default (e.g. `5x?10x`) for live; keep `max_leverage` in sync with `trading.leverage`.
 - Add a **max daily loss breaker** (e.g. ?5% equity) that stops all trading until manual reset, and persist breaker state.
 - Add a **max drawdown / equity floor** that halts rotation; wire it into `_run_ai_rotation` CASE A/B so it stops opening new trades, not just orders.
-- Add kill-switch: `/fapi/v1/account` balance check before every ENTER; if available margin < 2? position margin, refuse.
+- Add kill-switch: Bybit `/v5/account/wallet-balance` check before every ENTER; if available margin < 2? position margin, refuse.
 - Add **hard stop-loss cap** (e.g. 2?3% per trade regardless of AI bracket), enforced in `_compute_bracket_prices`.
 
 ### D. AI & strategy quality gates

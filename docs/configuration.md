@@ -275,7 +275,7 @@ Before starting the bot, verify the following:
 
 | # | Check | How to Verify |
 |---|---|---|
-| 1 | Binance API keys are valid | `quad health` shows "Exchange: connected" |
+| 1 | Bybit API keys are valid | `quad health` shows "Exchange: connected" |
 | 2 | API permissions are correct | Disable withdrawal permission; enable trading only |
 | 3 | Telegram bot token is set | Verify `TELEGRAM_BOT_TOKEN` is set in `.env` |
 | 4 | Testnet mode is enabled for initial runs | Set `BYBIT_TESTNET=true` or use `quad start --dry-run` |

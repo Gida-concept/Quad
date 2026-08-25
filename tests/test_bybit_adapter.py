@@ -185,11 +185,6 @@ class TestErrorHierarchy:
         assert issubclass(ExchangeBannedError, ExchangeError)
         assert issubclass(ExchangeOrderError, ExchangeError)
 
-    def test_binance_imports_match_base(self):
-        """binance.py re-exports the base error classes."""
-        from quad.exchange.binance import ExchangeError as BinanceErr
-        assert BinanceErr is ExchangeError
-
     def test_bybit_imports_match_base(self):
         from quad.exchange.bybit import ExchangeError as BybitErr
         assert BybitErr is ExchangeError

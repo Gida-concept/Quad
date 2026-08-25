@@ -107,7 +107,7 @@ class Account:
     """Account identifier."""
 
     exchange: str
-    """Exchange name, e.g. 'binance'."""
+    """Exchange name, e.g. 'bybit'."""
 
     balances: dict[str, Balance] = field(default_factory=dict)
     """Mapping of asset symbol to Balance."""

@@ -6,6 +6,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ---
 
+## [2.1.0] - 2025-08-25 -- Bybit USDT-Perpetual Switch
+
+### Added
+- **Bybit exchange adapter** (`src/quad/exchange/bybit.py`) — full implementation
+  of the `ExchangeAdapter` ABC over Bybit's V5 API using the official `pybit` SDK.
+  Targets **USDT perpetual** exclusively via `category="linear"` (hard-coded as a
+  class constant, eliminating any futures-vs-perpetual misconfiguration).
+- `pybit>=1.4.0` dependency in `pyproject.toml` / `requirements.txt`.
+- `BybitConfig` schema (`src/quad/config/schema.py`) with Bybit REST/WS URLs.
+- `is_margin_mode_already_set()` / `is_order_not_found()` methods on the
+  `ExchangeAdapter` ABC, so per-exchange error semantics live in adapters
+  instead of orchestration code.
+
+### Changed
+- **Exchange target** switched from Binance USD-M Futures to Bybit USDT perpetual.
+  `QUAD_MODE`, `exchange.name`, `config.yaml`, `.env.example`,
+  `docker-compose.yml` all now default to `bybit` with `testnet: true`
+  (testnet is the default safety environment; live is opt-in).
+- **Shared error hierarchy** (`ExchangeError` and subclasses) moved from
+  `binance.py` to `base.py` so all adapters use one definition.
+- **Ghost-order / margin-mode detection** generalized: the orchestrator and
+  order gateway now call `adapter.is_order_not_found()` / `adapter.is_margin_mode_already_set()`
+  instead of string-matching Binance error codes (`-2013`, `-4046`).
+
+### Removed
+- **Binance adapter** (`src/quad/exchange/binance.py`) — deleted; no longer wired
+  into the factory.
+- **Mock mode** (`src/quad/exchange/mock.py`) — removed entirely. Only testnet and
+  live environments remain.
+- `BINANCE_*` environment variables; replaced by `BYBIT_API_KEY` /
+  `BYBIT_API_SECRET` / `BYBIT_TESTNET`.
+- `tests/test_price_tick_normalization.py` — Binance-mock-specific regression;
+`tests/test_one_trade_per_cycle.py` — rewritten to use `BybitFuturesAdapter`.
+- `FIX_PLAN.md` and `orchestrator_dump.txt` — stale scratch artifacts removed.
+
+---
+
 ## [2.0.0] - 2026-07-26 -- Futures Migration
 
 ### Added

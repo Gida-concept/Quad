@@ -104,7 +104,7 @@ class WebSocketManager:
             Optional configuration dict.  Recognised keys:
 
             * ``ws_url`` — Override the WebSocket URL.
-              Defaults to ``wss://fstream.binance.com/ws``.
+              Defaults to ``wss://stream.bybit.com/v5/public/linear``.
             * ``ws_heartbeat_interval`` — Seconds between keepalive pings.
         """
         self._exchange = exchange_adapter

@@ -512,6 +512,28 @@ class TradeRepository(BaseRepository[TradeModel]):
             self._log.exception("get_recent_trades_failed")
             raise
 
+    async def exists_for_order(self, order_id: int, side: str) -> bool:
+        """True if a trade row already exists for this order id + side.
+
+        Used to de-duplicate exchange income-history fills against rows the
+        execution engine already persisted from opening fills, so the
+        reconcile sweep never double-inserts a leg.
+        """
+        if not order_id:
+            return False
+        try:
+            async with self._db.pool.acquire() as conn:
+                row = await conn.fetchval(
+                    f"SELECT 1 FROM {self._table} "
+                    f"WHERE order_id = $1 AND side = $2 LIMIT 1",
+                    order_id,
+                    side,
+                )
+            return row is not None
+        except Exception:
+            self._log.exception("trade_exists_check_failed")
+            return False
+
     async def get_by_date_range(
         self,
         start: int,

@@ -348,7 +348,7 @@ Performance:
 
 Backtests use historical futures kline data stored in the market data cache. Data can be loaded from:
 
-1. **Binance historical downloads** -- CSV kline data downloaded from Binance
+1. **Bybit historical downloads** -- CSV kline data downloaded from Bybit V5 API
 2. **Database snapshots** -- Previously stored candle data
 3. **Live data captures** -- Gathered during paper trading sessions
 
@@ -430,17 +430,17 @@ if liquidation_distance < min_safe_distance:
 
 ## Testing Tips
 
-### Paper Trading First
+### Testnet First
 
-Always test new strategies in dry-run or paper trading mode:
+Always test new strategies in dry-run or testnet mode:
 
 ```bash
 # Dry-run mode (simulates orders)
 quad start --dry-run
 
-# Paper trading (testnet)
-# Set BINANCE_TESTNET=true and QUAD_MODE=paper in .env
-quad start --mode paper
+# Testnet with dry_run off (real order placement on testnet, no live funds)
+# Set BYBIT_TESTNET=true and QUAD_DRY_RUN=false in .env
+quad start
 ```
 
 ### Verify Actions
@@ -474,4 +474,4 @@ Before deploying a new strategy to live trading, verify:
 | 5 | Backtest shows positive expectancy | Run 6+ months of backtest data |
 | 6 | Strategy handles no-opportunity gracefully | Verify HOLD action when no good setup |
 | 7 | Risk gates don't permanently block | Check `quad risk` for PASS on all gates |
-| 8 | Strategy works with paper trading | Run 1+ week on testnet |
+| 8 | Strategy works with testnet | Run 1+ week on testnet |

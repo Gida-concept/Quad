@@ -264,7 +264,7 @@ A lightweight HTTP server for Docker health checks and monitoring. Located at `s
     "database": "connected",
     "websocket": 3
   },
-  "mode": "paper",
+  "mode": "testnet",
   "state": "ACTIVE",
   "positions": 2,
   "last_error": null

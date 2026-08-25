@@ -105,7 +105,7 @@ quad orders --open
 ```
 
 **Possible causes:**
-- **Rate limited**: Binance USD-M Futures has strict rate limits. Check logs for `429` errors.
+- **Rate limited**: Bybit has strict rate limits. Check logs for `429` errors.
 - **Invalid price**: Option prices change quickly. Your limit price may be too far from market.
 - **Insufficient margin**: The exchange rejected the order. Check account balance.
 - **Expired contract**: The symbol may have been delisted or renamed. Verify contract symbol.
@@ -137,15 +137,15 @@ quad cancel <order-id>
 
 **Check 1: Network stability**
 ```bash
-# Ping Binance testnet
-ping testnet.binance.vision
+# Ping Bybit testnet
+ping testnet.bybit.com
 # Look for packet loss or high latency
 ```
 
 **Check 2: Connection count**
 ```bash
 quad health
-# Check ws streams count -- Binance limits concurrent connections
+# Check ws streams count -- Bybit limits concurrent connections
 ```
 
 **Check 3: Logs for disconnection reasons**
@@ -229,7 +229,7 @@ psql "$DATABASE_URL" -c "SELECT pg_size_pretty(pg_database_size(current_database
 |---|---|
 | Risk parameters | Exchange API keys |
 | Strategy parameters | Database path |
-| Log level | Mode (paper/live) |
+| Log level | Mode (testnet/live) |
 | Stop-loss/take-profit | Health server port |
 
 **Force reload:**
@@ -292,8 +292,8 @@ quad start --log-level DEBUG
 
 ```bash
 # Check API key validity
-curl -H "X-MBX-APIKEY: $BINANCE_API_KEY" \
-  https://testnet.binance.vision/sapi/v1/account
+curl -H "X-BAPI-APIKEY: $BYBIT_API_KEY" \
+  "https://api-testnet.bybit.com/v5/account/info"
 
 # Expected: 200 with account data
 # 401: Invalid API key
@@ -309,7 +309,7 @@ curl -H "X-MBX-APIKEY: $BINANCE_API_KEY" \
 
 ### Symptom: Rate Limited (HTTP 429)
 
-Binance USD-M Futures has strict rate limits. The bot monitors its weight usage:
+Bybit has strict rate limits (V5 API). The bot monitors its weight usage:
 
 ```bash
 # The bot will automatically back off when approaching limits
@@ -395,7 +395,7 @@ Common causes:
 
 | Error | Meaning | Action |
 |---|---|---|
-| `ExchangeConnectionError` | Can't reach Binance API | Check network, API status |
+| `ExchangeConnectionError` | Can't reach Bybit API | Check network, API status |
 | `InvalidApiKeyError` | API key rejected | Verify key in `.env` |
 | `RateLimitError` | Hit API rate limits | Reduce request frequency |
 | `OrderRejectedError` | Exchange rejected order | Check order parameters |

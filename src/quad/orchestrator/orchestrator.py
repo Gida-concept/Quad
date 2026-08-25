@@ -79,7 +79,7 @@ class QuadOrchestrator:
     Attributes
     ----------
     _mode : str
-        Resolved trading mode: ``"binance"`` or ``"dry_run"``.
+        Resolved trading mode: ``"bybit"`` or ``"dry_run"``.
     _stop_event : asyncio.Event
         Set when a shutdown signal is received.
     """
@@ -354,7 +354,7 @@ class QuadOrchestrator:
         """Inject Telegram and operation env vars into the config dict.
 
         These env vars are not handled by ``ConfigManager``'s automatic
-        env-var scanning (which only covers ``QUAD_*`` and ``BINANCE_*``
+        env-var scanning (which only covers ``QUAD_*`` and ``BYBIT_*``
         prefixes), so we inject them manually.
         """
         # Telegram bot token

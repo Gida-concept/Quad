@@ -572,8 +572,8 @@ class MarketDataWebSocketConfig(BaseModel):
     """Market data WebSocket connection parameters."""
 
     url: str = Field(
-        default="wss://fstream.binance.com/ws",
-        description="Market data WebSocket base URL",
+        default="wss://stream.bybit.com/v5/public/linear",
+        description="Market data WebSocket base URL (Bybit V5 public/linear)",
     )
     backoff: MarketDataBackoffConfig = Field(
         default_factory=MarketDataBackoffConfig,

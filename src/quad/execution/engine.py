@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import replace
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from typing import Any
 
 import structlog
@@ -53,6 +53,20 @@ def _floor_to_compliant(
                     * step_size
                 )
     return target
+
+
+def _as_dec(value: Any) -> Decimal:
+    """Coerce an arbitrary exchange value to ``Decimal`` safely.
+
+    Tolerates ``None``, strings, ints, and floats; returns ``Decimal(0)`` on
+    anything unparseable so the ingest loop never dies on a malformed fill.
+    """
+    try:
+        if value is None:
+            return Decimal(0)
+        return Decimal(str(value))
+    except (TypeError, ValueError, InvalidOperation):
+        return Decimal(0)
 
 
 # ---------------------------------------------------------------------------
@@ -571,16 +585,130 @@ class ExecutionEngine:
         discrepancies = await self._reconciler.reconcile_pending_orders(active)
         self._stats["reconciliations_run"] += 1
 
+        # Ingest exchange fills so closed (SELL) legs appear in the journal
+        # and daily PnL reflects reality (see _ingest_exchange_trades).
+        ingested = await self._ingest_exchange_trades()
+
         self._log.info(
             "reconciliation_complete",
             active_orders=len(active),
             discrepancies=len(discrepancies),
+            trades_ingested=ingested,
         )
         return {
             "active_orders_checked": len(active),
             "discrepancies_found": len(discrepancies),
             "discrepancies": discrepancies,
+            "trades_ingested": ingested,
         }
+
+    async def _ingest_exchange_trades(self) -> int:
+        """Ingest exchange fills into the ``trades`` journal (both legs).
+
+        The bot only persisted *opening* fills before this method existed,
+        so SELL/exit legs (TP/SL brackets, exchange-triggered closes) never
+        appeared and the daily-PnL number computed from the journal was
+        meaningless (all zeros).  This pulls ``GET /fapi/v1/userTrades`` and
+        upserts every fill that is not already in the journal, pairing BUY
+        and SELL fills per symbol (FIFO) to assign a signed realized PnL to
+        each close (SELL) leg:
+
+        * LONG round-trip (BUY then SELL):  ``pnl = (sell - buy) * qty``
+        * SHORT round-trip (SELL then BUY): ``pnl = (buy - sell) * qty``
+
+        One-way mode (the bot default) means a SELL is always the close of a
+        prior BUY for the same symbol, so this pairing is sound.  In hedge
+        mode the same pairing still produces a correct net per symbol; we do
+        not attempt to attribute per-position-side PnL here (the exchange
+        ``realizedProfit`` field is account/symbol aggregate, not per fill).
+
+        Returns the number of new trade rows inserted.
+        """
+        if self._db_manager is None or not getattr(
+            self._db_manager, "is_connected", False
+        ):
+            return 0
+        try:
+            from quad.persistence.models import TradeModel
+            from quad.persistence.repositories import TradeRepository
+
+            try:
+                fills = await self._exchange_adapter.get_user_trades()
+            except Exception as exc:  # noqa: BLE001 best-effort ingest
+                self._log.warning("exchange_trades_fetch_failed", error=str(exc))
+                return 0
+            if not fills:
+                return 0
+
+            repo = TradeRepository(self._db_manager)
+            # Group by symbol, keep insertion order (oldest first).
+            by_symbol: dict[str, list] = {}
+            for f in fills:
+                by_symbol.setdefault(getattr(f, "symbol", ""), []).append(f)
+
+            inserted = 0
+            for symbol, legs in by_symbol.items():
+                legs.sort(key=lambda t: getattr(t, "timestamp", 0) or 0)
+                # FIFO queues of open entry prices, per direction.  A SELL
+                # closes a prior BUY (LONG); a BUY closes a prior SELL (SHORT).
+                open_long_entries: list[Decimal] = []  # from BUY opens
+                open_short_entries: list[Decimal] = []  # from SELL opens
+                for leg in legs:
+                    side = str(getattr(leg, "side", "") or "").upper()
+                    order_id = int(getattr(leg, "order_id", 0) or 0)
+                    if await repo.exists_for_order(order_id, side):
+                        # Already persisted (e.g. the opening fill the engine
+                        # wrote directly).  Still advance the pairing queue so
+                        # a later close leg balances it on re-ingest.
+                        if side == "BUY":
+                            open_long_entries.append(_as_dec(getattr(leg, "price", 0)))
+                        elif side == "SELL":
+                            open_short_entries.append(
+                                _as_dec(getattr(leg, "price", 0))
+                            )
+                        continue
+
+                    price = _as_dec(getattr(leg, "price", 0))
+                    qty = _as_dec(getattr(leg, "quantity", 0))
+                    pnl = Decimal(0)
+                    if side == "BUY":
+                        # Either an opening LONG (queue it) or the close of a
+                        # prior SHORT (compute PnL).
+                        if open_short_entries:
+                            entry = open_short_entries.pop(0)
+                            # SHORT close: profit when bought back below entry.
+                            pnl = (entry - price) * qty
+                        open_long_entries.append(price)
+                    elif side == "SELL":
+                        # Either an opening SHORT (queue it) or the close of a
+                        # prior LONG (compute PnL).
+                        if open_long_entries:
+                            entry = open_long_entries.pop(0)
+                            # LONG close: profit when sold above entry.
+                            pnl = (price - entry) * qty
+                        open_short_entries.append(price)
+
+                    await repo.create(
+                        TradeModel(
+                            id=0,
+                            position_id=0,
+                            order_id=order_id,
+                            symbol=symbol,
+                            side=side,
+                            quantity=str(qty),
+                            price=str(price),
+                            fee=str(_as_dec(getattr(leg, "fee", 0))),
+                            pnl=str(pnl),
+                            timestamp=int(getattr(leg, "timestamp", 0) or 0),
+                        )
+                    )
+                    inserted += 1
+            if inserted:
+                self._log.info("exchange_trades_ingested", count=inserted)
+            return inserted
+        except Exception as exc:  # noqa: BLE001 best-effort ingest
+            self._log.warning("exchange_trades_ingest_failed", error=str(exc))
+            return 0
 
     def get_active_orders(self) -> list[Order]:
         """Return all currently tracked active orders."""
@@ -731,6 +859,9 @@ class ExecutionEngine:
                     await self._reconciler.reconcile_pending_orders(active)
                 self._stats["reconciliations_run"] += 1
                 self._stats["active_order_count"] = len(active)
+                # Ingest exchange fills so closed (SELL) legs reach the
+                # journal and daily PnL becomes meaningful.
+                await self._ingest_exchange_trades()
             except asyncio.CancelledError:
                 break
             except Exception as exc:

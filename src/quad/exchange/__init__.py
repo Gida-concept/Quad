@@ -2,11 +2,11 @@
 
 Provides a pluggable ExchangeAdapter ABC with the active implementation:
 
-- ``BybitFuturesAdapter`` — Live / testnet Bybit USDT-perpetual (V5 API)
+- ``BybitFuturesAdapter`` — Live / testnet Bybit USDT-perpetual (V5 API,
+  ``category=linear``) via the official ``pybit`` SDK.
 
 Use ``create_exchange(config)`` to instantiate the correct adapter based on
-the configuration dictionary.  (``binance.py`` is retained on disk but no
-longer wired into the factory; delete it once a revert is no longer needed.)
+the configuration dictionary.
 """
 
 from __future__ import annotations

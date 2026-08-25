@@ -61,7 +61,7 @@ All commands are available to any chat:
 Quad Status
 State: ACTIVE (since 12:00 UTC)
 Uptime: 2d 4h 30m
-Mode: paper
+Mode: testnet
 Strategy: trend_following
 Position Mode: HEDGE
 Margin Mode: ISOLATED
@@ -122,14 +122,14 @@ Start the trading bot.
 # Start with default configuration
 quad start
 
-# Start in dry-run mode (no real orders)
+# Start in dry-run mode (safest first step; no real orders)
 quad start --dry-run
 
-# Start with paper trading
-quad start --mode paper
+# Start on Bybit testnet (testnet is the default when BYBIT_TESTNET=true)
+quad start
 
-# Start with live trading (requires confirmation)
-quad start --mode live
+# Start with live trading (set BYBIT_TESTNET=false -- dangerous, real funds)
+quad start
 
 # Start with a specific strategy
 quad start --strategy trend_following
@@ -141,9 +141,9 @@ quad start --config /path/to/config
 **Output:**
 ```
 Quad v2.0.0 starting...
-  Mode: paper
+  Mode: testnet
   Strategy: trend_following
-  Exchange: binance (futures testnet)
+  Exchange: bybit (USDT perpetual testnet)
   Database: postgresql://quad@localhost:5432/quad
   Log level: INFO
   Telegram: enabled (polling mode)
@@ -190,13 +190,13 @@ Quad Status
 ═══════════════
 State:        ACTIVE (since 2026-07-07 10:00:00 UTC)
 Uptime:       2d 4h 30m
-Mode:         paper
+Mode:         testnet
 Strategy:     trend_following
 Position Mode: HEDGE
 Margin Mode:  ISOLATED
 Leverage:     3x
 
-Exchange:     Binance USD-M Futures (testnet)
+Exchange:     Bybit V5 USDT Perpetual (testnet)
   Connected:  yes
   WS streams: 4 active
 
