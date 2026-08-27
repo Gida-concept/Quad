@@ -17,8 +17,7 @@ if [ ! -f "$WG_CONF" ]; then
 fi
 if [ -f "$WG_CONF" ]; then
     echo "[start.sh] WireGuard config found — bringing up VPN tunnel..."
-    cp "$WG_CONF" /etc/wireguard/wg0.conf
-    chmod 600 /etc/wireguard/wg0.conf
+    chmod 600 "$WG_CONF"
 
     # WireGuard needs NET_ADMIN capability (add to Docker/Dokploy config)
     wg-quick up wg0
