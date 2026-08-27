@@ -48,6 +48,13 @@ services:
       # --- AI / Groq ---
       - GROQ_API_KEY=${GROQ_API_KEY:-}
 
+      # --- Proxy (optional) ---
+      # Set HTTP_PROXY/HTTPS_PROXY on the host to route HTTP/WebSocket traffic
+      # through a proxy.  Leave empty for direct connections.
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
+
       # --- Timezone ---
       - TZ=UTC
 

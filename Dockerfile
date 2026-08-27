@@ -1,9 +1,9 @@
 # =============================================================================
 # Dockerfile — Quad USD-M Futures Trading Bot
 #
-# Multi-stage build with optional WireGuard VPN support.
-# If config/wg0.conf is present at runtime, all outbound traffic is routed
-# through the VPN tunnel.  The VPS host, SSH, and other projects are unaffected.
+# Multi-stage build for a lightweight Python runtime.
+# Proxy support is handled via environment variables (HTTP_PROXY/HTTPS_PROXY)
+# configured in docker-compose.yml — no VPN or NET_ADMIN capability required.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -28,12 +28,9 @@ FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
-# Install runtime deps: curl for health checks, wireguard + iproute2 + iptables for VPN
+# Install runtime deps: curl for health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    wireguard-tools \
-    iproute2 \
-    iptables \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder stage
@@ -48,7 +45,6 @@ ENV PYTHONUNBUFFERED=1 \
 COPY src/ ./src/
 COPY pyproject.toml requirements.txt ./
 COPY config/config.yaml ./config/config.yaml
-COPY config/wg0.conf /etc/wireguard/wg0.conf
 COPY start.sh ./start.sh
 
 # Make startup script executable
@@ -65,9 +61,8 @@ RUN groupadd -r quad && useradd -r -g quad -d /app -s /sbin/nologin quad \
 RUN mkdir -p /app/data /app/logs \
     && chown -R quad:quad /app/data /app/logs
 
-# NOTE: We run as root (no USER quad) because WireGuard requires NET_ADMIN
-# capability and wg-quick needs root to create network interfaces. The bot
-# is already isolated inside its Docker container with NET_ADMIN only.
+# Drop privileges — no NET_ADMIN needed without VPN
+USER quad
 
 # Expose health check port
 EXPOSE 9090
@@ -79,7 +74,7 @@ VOLUME ["/app/data", "/app/config", "/app/logs"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:${QUAD_HEALTH_PORT:-9090}/health || exit 1
 
-# Use startup script (connects VPN first if wg0.conf exists, then starts bot)
+# Use startup script (starts bot with optional proxy env vars)
 CMD ["./start.sh"]
 
 # ---------------------------------------------------------------------------
