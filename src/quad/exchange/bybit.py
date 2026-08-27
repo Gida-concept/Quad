@@ -107,6 +107,17 @@ class BybitFuturesAdapter(ExchangeAdapter):
             self._bybit_config.get("recv_window", 5000)
         )
 
+        # Optional HTTP proxy for REST requests.  Reads from the Bybit config
+        # section (``exchange.bybit.proxy``) with a fallback to the standard
+        # ``HTTP_PROXY`` / ``HTTPS_PROXY`` environment variables.
+        self._proxy: str | None = (
+            self._bybit_config.get("http_proxy")
+            or self._bybit_config.get("proxy")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("HTTPS_PROXY")
+            or None
+        )
+
         # Dry-run hard guard (top-level ``_dry_run`` config key).  When set AND
         # the exchange is live (``testnet=False``), place_order() refuses every
         # order to protect real funds.
@@ -160,6 +171,24 @@ class BybitFuturesAdapter(ExchangeAdapter):
             api_secret=self._api_secret,
             recv_window=self._recv_window,
         )
+
+        # Route REST requests through a proxy if configured.  pybit stores the
+        # underlying ``requests.Session()`` as ``self.client`` (not ``session``),
+        # so we set its proxies dict after construction.
+        if self._proxy and HTTP is not None:
+            try:
+                self._client.client.proxies = {
+                    "http": self._proxy,
+                    "https": self._proxy,
+                }
+                self._log.debug(
+                    "proxy_configured_http", proxy=self._proxy
+                )
+            except AttributeError:
+                # pybit internal layout changed — fail open (no proxy)
+                self._log.warning(
+                    "proxy_config_failed", proxy=self._proxy
+                )
 
         # Verify connectivity / credentials by hitting the public server time.
         try:

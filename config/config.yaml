@@ -20,6 +20,9 @@ trading:
 exchange:
   name: "bybit"
   testnet: true
+  # Optional HTTP proxy for REST requests (e.g. "socks5://127.0.0.1:1080").
+  # If omitted, the adapter falls back to HTTP_PROXY / HTTPS_PROXY env vars.
+  # proxy: "http://your-proxy:port"
 
 risk:
   max_positions: 1
