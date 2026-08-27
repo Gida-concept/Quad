@@ -60,11 +60,12 @@ RUN groupadd -r quad && useradd -r -g quad -d /app -s /sbin/nologin quad \
     && chown -R quad:quad /app
 
 # Create data and log directories
-RUN mkdir -p /app/data /app/logs /etc/wireguard \
-    && chown -R quad:quad /app/data /app/logs /etc/wireguard
+RUN mkdir -p /app/data /app/logs \
+    && chown -R quad:quad /app/data /app/logs
 
-# Switch to non-root user
-USER quad
+# NOTE: We run as root (no USER quad) because WireGuard requires NET_ADMIN
+# capability and wg-quick needs root to create network interfaces. The bot
+# is already isolated inside its Docker container with NET_ADMIN only.
 
 # Expose health check port
 EXPOSE 9090
