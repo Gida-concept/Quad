@@ -1,0 +1,72 @@
+# =============================================================================
+# Docker Compose — Quad USD-M Futures Trading Bot
+#
+# Single-service deployment with volume mounts for config, data, and logs.
+# Environment variables are read from the host shell (or .env file).
+# =============================================================================
+
+services:
+  quad:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quad:latest
+    container_name: quad-bot
+    restart: unless-stopped
+
+    # Health check / metrics port
+    ports:
+      - "${QUAD_HEALTH_PORT:-9090}:9090"
+
+    volumes:
+      # Read-only config mount
+      - ./config:/app/config:ro
+      # Persistent data (SQLite database)
+      - quad_data:/app/data
+      # Log output directory
+      - quad_logs:/app/logs
+
+    environment:
+      # --- Operation Mode ---
+      - QUAD_MODE=${QUAD_MODE:-bybit}
+      - QUAD_DRY_RUN=${QUAD_DRY_RUN:-true}
+      - QUAD_LOG_LEVEL=${QUAD_LOG_LEVEL:-INFO}
+      - QUAD_LOG_FORMAT=${QUAD_LOG_FORMAT:-json}
+      - QUAD_DEFAULT_STRATEGY=${QUAD_DEFAULT_STRATEGY:-trend_following}
+      - QUAD_CONFIG_DIR=/app/config
+      - QUAD_HEALTH_PORT=${QUAD_HEALTH_PORT:-9090}
+
+      # --- Bybit API (REQUIRED) — USDT perpetual (category=linear) ---
+      - BYBIT_API_KEY=${BYBIT_API_KEY:-}
+      - BYBIT_API_SECRET=${BYBIT_API_SECRET:-}
+      - BYBIT_TESTNET=${BYBIT_TESTNET:-true}
+
+      # --- Telegram Bot (REQUIRED) ---
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
+      - TELEGRAM_NOTIFICATION_CHAT_ID=${TELEGRAM_NOTIFICATION_CHAT_ID:-}
+
+      # --- AI / Groq ---
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+
+      # --- Timezone ---
+      - TZ=UTC
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${QUAD_HEALTH_PORT:-9090}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    stop_grace_period: 30s
+    init: true
+
+volumes:
+  quad_data:
+  quad_logs:

@@ -5,6 +5,7 @@ _USDT Perpetual Futures Trading Bot for Bybit_
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.12%2B-blue" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
+  <img src="https://img.shields.io/badge/docker-ready-2496ED" alt="Docker Ready">
 </p>
 
 ---
@@ -101,7 +102,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 - **Backtesting Engine** -- Test strategies against historical data before risking capital
 - **Telegram + CLI Interface** -- Primary control via Telegram bot (python-telegram-bot v20+), with Typer CLI for secondary debugging
 - **SQLite Persistence** -- 16-table schema with aiosqlite for zero-config operation
-- **Async Architecture** -- Built on Python asyncio with structured concurrency
+- **Docker Deployable** -- Single-container deployment with health checks and Prometheus metrics
 - **Hot-Reload Configuration** -- Risk and strategy parameters update without restart
 - **Structured Logging** -- JSON-formatted logs for easy parsing and analysis
 
@@ -119,14 +120,15 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 | Configuration | PyYAML + python-dotenv | Layered config with hot-reload |
 | Logging | structlog | Structured JSON logging |
 | Async HTTP | aiohttp | REST API calls to Bybit |
+| Containerization | Docker | Single-container deployment |
 | Monitoring | Built-in HTTP server | Health checks, Prometheus metrics |
 
 ---
 
 ## Quick Start
 
-> **Python version**: Quad targets **Python 3.12+** (the reference runtime).
-> The codebase also runs on **3.10+** (`requires-python = ">=3.10"`), so
+> **Python version**: Quad targets **Python 3.12+** (matching the Docker images
+> and CI). The codebase also runs on **3.10+** (`requires-python = ">=3.10"`), so
 > existing 3.10 environments work, but 3.12 is the reference runtime.
 
 ```bash
@@ -208,7 +210,7 @@ Quad's primary user interface is a Telegram bot. All bot operations are availabl
 | [API Reference](docs/api.md) | Plugin interfaces, repository pattern, health server |
 | [Interface Commands](docs/interface-commands.md) | Full command reference for Telegram bot (primary) and Typer CLI (secondary) |
 | [Configuration](docs/configuration.md) | YAML config files, env vars, hierarchy, hot-reload |
-| [Deployment](docs/deployment.md) | Direct deployment, backup, security |
+| [Deployment](docs/deployment.md) | Docker and direct deployment, backup, security |
 | [Risk Management](docs/risk-management.md) | Pre-trade gates, circuit breakers, position sizing |
 | [Strategy Development](docs/strategy-development.md) | Writing custom strategy plugins |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
@@ -221,6 +223,8 @@ Quad's primary user interface is a Telegram bot. All bot operations are availabl
 ```
 quad/
 ├── .env.example              # Environment template
+├── docker-compose.yml        # Docker orchestration
+├── Dockerfile                # Container definition
 ├── README.md                 # This file
 ├── pyproject.toml            # Python project config
 ├── setup.py                  # Package installation

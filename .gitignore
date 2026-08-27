@@ -61,6 +61,10 @@ coverage.xml
 .env.local
 .env.*.local
 
+# === Docker ===
+.docker/
+docker-compose.override.yml
+
 # === OS ===
 .DS_Store
 .DS_Store?
