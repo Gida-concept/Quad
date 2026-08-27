@@ -28,10 +28,12 @@ FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
-# Install runtime deps: curl for health checks, wireguard for VPN
+# Install runtime deps: curl for health checks, wireguard + iproute2 + iptables for VPN
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     wireguard-tools \
+    iproute2 \
+    iptables \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder stage
