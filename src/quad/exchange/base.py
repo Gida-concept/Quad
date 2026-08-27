@@ -165,7 +165,7 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
-    async def cancel_order(self, order_id: int, symbol: str = "") -> bool:
+    async def cancel_order(self, order_id: int | str, symbol: str = "") -> bool:
         """Cancel an order by exchange order ID.
 
         Args:
@@ -180,7 +180,7 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
-    async def get_order_status(self, order_id: int, symbol: str = "") -> Order:
+    async def get_order_status(self, order_id: int | str, symbol: str = "") -> Order:
         """Get the current status of an order from the exchange.
 
         Args:
@@ -230,6 +230,27 @@ class ExchangeAdapter(ABC):
             exchange provides it) an aggregate ``pnl``.
         """
         ...
+
+    async def get_order_realized_pnl(
+        self, order_id: int | str, symbol: str = ""
+    ) -> Decimal:
+        """Fetch the realized PnL reported by the exchange for a specific order.
+
+        This is the **primary** PnL source for EXIT notifications: it queries
+        the exchange directly for a single close order's realized PnL, eliminating
+        the stale-window race of scanning execution history.
+
+        Args:
+            order_id: The exchange-assigned order identifier of the closing order.
+            symbol: Contract symbol (required by some exchanges for the query).
+
+        Returns:
+            The exchange's realized PnL for this order as a ``Decimal``.
+            ``Decimal(0)`` when the exchange does not report a value or the
+            query fails — callers must treat 0 as "no data" and fall back to
+            a computed PnL rather than trusting it as a real PnL figure.
+        """
+        return Decimal(0)
 
     # ------------------------------------------------------------------
     # REST — Futures Configuration

@@ -2622,12 +2622,31 @@ class QuadOrchestrator:
             if not raw_entry and entry_price_hint is not None:
                 raw_entry = entry_price_hint
             entry_price = Decimal(str(raw_entry or 0))
+
+            # PRIMARY: get realized PnL directly from the exchange for this
+            # specific closing order via GET /v5/order/history.  This is the
+            # exchange's own realized PnL — never a mark-price fallback or
+            # FIFO recomputation.  Eliminates the stale-window race of
+            # scanning /v5/execution/list (which returns up to 500 fills
+            # across all time for a symbol).
+            order_id = getattr(order_result, "order_id", 0) or 0
+            if order_id:
+                try:
+                    exchange_pnl = await self._exchange_adapter.get_order_realized_pnl(
+                        order_id, symbol
+                    )
+                    if exchange_pnl:
+                        return self._format_pnl(exchange_pnl, entry_price)
+                except Exception:
+                    pass  # Fall through to computed PnL below
+
+            # FALLBACK: compute PnL from fill/mark price and entry price.
             # Prefer the exchange fill price; fall back to the mark price.
             exit_price = Decimal(0)
-            fills = getattr(order_result, "fills", None) or []
-            if fills:
+            order_fills = getattr(order_result, "fills", None) or []
+            if order_fills:
                 try:
-                    exit_price = Decimal(str(fills[-1].get("price", "0")))
+                    exit_price = Decimal(str(order_fills[-1].get("price", "0")))
                 except (TypeError, ValueError):
                     exit_price = Decimal(0)
             if not exit_price:

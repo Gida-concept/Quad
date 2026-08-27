@@ -190,8 +190,8 @@ class Position:
 class Order:
     """Represents an order placed on an exchange."""
 
-    id: int | None = None
-    """Exchange order ID, None if not yet assigned."""
+    id: int | str | None = None
+    """Exchange order ID (int for Binance, UUID string for Bybit V5). None if not yet assigned."""
 
     client_order_id: str = ""
     """Client-assigned order identifier."""
@@ -277,8 +277,8 @@ class OrderRequest:
 class OrderResult:
     """Result returned after submitting or querying an order."""
 
-    order_id: int
-    """Exchange-assigned order ID."""
+    order_id: int | str
+    """Exchange-assigned order ID (int for Binance, UUID string for Bybit V5)."""
 
     client_order_id: str = ""
     """Client-assigned order identifier."""
@@ -318,8 +318,8 @@ class Trade:
     position_id: int | None = None
     """Position this trade belongs to."""
 
-    order_id: int | None = None
-    """Order this trade originated from."""
+    order_id: int | str | None = None
+    """Order this trade originated from (int for Binance, UUID string for Bybit V5)."""
 
     symbol: str = ""
     """Trading pair symbol."""

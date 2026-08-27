@@ -670,6 +670,11 @@ class ExecutionEngine:
 
                     price = _as_dec(getattr(leg, "price", 0))
                     qty = _as_dec(getattr(leg, "quantity", 0))
+                    # Prefer the exchange-reported realized PnL when available
+                    # (Bybit fills /v5/execution/list with realizedPnl).  The
+                    # FIFO computation below is only a fallback for when the
+                    # exchange does not provide per-fill realized PnL.
+                    exchange_pnl = _as_dec(getattr(leg, "pnl", 0))
                     pnl = Decimal(0)
                     if side == "BUY":
                         # Either an opening LONG (queue it) or the close of a
@@ -677,7 +682,8 @@ class ExecutionEngine:
                         if open_short_entries:
                             entry = open_short_entries.pop(0)
                             # SHORT close: profit when bought back below entry.
-                            pnl = (entry - price) * qty
+                            fifo_pnl = (entry - price) * qty
+                            pnl = exchange_pnl if exchange_pnl else fifo_pnl
                         open_long_entries.append(price)
                     elif side == "SELL":
                         # Either an opening SHORT (queue it) or the close of a
@@ -685,7 +691,8 @@ class ExecutionEngine:
                         if open_long_entries:
                             entry = open_long_entries.pop(0)
                             # LONG close: profit when sold above entry.
-                            pnl = (price - entry) * qty
+                            fifo_pnl = (price - entry) * qty
+                            pnl = exchange_pnl if exchange_pnl else fifo_pnl
                         open_short_entries.append(price)
 
                     await repo.create(

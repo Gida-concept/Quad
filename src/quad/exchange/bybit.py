@@ -223,8 +223,14 @@ class BybitFuturesAdapter(ExchangeAdapter):
     async def _get(self, endpoint: str, params: dict | None = None) -> dict:
         client = self._require_client()
         try:
-            # pybit's HTTP.get returns the full response dict (retCode/result).
-            resp = await client.get(endpoint, params or {})
+            # pybit v5 uses _submit_request() for raw API calls.
+            # The path must be fully qualified with the base endpoint.
+            full_path = f"{client.endpoint}{endpoint}"
+            resp = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client._submit_request(
+                    method="GET", path=full_path, query=params or {}, auth=True,
+                )
+            )
             return self._unwrap(resp)
         except Exception as exc:  # noqa: BLE001
             raise self._normalize_error(exc) from exc
@@ -232,7 +238,12 @@ class BybitFuturesAdapter(ExchangeAdapter):
     async def _post(self, endpoint: str, params: dict | None = None) -> dict:
         client = self._require_client()
         try:
-            resp = await client.post(endpoint, params or {})
+            full_path = f"{client.endpoint}{endpoint}"
+            resp = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client._submit_request(
+                    method="POST", path=full_path, query=params or {}, auth=True,
+                )
+            )
             return self._unwrap(resp)
         except Exception as exc:  # noqa: BLE001
             raise self._normalize_error(exc) from exc
@@ -376,12 +387,18 @@ class BybitFuturesAdapter(ExchangeAdapter):
                 try:
                     trades.append(
                         Trade(
-                            order_id=int(entry.get("orderId", 0) or 0),
+                            order_id=entry.get("orderId", 0) or 0,
                             symbol=sym,
                             side=str(entry.get("side", "")).upper(),
                             quantity=Decimal(str(entry.get("execQty", "0") or "0")),
                             price=Decimal(str(entry.get("execPrice", "0") or "0")),
                             fee=Decimal(str(entry.get("execFee", "0") or "0")),
+                            # Bybit's /v5/execution/list returns ``realizedPnl``
+                            # per fill — the exchange's own realized PnL for
+                            # that leg.  We take it directly from the trade so
+                            # the journal and Telegram alerts never compute a
+                            # stale/mock PnL from mark-price fallbacks.
+                            pnl=Decimal(str(entry.get("realizedPnl", "0") or "0")),
                             timestamp=int(entry.get("execTime", 0) or 0),
                         )
                     )
@@ -508,7 +525,9 @@ class BybitFuturesAdapter(ExchangeAdapter):
 
         data = await self._post("/v5/order/create", params)
 
-        order_id = int(data.get("orderId", 0) or 0)
+        # Bybit V5 returns orderId as a UUID string (e.g. "0f4a5a75-..."),
+        # not an integer.  Keep it as-is to avoid int() conversion errors.
+        order_id = data.get("orderId", 0) or 0
         status = data.get("orderStatus", "Created")
 
         return OrderResult(
@@ -527,7 +546,7 @@ class BybitFuturesAdapter(ExchangeAdapter):
             status=status,
         )
 
-    async def cancel_order(self, order_id: int, symbol: str = "") -> bool:
+    async def cancel_order(self, order_id: int | str, symbol: str = "") -> bool:
         """Cancel an order by Bybit order ID."""
         params: dict[str, object] = {"category": self.CATEGORY, "orderId": str(order_id)}
         if symbol:
@@ -540,7 +559,7 @@ class BybitFuturesAdapter(ExchangeAdapter):
         except ExchangeError:
             return False
 
-    async def get_order_status(self, order_id: int, symbol: str = "") -> Order:
+    async def get_order_status(self, order_id: int | str, symbol: str = "") -> Order:
         """Query a single order's status."""
         params: dict[str, object] = {"category": self.CATEGORY, "orderId": str(order_id)}
         if symbol:
@@ -549,7 +568,7 @@ class BybitFuturesAdapter(ExchangeAdapter):
         entries = (data or {}).get("list", []) if isinstance(data, dict) else []
         entry = entries[0] if entries else {}
         return Order(
-            id=int(entry.get("orderId", order_id) or order_id),
+            id=entry.get("orderId", order_id) or order_id,
             client_order_id=entry.get("orderLinkId", ""),
             symbol=entry.get("symbol", ""),
             side=entry.get("side", ""),
@@ -586,7 +605,7 @@ class BybitFuturesAdapter(ExchangeAdapter):
         for entry in (data or {}).get("list", []) if isinstance(data, dict) else []:
             orders.append(
                 Order(
-                    id=int(entry.get("orderId", 0) or 0),
+                    id=entry.get("orderId", 0) or 0,
                     client_order_id=entry.get("orderLinkId", ""),
                     symbol=entry.get("symbol", ""),
                     side=entry.get("side", ""),
@@ -610,6 +629,46 @@ class BybitFuturesAdapter(ExchangeAdapter):
                 )
             )
         return orders
+
+    async def get_order_realized_pnl(
+        self, order_id: int | str, symbol: str = ""
+    ) -> Decimal:
+        """Fetch the realized PnL for a single Bybit order via
+        ``GET /v5/order/history``.
+
+        This is the **primary** PnL source for EXIT notifications: it queries
+        a single close order's ``realizedPnl`` directly, eliminating the
+        stale-window race of scanning ``/v5/execution/list`` (which returns
+        up to 500 fills across all time for a symbol).
+
+        Bybit V5 ``/v5/order/history`` returns order history including
+        ``realizedPnl`` for filled/closed orders.
+
+        Args:
+            order_id: The Bybit order ID of the closing order.
+            symbol: Contract symbol (e.g. ``BTCUSDT``).
+
+        Returns:
+            The exchange's realized PnL for this order as a ``Decimal``.
+            ``Decimal(0)`` when the exchange doesn't report a value or the
+            query fails — callers must treat 0 as "no data" and fall back to
+            a computed PnL rather than trusting it as a real figure.
+        """
+        if not order_id:
+            return Decimal(0)
+        params: dict[str, object] = {
+            "category": self.CATEGORY,
+            "orderId": str(order_id),
+        }
+        if symbol:
+            params["symbol"] = symbol
+        try:
+            data = await self._get("/v5/order/history", params)
+        except ExchangeError:
+            return Decimal(0)
+        entries = (data or {}).get("list", []) if isinstance(data, dict) else []
+        entry = entries[0] if entries else {}
+        return Decimal(str(entry.get("realizedPnl", "0") or "0"))
 
     # ======================================================================
     # REST — Futures Configuration
@@ -636,7 +695,7 @@ class BybitFuturesAdapter(ExchangeAdapter):
         """Set position mode (one_way/hedge)."""
         dual = mode.lower() == "hedge"
         return await self._post(
-            "/v5/position/switch-position-mode",
+            "/v5/position/switch-mode",
             {"category": self.CATEGORY, "mode": 3 if dual else 0},
         )
 
@@ -686,9 +745,10 @@ class BybitFuturesAdapter(ExchangeAdapter):
             channel_type="private",
         )
         try:
-            self._ws.subscribe(
-                topic=["wallet", "position"], callback=_on_message
-            )
+            # pybit v5 subscribe() takes a single topic string, not a list.
+            # Subscribe to each private topic separately.
+            self._ws.subscribe(topic="wallet", callback=_on_message)
+            self._ws.subscribe(topic="position", callback=_on_message)
         except Exception as exc:  # noqa: BLE001
             raise ExchangeConnectionError(f"Bybit WS subscribe failed: {exc}") from exc
 

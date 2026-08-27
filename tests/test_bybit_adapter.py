@@ -282,5 +282,169 @@ class TestOrderMapping:
         assert p["side"] == "BUY"
         assert p["orderType"] == "MARKET"
         assert p["positionIdx"] == 0
-        assert result.order_id == 12345
+        assert result.order_id == "12345" or result.order_id == 12345
         assert result.status == "New"
+
+
+# ---------------------------------------------------------------------------
+
+
+# User-trades: realizedPnl is mapped directly from the exchange
+# ---------------------------------------------------------------------------
+
+
+class TestUserTradesPnL:
+    """get_user_trades must map Bybit's ``realizedPnl`` per fill into
+    ``Trade.pnl`` so downstream consumers (engine journal, Telegram alerts)
+    never compute a stale/mock PnL from mark-price fallbacks."""
+
+    @pytest.mark.asyncio
+    async def test_get_user_trades_maps_realized_pnl(self):
+        """A SELL close fill with realizedPnl must carry the exchange PnL."""
+        adapter = BybitFuturesAdapter(testnet=True)
+        adapter._exchange_info_cache = {}
+
+        # Bybit /v5/execution/list response shape
+        adapter._get = AsyncMock(return_value={
+            "list": [
+                {
+                    "orderId": "1001",
+                    "symbol": "BTCUSDT",
+                    "side": "SELL",
+                    "execQty": "0.010",
+                    "execPrice": "65000",
+                    "execFee": "1.30",
+                    "realizedPnl": "12.50",
+                    "execTime": "1700000000000",
+                },
+            ]
+        })
+
+        trades = await adapter.get_user_trades(symbol="BTCUSDT", limit=50)
+        assert len(trades) == 1
+        t = trades[0]
+        assert t.side == "SELL"
+        assert t.quantity == Decimal("0.010")
+        assert t.price == Decimal("65000")
+        assert t.fee == Decimal("1.30")
+        # The exchange's own realized PnL — not computed, not stale.
+        assert t.pnl == Decimal("12.50")
+        assert t.timestamp == 1700000000000
+
+    @pytest.mark.asyncio
+    async def test_get_user_trades_pnl_zero_when_missing(self):
+        """When Bybit omits realizedPnl (e.g. opening fills), PnL defaults 0."""
+        adapter = BybitFuturesAdapter(testnet=True)
+        adapter._exchange_info_cache = {}
+        adapter._get = AsyncMock(return_value={
+            "list": [
+                {
+                    "orderId": "2002",
+                    "symbol": "ETHUSDT",
+                    "side": "BUY",
+                    "execQty": "1.0",
+                    "execPrice": "3000",
+                    "execFee": "0.60",
+                    "execTime": "1700000001000",
+                },
+            ]
+        })
+
+        trades = await adapter.get_user_trades(symbol="ETHUSDT", limit=50)
+        assert len(trades) == 1
+        assert trades[0].pnl == Decimal("0")
+        assert trades[0].side == "BUY"
+
+    @pytest.mark.asyncio
+    async def test_get_user_trades_both_legs(self):
+        """Both BUY (open) and SELL (close) legs are returned with correct PnL."""
+        adapter = BybitFuturesAdapter(testnet=True)
+        adapter._exchange_info_cache = {}
+        adapter._get = AsyncMock(return_value={
+            "list": [
+                {
+                    "orderId": "3001", "symbol": "BTCUSDT", "side": "BUY",
+                    "execQty": "0.010", "execPrice": "60000",
+                    "execFee": "1.20", "realizedPnl": "0",
+                    "execTime": "1700000002000",
+                },
+                {
+                    "orderId": "3002", "symbol": "BTCUSDT", "side": "SELL",
+                    "execQty": "0.010", "execPrice": "65000",
+                    "execFee": "1.30", "realizedPnl": "50.00",
+                    "execTime": "1700000003000",
+                },
+            ]
+        })
+
+        trades = await adapter.get_user_trades(symbol="BTCUSDT", limit=50)
+        assert len(trades) == 2
+        assert trades[0].side == "BUY"
+        assert trades[0].pnl == Decimal("0")  # opening leg
+        assert trades[1].side == "SELL"
+        assert trades[1].pnl == Decimal("50.00")  # exchange realized PnL
+
+
+# ---------------------------------------------------------------------------
+# Order-level realized PnL: GET /v5/order/info
+# ---------------------------------------------------------------------------
+
+
+class TestOrderRealizedPnL:
+    """get_order_realized_pnl queries a single order's realizedPnl directly,
+    avoiding the stale-window race of scanning /v5/execution/list."""
+
+    @pytest.mark.asyncio
+    async def test_get_order_realized_pnl_returns_exchange_value(self):
+        """A close order's realizedPnl from /v5/order/info must be returned."""
+        adapter = BybitFuturesAdapter(testnet=True)
+        adapter._exchange_info_cache = {}
+        adapter._get = AsyncMock(return_value={
+            "list": [
+                {
+                    "orderId": "1001",
+                    "symbol": "BTCUSDT",
+                    "orderStatus": "Filled",
+                    "realizedPnl": "12.50",
+                }
+            ]
+        })
+
+        pnl = await adapter.get_order_realized_pnl(1001, "BTCUSDT")
+        assert pnl == Decimal("12.50")
+
+    @pytest.mark.asyncio
+    async def test_get_order_realized_pnl_zero_when_no_order_id(self):
+        """No order_id → returns Decimal(0) without an API call."""
+        adapter = BybitFuturesAdapter(testnet=True)
+        adapter._exchange_info_cache = {}
+        adapter._get = AsyncMock(return_value={"list": []})
+
+        pnl = await adapter.get_order_realized_pnl(0, "BTCUSDT")
+        assert pnl == Decimal(0)
+        # Must NOT call the API when order_id is 0
+        adapter._get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_get_order_realized_pnl_fallback_zero_on_error(self):
+        """When the exchange raises ExchangeError, returns Decimal(0)."""
+        adapter = BybitFuturesAdapter(testnet=True)
+        adapter._exchange_info_cache = {}
+        adapter._get = AsyncMock(side_effect=ExchangeError("network"))
+
+        pnl = await adapter.get_order_realized_pnl(9999, "BTCUSDT")
+        assert pnl == Decimal(0)
+
+    @pytest.mark.asyncio
+    async def test_get_order_realized_pnl_missing_field_defaults_zero(self):
+        """When realizedPnl is absent from the response, defaults to 0."""
+        adapter = BybitFuturesAdapter(testnet=True)
+        adapter._exchange_info_cache = {}
+        adapter._get = AsyncMock(return_value={
+            "list": [
+                {"orderId": "1001", "symbol": "BTCUSDT", "orderStatus": "Filled"}
+            ]
+        })
+
+        pnl = await adapter.get_order_realized_pnl(1001, "BTCUSDT")
+        assert pnl == Decimal(0)

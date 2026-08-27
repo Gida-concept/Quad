@@ -700,6 +700,7 @@ async def test_build_exit_pnl_uses_entry_price_hint_when_position_stale():
     orch._exchange_adapter = AsyncMock()
     orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
     orch._exchange_adapter.get_mark_price = AsyncMock(return_value="66000")
+    orch._exchange_adapter.get_order_realized_pnl = AsyncMock(return_value=Decimal(0))
 
     order_result = OrderResult(
         order_id=1,
@@ -731,6 +732,7 @@ async def test_build_exit_pnl_returns_none_when_no_entry_or_exit_price():
     orch._exchange_adapter = AsyncMock()
     orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
     orch._exchange_adapter.get_mark_price = AsyncMock(return_value="0")
+    orch._exchange_adapter.get_order_realized_pnl = AsyncMock(return_value=Decimal(0))
 
     order_result = OrderResult(
         order_id=1,
@@ -748,3 +750,85 @@ async def test_build_exit_pnl_returns_none_when_no_entry_or_exit_price():
         entry_price_hint=None,
     )
     assert pnl is None
+
+
+@pytest.mark.asyncio
+async def test_build_exit_pnl_prefers_exchange_order_realized_pnl():
+    """Adjustment: PnL for a closed trade must come directly from the exchange
+    via GET /v5/order/history's realizedPnl for the specific closing order, NOT
+    from mark-price fallbacks or FIFO computation on stale execution-list scans.
+    """
+    from quad.types.domain import OrderResult
+
+    orch = _orch()
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._exchange_adapter.get_mark_price = AsyncMock(
+        return_value="999999"  # deliberately wrong — must NOT be used
+    )
+
+    # The exchange returns realizedPnl=50.00 for order_id=42 via /v5/order/info
+    orch._exchange_adapter.get_order_realized_pnl = AsyncMock(
+        return_value=Decimal("50.00")
+    )
+
+    order_result = OrderResult(
+        order_id=42,
+        symbol="BTCUSDT",
+        side="SELL",
+        status="FILLED",
+        fills=[{"price": "65000", "qty": "0.01"}],
+    )
+
+    pnl = await orch._build_exit_pnl_text(
+        "BTCUSDT",
+        "LONG",
+        Decimal("0.01"),
+        order_result,
+        entry_price_hint=Decimal("60000"),
+    )
+    # Must use the exchange's 50.00 via get_order_realized_pnl, not the
+    # mark-price fallback (999999) or the computed (65000-60000)*0.01 = 50.00.
+    assert pnl is not None
+    assert "50.00" in pnl
+    # Must have called the order-level PnL endpoint, not get_user_trades
+    orch._exchange_adapter.get_order_realized_pnl.assert_awaited_once_with(42, "BTCUSDT")
+    orch._exchange_adapter.get_mark_price.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_build_exit_pnl_falls_back_to_computed_when_exchange_pnl_zero():
+    """When the exchange returns realizedPnl=0 (no close fill yet visible),
+    the computed PnL fallback is used (not the mark price if fills are present)."""
+    from quad.types.domain import OrderResult
+
+    orch = _orch()
+    orch._exchange_adapter = AsyncMock()
+    orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
+    orch._exchange_adapter.get_mark_price = AsyncMock(
+        return_value="999999"  # must NOT be used since fills provide exit price
+    )
+    orch._exchange_adapter.get_order_realized_pnl = AsyncMock(
+        return_value=Decimal("0")  # exchange has no realized PnL yet
+    )
+
+    order_result = OrderResult(
+        order_id=42,
+        symbol="BTCUSDT",
+        side="SELL",
+        status="FILLED",
+        fills=[{"price": "65000", "qty": "0.01"}],
+    )
+
+    pnl = await orch._build_exit_pnl_text(
+        "BTCUSDT",
+        "LONG",
+        Decimal("0.01"),
+        order_result,
+        entry_price_hint=Decimal("60000"),
+    )
+    # Falls back to computed: (65000 - 60000) * 0.01 = 50.00
+    assert pnl is not None
+    assert "50.00" in pnl
+    # mark_price must NOT be consulted since fills provide the exit price
+    orch._exchange_adapter.get_mark_price.assert_not_awaited()
