@@ -30,14 +30,12 @@ services:
       # --- Tailscale Auth (REQUIRED) ---
       # Get your auth key from https://login.tailscale.com/admin/acls/keys
       - TS_AUTHKEY=${TS_AUTHKEY:-}
-      - TS_ADVERTISE_EXIT_NODE=${TS_ADVERTISE_EXIT_NODE:-true}
+      - TS_ADVERTISE_EXIT_NODE=${TS_ADVERTISE_EXIT_NODE:-false}
       - TS_STATE_DIR=${TS_STATE_DIR:-/var/lib/tailscale}
       - TS_USERSPACE_ONLY=${TS_USERSPACE_ONLY:-true}
       - TS_NO_LOGS_NO_DIRS=${TS_NO_LOGS_NO_DIRS:-true}
-      # Advertise this node as an exit node for non-US routing
-      - TS_ADVERTISE_ROUTES=${TS_ADVERTISE_ROUTES:-}
-      - TS_EXIT_NODE=${TS_EXIT_NODE:-}
-      - TS_EXIT_NODE_IP=${TS_EXIT_NODE_IP:-}
+      # Set the exit node to route traffic through (must be a non-US node)
+      - TS_EXIT_NODE=${TS_EXIT_NODE_IP:-}
       # Optional: restrict to specific tailnet users
       - TS_TAILNET=${TS_TAILNET:-}
       - TZ=UTC
