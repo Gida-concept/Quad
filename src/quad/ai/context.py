@@ -43,8 +43,14 @@ logger = structlog.get_logger(__name__)
 
 # Mapping from our timeframe strings to exchange interval strings
 _TIMEFRAME_MAP: dict[str, str] = {
+    "1m": "1m",
+    "5m": "5m",
     "15m": "15m",
-    "1h": "1h",
+    "30m": "30m",
+    "1h": "1H",
+    "4h": "4H",
+    "1d": "1D",
+    "1w": "1W",
 }
 
 
