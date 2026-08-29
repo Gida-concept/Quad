@@ -107,6 +107,26 @@ class ExchangeAdapter(ABC):
         """
         return False
 
+    @property
+    def public_ws_url(self) -> str:
+        """Return the public WebSocket URL for market data streams.
+
+        Returns the correct URL based on the adapter's environment
+        (testnet vs live).  Subclasses should override this to return
+        the appropriate endpoint.
+        """
+        return "wss://ws.okx.com:8443/ws/v5/public"
+
+    @property
+    def private_ws_url(self) -> str:
+        """Return the private WebSocket URL for account data streams.
+
+        Returns the correct URL based on the adapter's environment
+        (testnet vs live).  Subclasses should override this to return
+        the appropriate endpoint.
+        """
+        return "wss://ws.okx.com:8443/ws/v5/private"
+
     # ------------------------------------------------------------------
     # REST — Account & Positions
     # ------------------------------------------------------------------

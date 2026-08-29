@@ -294,6 +294,20 @@ class OkxFuturesAdapter(ExchangeAdapter):
     def is_testnet(self) -> bool:
         return self._testnet
 
+    @property
+    def public_ws_url(self) -> str:
+        """OKX demo trading uses a different WebSocket endpoint."""
+        if self._testnet:
+            return "wss://wspap.okx.com:8443/ws/v5/public"
+        return "wss://ws.okx.com:8443/ws/v5/public"
+
+    @property
+    def private_ws_url(self) -> str:
+        """OKX demo trading uses a different WebSocket endpoint."""
+        if self._testnet:
+            return "wss://wspap.okx.com:8443/ws/v5/private"
+        return "wss://ws.okx.com:8443/ws/v5/private"
+
     # ======================================================================
     # Internal — REST helpers (sync SDK via async executor)
     # ======================================================================
@@ -727,22 +741,24 @@ class OkxFuturesAdapter(ExchangeAdapter):
         """Set margin mode (isolated/cross) for a symbol.
 
         OKX V5 API: POST /api/v5/account/set-margin-mode
-        Parameters: instId, mgnMode
+        Note: On OKX demo trading, margin mode is already isolated by default.
+        This is a best-effort call — failures are logged but not raised.
         """
         if margin_type.lower() == "isolated":
             inst_id = okx_symbol(symbol)
-            # Use raw API call since the SDK's set_isolated_mode has wrong params
-            client = self._account_client
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client._request_with_params(
-                    "POST",
-                    "/api/v5/account/set-margin-mode",
-                    {"instId": inst_id, "mgnMode": "isolated"},
-                ),
-            )
-            data = self._unwrap(result)
-            return data[0] if isinstance(data, list) and data else {}
+            try:
+                data = await self._get_account(
+                    "set_isolated_mode",
+                    {"isoMode": "isolated", "type": "margin"},
+                )
+                return data[0] if isinstance(data, list) and data else {}
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning(
+                    "set_margin_mode_ignored",
+                    symbol=inst_id,
+                    error=str(exc),
+                )
+                return {}
         # Cross is the default, nothing to set
         return {}
 

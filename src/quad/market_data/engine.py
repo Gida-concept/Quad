@@ -160,6 +160,8 @@ class MarketDataEngine:
             exchange_adapter=self._exchange,
             config=self._config,
         )
+        # Override WebSocket URL with the adapter's testnet-aware URL
+        self._ws_manager._ws_url = self._exchange.public_ws_url
         await self._ws_manager.start()
 
         # Subscribe to OKX V5 futures market data channels
