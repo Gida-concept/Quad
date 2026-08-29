@@ -726,15 +726,22 @@ class OkxFuturesAdapter(ExchangeAdapter):
     async def set_margin_mode(self, symbol: str, margin_type: str) -> dict:
         """Set margin mode (isolated/cross) for a symbol.
 
-        OKX sets margin mode per position via set_isolated_mode.
-        Cross mode is the default; for isolated mode we use set_isolated_mode.
+        OKX V5 API: POST /api/v5/account/set-margin-mode
+        Parameters: instId, mgnMode
         """
         if margin_type.lower() == "isolated":
             inst_id = okx_symbol(symbol)
-            data = await self._get_account(
-                "set_isolated_mode",
-                {"instId": inst_id, "mgnMode": "isolated"},
+            # Use raw API call since the SDK's set_isolated_mode has wrong params
+            client = self._account_client
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client._request_with_params(
+                    "POST",
+                    "/api/v5/account/set-margin-mode",
+                    {"instId": inst_id, "mgnMode": "isolated"},
+                ),
             )
+            data = self._unwrap(result)
             return data[0] if isinstance(data, list) and data else {}
         # Cross is the default, nothing to set
         return {}
