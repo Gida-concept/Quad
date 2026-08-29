@@ -251,7 +251,9 @@ class OkxFuturesAdapter(ExchangeAdapter):
             flag=flag,
         )
 
-        # Verify connectivity / credentials by hitting the server time
+        # Verify connectivity / credentials by hitting the server time.
+        # Temporarily mark as connected so _require_clients() passes during init.
+        self._connected = True
         try:
             await self.get_server_time()
             self._log.info(
@@ -259,12 +261,11 @@ class OkxFuturesAdapter(ExchangeAdapter):
                 testnet=self._testnet,
             )
         except Exception as exc:  # noqa: BLE001 broad guard on connect
+            self._connected = False
             self._disconnect_clients()
             raise ExchangeConnectionError(
                 f"Failed to connect to OKX: {exc}"
             ) from exc
-
-        self._connected = True
 
     async def disconnect(self) -> None:
         """Close clients and clear state."""
