@@ -178,7 +178,7 @@ def _klines_to_candles(
                 low=Decimal(str(k[3])),
                 close=Decimal(str(k[4])),
                 volume=Decimal(str(k[5])),
-                timestamp=int(k[0] * 1000),  # store in ms for consistency
+                timestamp=int(k[0]),  # OKX timestamps are already in ms
             )
         )
     return candles
