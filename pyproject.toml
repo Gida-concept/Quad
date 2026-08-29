@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quad"
 version = "0.1.0"
-description = "Production-grade open-source USD-M futures trading bot for Binance Futures"
+description = "Production-grade open-source USD-M futures trading bot for OKX"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-keywords = ["trading", "futures", "usdm", "binance", "crypto"]
+keywords = ["trading", "futures", "usdm", "okx", "crypto"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -31,7 +31,7 @@ dependencies = [
     "pydantic>=2.0",
     "python-telegram-bot[job-queue]>=20.0",
     "groq>=0.4.0",
-    "pybit>=5.0.0",
+    "python-okx>=0.4.0",
 ]
 
 [project.scripts]

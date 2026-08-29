@@ -348,7 +348,7 @@ Performance:
 
 Backtests use historical futures kline data stored in the market data cache. Data can be loaded from:
 
-1. **Bybit historical downloads** -- CSV kline data downloaded from Bybit V5 API
+1. **OKX historical downloads** -- CSV kline data downloaded from OKX V5 API
 2. **Database snapshots** -- Previously stored candle data
 3. **Live data captures** -- Gathered during paper trading sessions
 
@@ -439,7 +439,7 @@ Always test new strategies in dry-run or testnet mode:
 quad start --dry-run
 
 # Testnet with dry_run off (real order placement on testnet, no live funds)
-# Set BYBIT_TESTNET=true and QUAD_DRY_RUN=false in .env
+# Set OKX_TESTNET=true and QUAD_DRY_RUN=false in .env
 quad start
 ```
 

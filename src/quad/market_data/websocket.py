@@ -1,18 +1,19 @@
-"""Centralized WebSocket connection manager for futures market data streams.
+"""Centralized WebSocket connection manager for OKX V5 futures market data streams.
 
-Provides ``WebSocketManager`` that manages subscriptions to named streams,
+Provides ``WebSocketManager`` that manages subscriptions to OKX V5 channels,
 handles automatic reconnection with exponential backoff, and routes incoming
 messages to registered callbacks.
 
-Supports Bybit V5 public/private WebSocket streams including:
-  - ``!miniTicker@arr`` — 24-hour mini ticker array
-  - ``!markPrice@arr@1s`` — mark price + funding rate array (1s updates)
-  - ``!bookTicker`` — real-time best bid/ask for all symbols
-  - ``{symbol}@kline_{interval}`` — individual kline/candle streams
-  - ``{symbol}@ticker_1h`` — 1-hour ticker window
-  - ``!forceOrder@arr`` — liquidation order monitoring
+Supports OKX V5 public/private WebSocket streams including:
+  - ``tickers`` — 24h ticker data for all symbols
+  - ``mark-price`` — mark price + funding rate updates
+  - ``books5`` — top 5 order book levels (best bid/ask)
+  - ``candle{interval}`` — kline/candlestick updates
+  - ``liquidation-orders`` — forced/liquidation order events
+  - ``trades`` — public trade feed
 
-Uses ``aiohttp`` for WebSocket connections.
+Uses ``aiohttp`` for WebSocket connections. Supports multiplexed subscriptions
+(multiple channels per connection) as recommended by OKX V5 API.
 """
 
 from __future__ import annotations
@@ -36,19 +37,39 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# OKX V5 channel constants
+# ---------------------------------------------------------------------------
+
+# Channel names used by OKX V5 WebSocket API
+CHANNEL_TICKERS = "tickers"
+CHANNEL_MARK_PRICE = "mark-price"
+CHANNEL_BOOKS5 = "books5"
+CHANNEL_BOOKS = "books"
+CHANNEL_CANDLE = "candle"
+CHANNEL_LIQUIDATION_ORDERS = "liquidation-orders"
+CHANNEL_TRADES = "trades"
+
+# Default heartbeat interval (OKX requires ping every 30 seconds)
+DEFAULT_HEARTBEAT_INTERVAL = 30.0
+
+
+# ---------------------------------------------------------------------------
 # Subscription dataclass
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class _Subscription:
-    """Internal record for a single stream subscription."""
+    """Internal record for a single channel subscription."""
 
     id: str
     """Unique subscription identifier (uuid4)."""
 
-    stream_name: str
-    """Name of the stream (e.g. ``"BTCUSDT@kline_1m"``)."""
+    channel: str
+    """OKX V5 channel name (e.g. ``"tickers"``)."""
+
+    inst_id: str
+    """OKX V5 instrument ID (e.g. ``"BTC-USDT-SWAP"`` or ``"*"``)."""
 
     handler: Callable[[dict], Awaitable[None]]
     """Async callback invoked with each parsed JSON message."""
@@ -72,18 +93,18 @@ class _Subscription:
 
 
 class WebSocketManager:
-    """Manages multiple WebSocket subscriptions to futures market data streams.
+    """Manages WebSocket subscriptions to OKX V5 market data channels.
 
-    * Accepts a list of stream names to subscribe to (e.g. ``!miniTicker@arr``).
+    * Accepts channel subscriptions with instrument IDs.
     * Handles reconnection with exponential backoff + jitter.
-    * Routes received messages to registered handlers by stream name.
-    * Supports individual connections per stream.
+    * Routes received messages to registered handlers by channel.
+    * Supports multiplexed subscriptions (multiple channels per connection).
 
     Usage::
 
         mgr = WebSocketManager(exchange_adapter)
         await mgr.start()
-        sub_id = await mgr.subscribe("BTCUSDT@kline_1m", my_handler)
+        sub_id = await mgr.subscribe("tickers", "BTC-USDT-SWAP", my_handler)
         ...
         await mgr.unsubscribe(sub_id)
         await mgr.stop()
@@ -104,7 +125,7 @@ class WebSocketManager:
             Optional configuration dict.  Recognised keys:
 
             * ``ws_url`` — Override the WebSocket URL.
-              Defaults to ``wss://stream.bybit.com/v5/public/linear``.
+              Defaults to ``wss://ws.okx.com:8443/ws/v5/public``.
             * ``ws_heartbeat_interval`` — Seconds between keepalive pings.
         """
         self._exchange = exchange_adapter
@@ -117,21 +138,22 @@ class WebSocketManager:
 
         self._log = logger.bind(ws_url=self._ws_url)
 
-        # stream_name -> list of _Subscription
-        self._stream_handlers: dict[str, list[_Subscription]] = {}
+        # Subscription management
+        self._subscriptions: dict[str, _Subscription] = {}
+        # subscription_id -> subscription
 
-        # stream_name -> asyncio.Task for the connection runner
-        self._tasks: dict[str, asyncio.Task[None]] = {}
-
-        # stream_name -> aiohttp.ClientWebSocketResponse
-        self._connections: dict[str, aiohttp.ClientWebSocketResponse[bool]] = {}
+        # Connection management (multiplexed: one connection for all channels)
+        self._connection: aiohttp.ClientWebSocketResponse[bool] | None = None
+        self._connection_task: asyncio.Task[None] | None = None
 
         # Shared aiohttp session (created once in start())
         self._session: aiohttp.ClientSession | None = None
 
         self._running = False
         self._lock = asyncio.Lock()
-        self._sub_id_map: dict[str, str] = {}  # subscription_id -> stream_name
+
+        # Pending subscribe/unsubscribe operations
+        self._pending_ops: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -140,8 +162,8 @@ class WebSocketManager:
     async def start(self) -> None:
         """Begin processing all active subscriptions.
 
-        Creates the shared HTTP session and starts a connection task for
-        every currently registered stream.
+        Creates the shared HTTP session and starts a single multiplexed
+        connection task for all channels.
         """
         if self._running:
             self._log.warning("already_running")
@@ -151,17 +173,15 @@ class WebSocketManager:
         self._session = aiohttp.ClientSession()
         self._log.info("ws_manager_started")
 
-        # Start background tasks for existing subscriptions
-        async with self._lock:
-            for stream_name in list(self._stream_handlers.keys()):
-                self._tasks[stream_name] = asyncio.create_task(
-                    self._run_stream_connection(stream_name),
-                )
+        # Start the single connection task
+        self._connection_task = asyncio.create_task(
+            self._run_connection(),
+        )
 
     async def stop(self) -> None:
         """Gracefully stop all connections and cancel background tasks.
 
-        Closes all WebSocket connections, cancels connection tasks, and
+        Closes the WebSocket connection, cancels connection tasks, and
         closes the shared HTTP session.
         """
         if not self._running:
@@ -170,22 +190,18 @@ class WebSocketManager:
         self._log.info("ws_manager_stopping")
         self._running = False
 
-        async with self._lock:
-            # Close all WebSocket connections
-            for stream_name, ws in list(self._connections.items()):
-                try:
-                    await ws.close()
-                except Exception:
-                    self._log.exception(
-                        "ws_close_error",
-                        stream=stream_name,
-                    )
-            self._connections.clear()
+        # Close the connection
+        if self._connection is not None:
+            try:
+                await self._connection.close()
+            except Exception:
+                self._log.exception("ws_close_error")
+            self._connection = None
 
-            # Cancel all background tasks
-            for stream_name, task in list(self._tasks.items()):
-                task.cancel()
-            self._tasks.clear()
+        # Cancel the connection task
+        if self._connection_task is not None:
+            self._connection_task.cancel()
+            self._connection_task = None
 
         # Close shared HTTP session
         if self._session is not None:
@@ -200,15 +216,18 @@ class WebSocketManager:
 
     async def subscribe(
         self,
-        stream_name: str,
+        channel: str,
+        inst_id: str,
         handler: Callable[[dict], Awaitable[None]],
     ) -> str:
-        """Subscribe to a stream and register a callback.
+        """Subscribe to an OKX V5 channel and register a callback.
 
         Parameters
         ----------
-        stream_name:
-            The stream to subscribe to (e.g. ``"BTCUSDT@kline_1m"``).
+        channel:
+            OKX V5 channel name (e.g. ``"tickers"``).
+        inst_id:
+            OKX V5 instrument ID (e.g. ``"BTC-USDT-SWAP"`` or ``"*"``).
         handler:
             Async callback invoked with each decoded JSON message.
 
@@ -221,37 +240,31 @@ class WebSocketManager:
         sub_id = str(uuid.uuid4())
         sub = _Subscription(
             id=sub_id,
-            stream_name=stream_name,
+            channel=channel,
+            inst_id=inst_id,
             handler=handler,
         )
 
         async with self._lock:
-            if stream_name not in self._stream_handlers:
-                self._stream_handlers[stream_name] = []
+            self._subscriptions[sub_id] = sub
 
-            self._stream_handlers[stream_name].append(sub)
-            self._sub_id_map[sub_id] = stream_name
-
-            # If the manager is already running and this is the first
-            # subscription for this stream, start a connection task.
-            if self._running and stream_name not in self._tasks:
-                self._tasks[stream_name] = asyncio.create_task(
-                    self._run_stream_connection(stream_name),
-                )
-            # If a connection already exists, send a SUBSCRIBE message
-            elif self._running and stream_name in self._connections:
-                await self._send_subscribe(stream_name)
+        # Queue a subscribe operation
+        await self._pending_ops.put({
+            "op": "subscribe",
+            "args": [{"channel": channel, "instId": inst_id}],
+        })
 
         self._log.debug(
             "subscribed",
-            stream=stream_name,
+            channel=channel,
+            inst_id=inst_id,
             sub_id=sub_id,
-            total_subs=len(self._stream_handlers[stream_name]),
+            total_subs=len(self._subscriptions),
         )
         return sub_id
 
     async def unsubscribe(self, subscription_id: str) -> bool:
-        """Unsubscribe from a stream by subscription ID.
+        """Unsubscribe from a channel by subscription ID.
 
         Parameters
         ----------
@@ -264,61 +277,52 @@ class WebSocketManager:
             ``True`` if the subscription was found and removed.
         """
         async with self._lock:
-            stream_name = self._sub_id_map.pop(subscription_id, None)
-            if stream_name is None:
+            sub = self._subscriptions.pop(subscription_id, None)
+            if sub is None:
                 return False
 
-            subs = self._stream_handlers.get(stream_name, [])
-            before = len(subs)
-            self._stream_handlers[stream_name] = [
-                s for s in subs if s.id != subscription_id
-            ]
-            removed = before - len(self._stream_handlers[stream_name])
-
-            # If no more handlers remain for this stream, tear down
-            if len(self._stream_handlers[stream_name]) == 0:
-                del self._stream_handlers[stream_name]
-                await self._stop_stream_connection(stream_name)
+        # Queue an unsubscribe operation
+        await self._pending_ops.put({
+            "op": "unsubscribe",
+            "args": [{"channel": sub.channel, "instId": sub.inst_id}],
+        })
 
         self._log.debug(
             "unsubscribed",
             sub_id=subscription_id,
-            stream=stream_name,
+            channel=sub.channel,
+            inst_id=sub.inst_id,
         )
-        return removed > 0
+        return True
 
     async def resubscribe_all(self) -> None:
-        """Reconnect all active subscriptions.
+        """Reconnect and re-subscribe all active subscriptions.
 
-        Closes all existing connections and re-establishes them.  Useful
+        Closes the existing connection and re-establishes it.  Useful
         after a complete connection loss.
         """
         async with self._lock:
-            # Close existing connections
-            for stream_name in list(self._connections.keys()):
-                ws = self._connections.get(stream_name)
-                if ws is not None:
-                    try:
-                        await ws.close()
-                    except Exception:  # noqa: S110  best-effort close; stream may already be gone
-                        pass
+            # Close existing connection
+            if self._connection is not None:
+                try:
+                    await self._connection.close()
+                except Exception:  # noqa: S110  best-effort close
+                    pass
+                self._connection = None
 
-            # Cancel existing tasks
-            for stream_name in list(self._tasks.keys()):
-                self._tasks[stream_name].cancel()
+            # Cancel existing task
+            if self._connection_task is not None:
+                self._connection_task.cancel()
+                self._connection_task = None
 
-            self._connections.clear()
-            self._tasks.clear()
+            # Reset reconnect counts
+            for sub in self._subscriptions.values():
+                sub.reconnect_count = 0
 
-            # Restart connection tasks
-            for stream_name in list(self._stream_handlers.keys()):
-                # Reset reconnect counts
-                for sub in self._stream_handlers[stream_name]:
-                    sub.reconnect_count = 0
-
-                self._tasks[stream_name] = asyncio.create_task(
-                    self._run_stream_connection(stream_name),
-                )
+        # Restart connection task
+        self._connection_task = asyncio.create_task(
+            self._run_connection(),
+        )
 
         self._log.info("resubscribed_all")
 
@@ -327,33 +331,32 @@ class WebSocketManager:
     # ------------------------------------------------------------------
 
     def status(self) -> dict:
-        """Return current connection status for all streams.
+        """Return current connection status for all subscriptions.
 
         Returns
         -------
         dict
             Keys:
-            * ``active_subscriptions`` — total number of subscription slots.
-            * ``streams_active`` — number of distinct streams.
-            * ``reconnect_counts`` — mapping of stream_name -> total reconnects.
-            * ``last_message_times`` — mapping of stream_name -> last message
+            * ``active_subscriptions`` — total number of active subscriptions.
+            * ``channels_active`` — number of distinct channels.
+            * ``reconnect_count`` — total reconnects.
+            * ``last_message_times`` — mapping of channel -> last message
               timestamp (epoch seconds, or 0 if no message yet).
         """
-        reconnect_counts: dict[str, int] = {}
+        reconnect_count = 0
         last_message_times: dict[str, float] = {}
-        active_count = 0
+        channels_active = set()
 
-        for stream_name, subs in self._stream_handlers.items():
-            reconnect_counts[stream_name] = sum(s.reconnect_count for s in subs)
-            last_message_times[stream_name] = (
-                max(s.last_message_at for s in subs) if subs else 0.0
-            )
-            active_count += len(subs)
+        for sub in self._subscriptions.values():
+            reconnect_count += sub.reconnect_count
+            channels_active.add(sub.channel)
+            key = f"{sub.channel}:{sub.inst_id}"
+            last_message_times[key] = sub.last_message_at
 
         return {
-            "active_subscriptions": active_count,
-            "streams_active": len(self._stream_handlers),
-            "reconnect_counts": reconnect_counts,
+            "active_subscriptions": len(self._subscriptions),
+            "channels_active": len(channels_active),
+            "reconnect_count": reconnect_count,
             "last_message_times": last_message_times,
         }
 
@@ -361,13 +364,12 @@ class WebSocketManager:
     # Internal: connection runner
     # ------------------------------------------------------------------
 
-    async def _run_stream_connection(self, stream_name: str) -> None:
-        """Background task that maintains one WebSocket connection.
+    async def _run_connection(self) -> None:
+        """Background task that maintains a single multiplexed WebSocket connection.
 
-        Connects to the WebSocket endpoint, subscribes to *stream_name*,
-        reads messages, and dispatches them to registered handlers.
-        Reconnects automatically on failure with exponential backoff,
-        unless the subscription has been removed.
+        Connects to the WebSocket endpoint, processes pending subscribe/unsubscribe
+        operations, reads messages, and dispatches them to registered handlers.
+        Reconnects automatically on failure with exponential backoff.
         """
         ws_backoff_cfg = self._ws_config["backoff"]
         ws_base_backoff = float(ws_backoff_cfg["base_seconds"])
@@ -378,30 +380,22 @@ class WebSocketManager:
         backoff = ws_base_backoff
 
         while self._running:
-            # Check whether the subscription still exists
+            # Check whether there are any subscriptions
             async with self._lock:
-                if stream_name not in self._stream_handlers:
-                    self._log.debug(
-                        "stream_no_longer_subscribed",
-                        stream=stream_name,
-                    )
-                    self._tasks.pop(stream_name, None)
+                if not self._subscriptions:
+                    self._log.debug("no_subscriptions")
                     return
 
             try:
-                await self._connect_and_read(stream_name)
+                await self._connect_and_read()
                 # Connection closed cleanly --- reset backoff
                 backoff = ws_base_backoff
             except asyncio.CancelledError:
-                self._log.debug(
-                    "ws_task_cancelled",
-                    stream=stream_name,
-                )
+                self._log.debug("ws_task_cancelled")
                 raise
             except Exception:
                 self._log.exception(
                     "ws_connection_error",
-                    stream=stream_name,
                     backoff_s=round(backoff, 2),
                 )
 
@@ -410,8 +404,7 @@ class WebSocketManager:
 
             # Update reconnect counts
             async with self._lock:
-                subs = self._stream_handlers.get(stream_name, [])
-                for sub in subs:
+                for sub in self._subscriptions.values():
                     sub.reconnect_count += 1
 
             # Exponential backoff with jitter
@@ -422,13 +415,11 @@ class WebSocketManager:
                 ws_max_backoff,
             )
 
-        self._tasks.pop(stream_name, None)
+    async def _connect_and_read(self) -> None:
+        """Connect to OKX V5 WebSocket and read messages.
 
-    async def _connect_and_read(self, stream_name: str) -> None:
-        """Connect to WebSocket and read messages.
-
-        Opens a WebSocket to ``self._ws_url``, subscribes to *stream_name*,
-        and forwards every incoming message to registered handlers until
+        Opens a WebSocket connection, subscribes to all active channels,
+        and forwards incoming messages to registered handlers until
         the connection is closed or cancelled.
         """
         session = self._session
@@ -437,174 +428,204 @@ class WebSocketManager:
 
         async with session.ws_connect(
             self._ws_url,
-            heartbeat=float(self._ws_config["heartbeat_interval_seconds"]),
+            heartbeat=DEFAULT_HEARTBEAT_INTERVAL,
         ) as ws:
-            # Store the connection so we can close it later
-            async with self._lock:
-                self._connections[stream_name] = ws
+            self._connection = ws
+            self._log.info("ws_connected", url=self._ws_url)
 
-            self._log.info(
-                "ws_connected",
-                stream=stream_name,
-            )
+            # Subscribe to all active channels
+            await self._subscribe_all_channels(ws)
 
-            # Subscribe to the stream
-            await self._send_subscribe(stream_name)
-
+            # Process pending operations and read messages
             try:
-                async for msg in ws:
-                    if not self._running:
-                        break
+                while self._running:
+                    # Process pending subscribe/unsubscribe operations
+                    await self._process_pending_ops(ws)
 
-                    if msg.type == 0x1:  # aiohttp.WSMsgType.TEXT
-                        await self._handle_message(stream_name, msg.data)
+                    # Check for messages with a short timeout
+                    try:
+                        msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    if msg.type == 0x1:  # TEXT
+                        await self._handle_message(msg.data)
                     elif msg.type == 0x8:  # Close
-                        self._log.info(
-                            "ws_closed",
-                            stream=stream_name,
-                            code=ws.close_code,
-                        )
+                        self._log.info("ws_closed", code=ws.close_code)
                         break
                     elif msg.type == 0x9:  # Ping
-                        await ws.pong()
+                        # OKX sends "ping" text, respond with "pong"
+                        if msg.data == "ping":
+                            await ws.send_str("pong")
                     elif msg.type == 0xA:  # Pong
                         pass
                     elif msg.type == 0x2:  # Binary (unexpected)
-                        self._log.warning(
-                            "ws_unexpected_binary",
-                            stream=stream_name,
-                        )
+                        self._log.warning("ws_unexpected_binary")
 
             finally:
-                async with self._lock:
-                    if self._connections.get(stream_name) is ws:
-                        del self._connections[stream_name]
+                self._connection = None
 
-    async def _send_subscribe(self, stream_name: str) -> None:
-        """Send a SUBSCRIBE message on the connection for *stream_name*."""
-        ws = self._connections.get(stream_name)
-        if ws is None:
-            self._log.warning(
-                "cannot_subscribe_no_connection",
-                stream=stream_name,
-            )
+    async def _subscribe_all_channels(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        """Subscribe to all active channels on the given connection."""
+        async with self._lock:
+            # Group subscriptions by channel+instId to avoid duplicates
+            args = []
+            seen = set()
+            for sub in self._subscriptions.values():
+                key = (sub.channel, sub.inst_id)
+                if key not in seen:
+                    seen.add(key)
+                    args.append({"channel": sub.channel, "instId": sub.inst_id})
+
+        if not args:
             return
 
-        payload = json.dumps(
-            {
-                "method": "SUBSCRIBE",
-                "params": [stream_name],
+        # OKX allows up to 300 args per subscribe message
+        for i in range(0, len(args), 300):
+            batch = args[i:i + 300]
+            payload = json.dumps({
+                "op": "subscribe",
+                "args": batch,
                 "id": str(uuid.uuid4()),
-            }
-        )
-        try:
-            await ws.send_str(payload)
-            self._log.debug(
-                "subscribe_sent",
-                stream=stream_name,
-            )
-        except Exception:
-            self._log.exception(
-                "subscribe_send_failed",
-                stream=stream_name,
-            )
-
-    async def _send_unsubscribe(self, stream_name: str) -> None:
-        """Send an UNSUBSCRIBE message on the connection for *stream_name*."""
-        ws = self._connections.get(stream_name)
-        if ws is None:
-            return
-
-        payload = json.dumps(
-            {
-                "method": "UNSUBSCRIBE",
-                "params": [stream_name],
-                "id": str(uuid.uuid4()),
-            }
-        )
-        try:
-            await ws.send_str(payload)
-        except Exception:  # noqa: S110
-            # Best-effort; the connection may already be gone.
-            pass
-
-    async def _stop_stream_connection(self, stream_name: str) -> None:
-        """Teardown a stream connection when no more subscriptions exist."""
-        # Send unsubscribe
-        await self._send_unsubscribe(stream_name)
-
-        # Close WebSocket
-        ws = self._connections.pop(stream_name, None)
-        if ws is not None:
+            })
             try:
-                await ws.close()
-            except Exception:  # noqa: S110  best-effort close
-                pass
+                await ws.send_str(payload)
+                self._log.debug("subscribe_batch_sent", count=len(batch))
+            except Exception:
+                self._log.exception("subscribe_batch_failed")
 
-        # Cancel background task
-        task = self._tasks.pop(stream_name, None)
-        if task is not None and not task.done():
-            task.cancel()
+    async def _process_pending_ops(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        """Process pending subscribe/unsubscribe operations."""
+        ops = []
+        while not self._pending_ops.empty():
+            try:
+                ops.append(self._pending_ops.get_nowait())
+            except asyncio.QueueEmpty:
+                break
 
-        self._log.debug(
-            "stream_connection_stopped",
-            stream=stream_name,
-        )
+        if not ops:
+            return
 
-    async def _handle_message(
-        self,
-        stream_name: str,
-        raw: str,
-    ) -> None:
+        # Group by operation type
+        subscribes = []
+        unsubscribes = []
+        for op in ops:
+            if op["op"] == "subscribe":
+                subscribes.extend(op["args"])
+            elif op["op"] == "unsubscribe":
+                unsubscribes.extend(op["args"])
+
+        # Send subscribe batch
+        if subscribes:
+            # OKX allows up to 300 args per message
+            for i in range(0, len(subscribes), 300):
+                batch = subscribes[i:i + 300]
+                payload = json.dumps({
+                    "op": "subscribe",
+                    "args": batch,
+                    "id": str(uuid.uuid4()),
+                })
+                try:
+                    await ws.send_str(payload)
+                    self._log.debug("subscribe_sent", count=len(batch))
+                except Exception:
+                    self._log.exception("subscribe_send_failed")
+
+        # Send unsubscribe batch
+        if unsubscribes:
+            for i in range(0, len(unsubscribes), 300):
+                batch = unsubscribes[i:i + 300]
+                payload = json.dumps({
+                    "op": "unsubscribe",
+                    "args": batch,
+                    "id": str(uuid.uuid4()),
+                })
+                try:
+                    await ws.send_str(payload)
+                    self._log.debug("unsubscribe_sent", count=len(batch))
+                except Exception:
+                    self._log.exception("unsubscribe_send_failed")
+
+    async def _handle_message(self, raw: str) -> None:
         """Parse a JSON message and dispatch to registered handlers.
 
-        Messages from the WebSocket API are typically raw JSON
-        (not wrapped in a ``stream`` / ``data`` envelope).  This method
-        dispatches the parsed message to all handlers registered for
-        *stream_name*.
+        OKX V5 messages have the format:
+        {
+            "arg": {"channel": "...", "instId": "..."},
+            "action": "subscribe"|"unsubscribe"|"update",
+            "data": [...],
+            "ts": "..."
+        }
         """
         try:
             parsed: dict[str, Any] = json.loads(raw)
         except json.JSONDecodeError:
             self._log.warning(
                 "ws_invalid_json",
-                stream=stream_name,
                 raw_preview=raw[:200],
             )
             return
 
-        # Determine the actual stream origin
-        actual_stream: str | None = parsed.get("stream")
-        data: dict[str, Any] | None = parsed.get("data")
+        # Handle pong response
+        if raw == "pong":
+            return
 
-        if actual_stream and data is not None:
-            # Combined stream wrapper (used by the /stream endpoint)
-            message = data
-            origin_stream = actual_stream
-        else:
-            # Raw / unwrapped message
-            message = parsed
-            origin_stream = stream_name
+        # Handle subscribe/unsubscribe confirmation
+        action = parsed.get("action")
+        if action in ("subscribe", "unsubscribe"):
+            arg = parsed.get("arg", {})
+            self._log.debug(
+                "ws_action_confirmed",
+                action=action,
+                channel=arg.get("channel"),
+                inst_id=arg.get("instId"),
+            )
+            return
 
-        # Dispatch to all handlers registered for the origin stream
+        # Handle error responses
+        if "errorCode" in parsed:
+            self._log.error(
+                "ws_error",
+                error_code=parsed["errorCode"],
+                error_msg=parsed.get("errorMsg", ""),
+            )
+            return
+
+        # Handle data messages
+        arg = parsed.get("arg", {})
+        channel = arg.get("channel", "")
+        inst_id = arg.get("instId", "")
+        data = parsed.get("data", [])
+
+        if not channel:
+            self._log.debug("ws_no_channel", raw_preview=raw[:200])
+            return
+
+        # Find matching subscriptions
         async with self._lock:
-            subs = self._stream_handlers.get(origin_stream, [])
-            # Snapshot the handler list to avoid iteration issues
-            handlers = [(s.id, s.handler) for s in subs if s.status == "active"]
+            matching_subs = [
+                sub for sub in self._subscriptions.values()
+                if sub.channel == channel
+                and (sub.inst_id == "*" or sub.inst_id == inst_id)
+                and sub.status == "active"
+            ]
 
         now = time.time()
-        for sub_id, handler in handlers:
+        for sub in matching_subs:
             try:
-                await handler(message)
-                # Update last_message_at
-                async with self._lock:
-                    for s in self._stream_handlers.get(origin_stream, []):
-                        if s.id == sub_id:
-                            s.last_message_at = now
-                            break
+                # Create a message dict with the standard OKX V5 format
+                message = {
+                    "arg": arg,
+                    "action": action or "update",
+                    "data": data,
+                    "ts": parsed.get("ts", ""),
+                }
+                await sub.handler(message)
+                sub.last_message_at = now
             except Exception:
                 self._log.exception(
                     "handler_error",
-                    stream=origin_stream,
-                    sub_id=sub_id,
+                    channel=channel,
+                    inst_id=inst_id,
+                    sub_id=sub.id,
                 )

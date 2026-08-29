@@ -125,10 +125,10 @@ quad start
 # Start in dry-run mode (safest first step; no real orders)
 quad start --dry-run
 
-# Start on Bybit testnet (testnet is the default when BYBIT_TESTNET=true)
+# Start on OKX demo (testnet is the default when OKX_TESTNET=true)
 quad start
 
-# Start with live trading (set BYBIT_TESTNET=false -- dangerous, real funds)
+# Start with live trading (set OKX_TESTNET=false -- dangerous, real funds)
 quad start
 
 # Start with a specific strategy
@@ -143,7 +143,7 @@ quad start --config /path/to/config
 Quad v2.0.0 starting...
   Mode: testnet
   Strategy: trend_following
-  Exchange: bybit (USDT perpetual testnet)
+  Exchange: okx (USDT perpetual demo)
   Database: postgresql://quad@localhost:5432/quad
   Log level: INFO
   Telegram: enabled (polling mode)
@@ -196,7 +196,7 @@ Position Mode: HEDGE
 Margin Mode:  ISOLATED
 Leverage:     3x
 
-Exchange:     Bybit V5 USDT Perpetual (testnet)
+Exchange:     OKX V5 USDT Perpetual (demo)
   Connected:  yes
   WS streams: 4 active
 

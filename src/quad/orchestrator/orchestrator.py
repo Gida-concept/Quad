@@ -4,7 +4,7 @@ Wires all subsystems together and manages the full trading lifecycle:
 
     - Configuration loading (4-layer merge)
     - Database initialization and migrations
-    - Exchange adapter creation (bybit)
+    - Exchange adapter creation (OKX)
     - Market data engine (WebSocket + cache + buffers)
     - Risk management (gates, circuit breakers, position sizing)
     - Strategy evaluation (all registered strategies)
@@ -79,7 +79,7 @@ class QuadOrchestrator:
     Attributes
     ----------
     _mode : str
-        Resolved trading mode: ``"bybit"`` or ``"dry_run"``.
+        Resolved trading mode: ``"okx"`` or ``"dry_run"``.
     _stop_event : asyncio.Event
         Set when a shutdown signal is received.
     """
@@ -111,7 +111,7 @@ class QuadOrchestrator:
 
         # Cached config dict (used by multiple subsystems)
         self._config_dict: dict[str, Any] = {}
-        self._mode: str = "bybit"
+        self._mode: str = "okx"
         self._cycle_interval: int = 60
 
         # AI-first mode tracking
@@ -354,7 +354,7 @@ class QuadOrchestrator:
         """Inject Telegram and operation env vars into the config dict.
 
         These env vars are not handled by ``ConfigManager``'s automatic
-        env-var scanning (which only covers ``QUAD_*`` and ``BYBIT_*``
+        env-var scanning (which only covers ``QUAD_*`` and ``OKX_*``
         prefixes), so we inject them manually.
         """
         # Telegram bot token
@@ -418,15 +418,15 @@ class QuadOrchestrator:
         """Create and connect the exchange adapter.
 
         Maps ``QUAD_MODE`` to the exchange implementation:
-            - ``"dry_run"`` -> bybit with testnet=True
-            - ``"bybit"`` -> configured exchange (testnet or live)
+            - ``"dry_run"`` -> OKX with testnet=True
+            - ``"okx"`` -> configured exchange (testnet or live)
         """
         # Override exchange name based on mode
         mode = self._mode
         exchange_cfg: dict[str, Any] = dict(self._config_dict["exchange"])
 
         if mode == "dry_run":
-            exchange_cfg["name"] = "bybit"
+            exchange_cfg["name"] = "okx"
             exchange_cfg["testnet"] = True
 
         # Ensure rate_limit is a dict (for the exchange adapter)

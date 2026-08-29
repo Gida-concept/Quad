@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from quad.exchange.base import ExchangeAdapter
-from quad.exchange.bybit import BybitFuturesAdapter
+from quad.exchange.okx import OkxFuturesAdapter
 from quad.orchestrator.orchestrator import QuadOrchestrator
 from quad.risk.sizing import PositionSizer
 from quad.types.risk import Action
@@ -73,9 +73,9 @@ def test_base_adapter_signatures_accept_symbol():
     assert "symbol" in sig.parameters
     sig = inspect.signature(ExchangeAdapter.get_order_status)
     assert "symbol" in sig.parameters
-    sig = inspect.signature(BybitFuturesAdapter.cancel_order)
+    sig = inspect.signature(OkxFuturesAdapter.cancel_order)
     assert "symbol" in sig.parameters
-    sig = inspect.signature(BybitFuturesAdapter.get_order_status)
+    sig = inspect.signature(OkxFuturesAdapter.get_order_status)
     assert "symbol" in sig.parameters
 
 
@@ -83,7 +83,7 @@ def test_base_adapter_signatures_accept_symbol():
 async def test_gateway_passes_symbol_to_get_order_status():
     from quad.execution.gateway import OrderGateway
 
-    exchange = AsyncMock(spec=BybitFuturesAdapter)
+    exchange = AsyncMock(spec=OkxFuturesAdapter)
     exchange.get_order_status = AsyncMock(
         return_value=Order(id=42, symbol="BTCUSDT", status="FILLED")
     )
@@ -114,7 +114,7 @@ async def test_gateway_passes_symbol_to_get_order_status():
 async def test_gateway_passes_symbol_to_cancel():
     from quad.execution.gateway import OrderGateway
 
-    exchange = AsyncMock(spec=BybitFuturesAdapter)
+    exchange = AsyncMock(spec=OkxFuturesAdapter)
     exchange.cancel_order = AsyncMock(return_value=True)
     gateway = OrderGateway(
         exchange,
@@ -143,7 +143,7 @@ async def test_gateway_passes_symbol_to_cancel():
 async def test_reconciler_passes_symbol():
     from quad.execution.reconciler import FillReconciler
 
-    exchange = AsyncMock(spec=BybitFuturesAdapter)
+    exchange = AsyncMock(spec=OkxFuturesAdapter)
     exchange.get_order_status = AsyncMock(
         return_value=Order(id=42, symbol="BTCUSDT", status="FILLED")
     )
@@ -438,7 +438,7 @@ async def test_engine_persists_trade_after_fill():
             "execution": {"default_order_type": "MARKET"},
         }
         engine = ExecutionEngine(
-            exchange_adapter=AsyncMock(spec=BybitFuturesAdapter),
+            exchange_adapter=AsyncMock(spec=OkxFuturesAdapter),
             risk_manager=MagicMock(),
             db_manager=db,
             config=gateway_cfg,
@@ -538,7 +538,7 @@ def test_sizer_preserves_serial_close_quantity():
 
     context = StrategyContext(
         config={},
-        account=Account(id="x", exchange="bybit", total_usdt=Decimal("10000")),
+        account=Account(id="x", exchange="okx", total_usdt=Decimal("10000")),
     )
     close = Action(
         type="EXIT",

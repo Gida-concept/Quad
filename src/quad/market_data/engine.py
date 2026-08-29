@@ -23,7 +23,14 @@ import structlog
 
 from quad.market_data.buffers import PriceBuffer
 from quad.market_data.historical import HistoricalDataProvider
-from quad.market_data.websocket import WebSocketManager
+from quad.market_data.websocket import (
+    CHANNEL_BOOKS5,
+    CHANNEL_CANDLE,
+    CHANNEL_LIQUIDATION_ORDERS,
+    CHANNEL_MARK_PRICE,
+    CHANNEL_TICKERS,
+    WebSocketManager,
+)
 
 if TYPE_CHECKING:
     from quad.exchange.base import ExchangeAdapter
@@ -44,9 +51,9 @@ class MarketDataEngine:
         engine = MarketDataEngine(exchange_adapter, config, db_manager)
         await engine.start()
 
-        funding = await engine.get_funding_rate("BTCUSDT")
-        book = await engine.get_order_book("BTCUSDT")
-        mark = await engine.get_mark_price("BTCUSDT")
+        funding = await engine.get_funding_rate("BTC-USDT-SWAP")
+        book = await engine.get_order_book("BTC-USDT-SWAP")
+        mark = await engine.get_mark_price("BTC-USDT-SWAP")
 
         status = engine.status()
         await engine.stop()
@@ -64,7 +71,7 @@ class MarketDataEngine:
         ----------
         exchange_adapter:
             The exchange adapter used for live data fetching.  Must be
-            compatible with Bybit USDT perpetual (e.g. ``BybitFuturesAdapter``).
+            compatible with OKX USDT perpetual (e.g. ``OkxFuturesAdapter``).
         config:
             Optional configuration dict.  Sub-keys under ``market_data``:
 
@@ -101,6 +108,9 @@ class MarketDataEngine:
         self._ticker_cache: dict[str, dict] = {}
         """Maps symbol -> 24h mini ticker data dict."""
 
+        # Symbols to subscribe to (from config)
+        self._symbols: list[str] = []
+
         # Lifecycle
         self._start_time: float | None = None
         self._running = False
@@ -115,11 +125,11 @@ class MarketDataEngine:
 
         Creates and starts the WebSocket manager, price buffer, and
         historical data provider (if a database manager was provided).
-        Subscribes to core futures market data streams:
+        Subscribes to OKX V5 futures market data channels:
 
-        * ``!miniTicker@arr`` — 24h mini ticker for all symbols
-        * ``!markPrice@arr@1s`` — mark price + funding rate array (1s)
-        * ``!bookTicker`` — real-time best bid/ask for all symbols
+        * ``tickers`` — 24h ticker for all symbols
+        * ``mark-price`` — mark price + funding rate updates
+        * ``books5`` — top 5 order book levels (best bid/ask)
         """
         if self._running:
             self._log.warning("already_running")
@@ -128,6 +138,9 @@ class MarketDataEngine:
         self._log.info("market_data_engine_starting")
         self._start_time = time.monotonic()
         self._stop_event.clear()
+
+        # Get configured symbols
+        self._symbols = self._market_data_config.get("symbols", [])
 
         # Create sub-components
         self._buffer = PriceBuffer(
@@ -149,21 +162,36 @@ class MarketDataEngine:
         )
         await self._ws_manager.start()
 
-        # Subscribe to futures market data streams
+        # Subscribe to OKX V5 futures market data channels
         try:
-            await self._ws_manager.subscribe(
-                "!miniTicker@arr",
-                self._handle_mini_ticker,
+            # Subscribe to tickers for all configured symbols
+            for symbol in self._symbols:
+                await self._ws_manager.subscribe(
+                    CHANNEL_TICKERS,
+                    symbol,
+                    self._handle_ticker,
+                )
+
+            # Subscribe to mark-price for all configured symbols
+            for symbol in self._symbols:
+                await self._ws_manager.subscribe(
+                    CHANNEL_MARK_PRICE,
+                    symbol,
+                    self._handle_mark_price_update,
+                )
+
+            # Subscribe to books5 for all configured symbols
+            for symbol in self._symbols:
+                await self._ws_manager.subscribe(
+                    CHANNEL_BOOKS5,
+                    symbol,
+                    self._handle_book_ticker,
+                )
+
+            self._log.info(
+                "futures_market_data_streams_subscribed",
+                symbols=self._symbols,
             )
-            await self._ws_manager.subscribe(
-                "!markPrice@arr@1s",
-                self._handle_mark_price_update,
-            )
-            await self._ws_manager.subscribe(
-                "!bookTicker",
-                self._handle_book_ticker,
-            )
-            self._log.info("futures_market_data_streams_subscribed")
         except Exception:
             self._log.exception("futures_stream_subscription_failed")
 
@@ -213,7 +241,7 @@ class MarketDataEngine:
         Parameters
         ----------
         symbols:
-            List of futures symbols (e.g. ``["BTCUSDT", "ETHUSDT"]``).
+            List of futures symbols (e.g. ``["BTC-USDT-SWAP", "ETH-USDT-SWAP"]``).
         handler:
             Async callback invoked with each decoded JSON message.
 
@@ -227,8 +255,11 @@ class MarketDataEngine:
 
         sub_id = ""
         for sym in symbols:
-            stream_name = f"{sym}@ticker_1h"
-            sub_id = await self._ws_manager.subscribe(stream_name, handler)
+            sub_id = await self._ws_manager.subscribe(
+                CHANNEL_TICKERS,
+                sym,
+                handler,
+            )
 
         self._log.debug(
             "subscribed_ticker",
@@ -253,7 +284,8 @@ class MarketDataEngine:
         symbols:
             List of futures symbols.
         interval:
-            Kline interval (default ``"1m"``).
+            Kline interval (default ``"1m"``).  OKX V5 uses formats like
+            ``"1m"``, ``"5m"``, ``"1H"``, ``"1D"``.
         handler:
             Async callback invoked with each decoded JSON message.
 
@@ -270,8 +302,13 @@ class MarketDataEngine:
 
         sub_id = ""
         for sym in symbols:
-            stream_name = f"{sym}@kline_{interval}"
-            sub_id = await self._ws_manager.subscribe(stream_name, handler)
+            # OKX V5 candle channel format: "candle1m", "candle5m", "candle1H", etc.
+            channel = f"{CHANNEL_CANDLE}{interval}"
+            sub_id = await self._ws_manager.subscribe(
+                channel,
+                sym,
+                handler,
+            )
 
         self._log.debug(
             "subscribed_kline",
@@ -281,11 +318,11 @@ class MarketDataEngine:
         )
         return sub_id
 
-    async def subscribe_force_order(
+    async def subscribe_liquidations(
         self,
         handler: Callable[[dict], Awaitable[None]],
     ) -> str:
-        """Subscribe to liquidation (force order) events via WebSocket.
+        """Subscribe to liquidation order events via WebSocket.
 
         Parameters
         ----------
@@ -300,7 +337,8 @@ class MarketDataEngine:
         if self._ws_manager is None:
             raise RuntimeError("MarketDataEngine not started. Call start() first.")
         return await self._ws_manager.subscribe(
-            "!forceOrder@arr",
+            CHANNEL_LIQUIDATION_ORDERS,
+            "*",  # Subscribe to all instruments
             handler,
         )
 
@@ -312,12 +350,12 @@ class MarketDataEngine:
         """Return the latest funding rate for *symbol* from the cache.
 
         The funding rate cache is updated in real-time via the
-        ``!markPrice@arr@1s`` WebSocket stream.
+        ``mark-price`` WebSocket channel.
 
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTCUSDT"``).
+            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
 
         Returns
         -------
@@ -330,12 +368,12 @@ class MarketDataEngine:
         """Return the latest order book snapshot for *symbol* from the cache.
 
         The order book cache is updated in real-time via the
-        ``!bookTicker`` WebSocket stream, which provides the best bid/ask.
+        ``books5`` WebSocket channel, which provides the top 5 bid/ask levels.
 
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTCUSDT"``).
+            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
 
         Returns
         -------
@@ -349,12 +387,12 @@ class MarketDataEngine:
         """Return the latest mark price for *symbol* from the cache.
 
         The mark price cache is updated in real-time via the
-        ``!markPrice@arr@1s`` WebSocket stream.
+        ``mark-price`` WebSocket channel.
 
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTCUSDT"``).
+            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
 
         Returns
         -------
@@ -364,21 +402,22 @@ class MarketDataEngine:
         return self._mark_price_cache.get(symbol)
 
     async def get_ticker(self, symbol: str) -> dict | None:
-        """Return the latest 24h mini ticker for *symbol* from the cache.
+        """Return the latest 24h ticker for *symbol* from the cache.
 
         The ticker cache is updated in real-time via the
-        ``!miniTicker@arr`` WebSocket stream.
+        ``tickers`` WebSocket channel.
 
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTCUSDT"``).
+            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
 
         Returns
         -------
         dict | None
-            A dict with keys ``symbol``, ``close``, ``open``, ``high``,
-            ``low``, ``volume``, ``quote_volume``, and ``event_time``,
+            A dict with keys ``symbol``, ``last``, ``bid``, ``ask``,
+            ``open24h``, ``high24h``, ``low24h``, ``vol24h``,
+            ``volCcy24h``, and ``timestamp``,
             or ``None`` if no data has been received yet.
         """
         return self._ticker_cache.get(symbol)
@@ -396,7 +435,7 @@ class MarketDataEngine:
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTCUSDT"``).
+            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
         """
         if self._buffer is None:
             return None
@@ -452,30 +491,33 @@ class MarketDataEngine:
         return await self._historical.get_candles(symbol, start, end)
 
     # ------------------------------------------------------------------
-    # WebSocket message handlers
+    # WebSocket message handlers (OKX V5 field names)
     # ------------------------------------------------------------------
 
     async def _handle_mark_price_update(self, message: dict) -> None:
-        """Process ``!markPrice@arr@1s`` WebSocket messages.
+        """Process ``mark-price`` WebSocket messages.
 
-        Updates the mark price cache and funding rate cache with the
-        latest data for each symbol in the array.
+        OKX V5 mark-price fields:
+        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
+        - ``instType``: Instrument type (e.g. "SWAP")
+        - ``markPx``: Mark price
+        - ``fundingRate``: Estimated funding rate
+        - ``nextFundingTime``: Next funding time (ms timestamp)
+        - ``ts``: Timestamp (ms)
         """
         from quad.types.market import FundingRate
 
-        data: Any = message.get("data", message)
-        if isinstance(data, dict):
-            data = [data]
+        data_list: list[dict] = message.get("data", [])
 
-        for item in data:
-            symbol: str = item.get("s", "")
+        for item in data_list:
+            symbol: str = item.get("instId", "")
             if not symbol:
                 continue
 
-            mark_price = Decimal(str(item.get("p", "0")))
-            index_price = Decimal(str(item.get("P", "0")))
-            funding_rate_val = Decimal(str(item.get("r", "0")))
-            next_funding_time: int = item.get("T", 0)
+            mark_price = Decimal(str(item.get("markPx", "0")))
+            funding_rate_val = Decimal(str(item.get("fundingRate", "0")))
+            next_funding_time: int = int(item.get("nextFundingTime", 0))
+            timestamp: int = int(item.get("ts", 0))
 
             self._mark_price_cache[symbol] = mark_price
             self._funding_rate_cache[symbol] = FundingRate(
@@ -483,90 +525,143 @@ class MarketDataEngine:
                 funding_rate=funding_rate_val,
                 next_funding_time=next_funding_time,
                 mark_price=mark_price,
-                index_price=index_price,
+                index_price=mark_price,  # OKX doesn't provide index price in this channel
             )
 
-    async def _handle_mini_ticker(self, message: dict) -> None:
-        """Process ``!miniTicker@arr`` WebSocket messages.
+    async def _handle_ticker(self, message: dict) -> None:
+        """Process ``tickers`` WebSocket messages.
 
-        Updates the ticker cache with 24h mini ticker data and feeds the
-        close price into the price buffer.
+        OKX V5 tickers fields:
+        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
+        - ``instType``: Instrument type (e.g. "SWAP")
+        - ``last``: Last traded price
+        - ``lastSz``: Last traded size
+        - ``askPx``: Best ask price
+        - ``askSz``: Best ask size
+        - ``bidPx``: Best bid price
+        - ``bidSz``: Best bid size
+        - ``open24h``: Opening price (24h)
+        - ``high24h``: Highest price (24h)
+        - ``low24h``: Lowest price (24h)
+        - ``vol24h``: Trading volume (24h, in contracts)
+        - ``volCcy24h``: Trading volume (24h, in currency)
+        - ``ts``: Timestamp (ms)
         """
-        data: Any = message.get("data", message)
-        if isinstance(data, dict):
-            data = [data]
+        data_list: list[dict] = message.get("data", [])
 
-        for item in data:
-            symbol: str = item.get("s", "")
+        for item in data_list:
+            symbol: str = item.get("instId", "")
             if not symbol:
                 continue
 
             self._ticker_cache[symbol] = {
                 "symbol": symbol,
-                "close": item.get("c", "0"),
-                "open": item.get("o", "0"),
-                "high": item.get("h", "0"),
-                "low": item.get("l", "0"),
-                "volume": item.get("v", "0"),
-                "quote_volume": item.get("q", "0"),
-                "event_time": item.get("E", 0),
+                "last": item.get("last", "0"),
+                "bid": item.get("bidPx", "0"),
+                "ask": item.get("askPx", "0"),
+                "open24h": item.get("open24h", "0"),
+                "high24h": item.get("high24h", "0"),
+                "low24h": item.get("low24h", "0"),
+                "vol24h": item.get("vol24h", "0"),
+                "volCcy24h": item.get("volCcy24h", "0"),
+                "timestamp": int(item.get("ts", 0)),
             }
 
-            # Feed close price into the price buffer
+            # Feed last price into the price buffer
             if self._buffer is not None:
-                close_price = Decimal(str(item.get("c", "0")))
-                if close_price > Decimal(0):
-                    await self._buffer.append(symbol, close_price)
+                last_price = Decimal(str(item.get("last", "0")))
+                if last_price > Decimal(0):
+                    await self._buffer.append(symbol, last_price)
 
     async def _handle_book_ticker(self, message: dict) -> None:
-        """Process ``!bookTicker`` WebSocket messages.
+        """Process ``books5`` WebSocket messages.
 
-        Updates the order book cache with the best bid/ask for each symbol.
+        OKX V5 books5 fields:
+        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
+        - ``bids``: Array of [price, size, count] for top 5 bid levels
+        - ``asks``: Array of [price, size, count] for top 5 ask levels
+        - ``ts``: Timestamp (ms)
         """
-        data: Any = message.get("data", message)
+        data_list: list[dict] = message.get("data", [])
 
-        symbol: str = data.get("s", "")
-        if not symbol:
-            return
+        for item in data_list:
+            symbol: str = item.get("instId", "")
+            if not symbol:
+                continue
 
-        self._order_book_cache[symbol] = {
-            "bids": [
-                (Decimal(str(data.get("b", "0"))), Decimal(str(data.get("B", "0"))))
-            ],
-            "asks": [
-                (Decimal(str(data.get("a", "0"))), Decimal(str(data.get("A", "0"))))
-            ],
-            "timestamp": data.get("u", 0),
-        }
+            # Parse bids and asks (each is an array of [price, size, count])
+            raw_bids = item.get("bids", [])
+            raw_asks = item.get("asks", [])
+
+            bids = [
+                (Decimal(str(bid[0])), Decimal(str(bid[1])))
+                for bid in raw_bids
+                if len(bid) >= 2
+            ]
+            asks = [
+                (Decimal(str(ask[0])), Decimal(str(ask[1])))
+                for ask in raw_asks
+                if len(ask) >= 2
+            ]
+
+            self._order_book_cache[symbol] = {
+                "bids": bids,
+                "asks": asks,
+                "timestamp": int(item.get("ts", 0)),
+            }
 
     async def _handle_kline_update(self, message: dict) -> None:
-        """Process individual kline (candle) updates.
+        """Process candle (kline) WebSocket messages.
 
-        Parses the kline data from ``{symbol}@kline_{interval}`` streams
-        and feeds the close price into the price buffer.
+        OKX V5 candle fields:
+        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
+        - ``ts``: Opening time (ms)
+        - ``o``: Open price
+        - ``h``: High price
+        - ``l``: Low price
+        - ``c``: Close price
+        - ``vol``: Volume (in contracts)
+        - ``volCcy``: Volume (in currency)
+        - ``confirm``: 0 = incomplete, 1 = complete candle
         """
-        kline: dict = message.get("k", message)
+        data_list: list[dict] = message.get("data", [])
 
-        symbol: str = kline.get("s", "") or message.get("s", "")
-        if not symbol or not isinstance(kline, dict):
-            return
+        for item in data_list:
+            symbol: str = item.get("instId", "")
+            if not symbol:
+                continue
 
-        close_price = kline.get("c", "0")
-        if self._buffer is not None and close_price:
-            await self._buffer.append(symbol, Decimal(str(close_price)))
+            close_price = item.get("c", "0")
+            if self._buffer is not None and close_price:
+                await self._buffer.append(symbol, Decimal(str(close_price)))
 
-    async def _handle_force_order(self, message: dict) -> None:
-        """Process ``!forceOrder@arr`` liquidation events.
+    async def _handle_liquidation_order(self, message: dict) -> None:
+        """Process liquidation-orders WebSocket messages.
 
-        Logs liquidation events for monitoring.  Currently a no-op
-        placeholder for future risk management integration.
+        OKX V5 liquidation-orders fields:
+        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
+        - ``instType``: Instrument type (e.g. "SWAP")
+        - ``ts``: Timestamp (ms)
+        - ``underlying``: Underlying asset
+        - ``bankruptPx``: Bankruptcy price
+        - ``bankruptSz``: Bankruptcy size
+        - ``side``: Side (buy/sell)
+        - ``ok``: 0 = failed, 1 = success
+        - ``ccy``: Currency
+        - ``marginMode``: Margin mode (isolated/cross)
         """
-        data: Any = message.get("data", message)
-        order = data.get("o", data) if isinstance(data, dict) else data
-        symbol: str = ""
-        if isinstance(order, dict):
-            symbol = order.get("s", "")
-        self._log.debug("liquidation_event", symbol=symbol, data=order)
+        data_list: list[dict] = message.get("data", [])
+
+        for item in data_list:
+            symbol: str = item.get("instId", "")
+            self._log.debug(
+                "liquidation_event",
+                symbol=symbol,
+                side=item.get("side", ""),
+                size=item.get("bankruptSz", ""),
+                price=item.get("bankruptPx", ""),
+                ok=item.get("ok", 0),
+            )
 
     # ------------------------------------------------------------------
     # Health / status
@@ -584,14 +679,13 @@ class MarketDataEngine:
         ws_status: dict[str, Any] = {
             "active_subscriptions": 0,
             "total_reconnects": 0,
-            "streams_active": 0,
+            "channels_active": 0,
         }
         if self._ws_manager is not None:
             s = self._ws_manager.status()
             ws_status["active_subscriptions"] = s.get("active_subscriptions", 0)
-            ws_status["streams_active"] = s.get("streams_active", 0)
-            rc = s.get("reconnect_counts", {})
-            ws_status["total_reconnects"] = sum(rc.values()) if rc else 0
+            ws_status["channels_active"] = s.get("channels_active", 0)
+            ws_status["total_reconnects"] = s.get("reconnect_count", 0)
 
         buffer_status: dict[str, int] = {
             "symbols_tracked": 0,

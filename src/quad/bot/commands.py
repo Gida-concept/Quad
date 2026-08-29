@@ -172,7 +172,7 @@ class QuadBotCommands:
 
         msg = (
             "🤖 *Quad Futures Trading Bot*\n\n"
-            "Your personal automated USDT perpetual futures trading assistant (Bybit, category=linear).\n\n"
+            "Your personal automated USDT perpetual futures trading assistant (OKX, instType=SWAP).\n\n"
             "*Available commands:*\n"
             "• `/status` — Bot health, position summary, PnL, risk status\n"
             "• `/balance` — Account balances, total USDT value\n"

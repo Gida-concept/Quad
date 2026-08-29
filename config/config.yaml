@@ -1,5 +1,5 @@
-# Quad — Minimal Configuration for BTCUSDT USDT-Perpetual Bot (Bybit)
-_mode: "bybit"
+# Quad — Minimal Configuration for BTCUSDT USDT-Perpetual Bot (OKX)
+_mode: "okx"
 _dry_run: true
 
 trading:
@@ -9,20 +9,17 @@ trading:
   default_strategy: "trend_following"
   ai_cycle_interval: 3600
   underlyings:
-    - "BTCUSDT"
-    - "ETHUSDT"
-    - "SOLUSDT"
-    - "BNBUSDT"
+    - "BTC-USDT-SWAP"
+    - "ETH-USDT-SWAP"
+    - "SOL-USDT-SWAP"
+    - "BNB-USDT-SWAP"
   leverage: 50
   margin_mode: "isolated"
   position_mode: "one_way"
 
 exchange:
-  name: "bybit"
+  name: "okx"
   testnet: true
-  # Optional HTTP proxy for REST requests (e.g. "socks5://127.0.0.1:1080").
-  # If omitted, the adapter falls back to HTTP_PROXY / HTTPS_PROXY env vars.
-  # proxy: "http://your-proxy:port"
 
 risk:
   max_positions: 1
@@ -58,10 +55,10 @@ ai:
   enabled: true
   model: "groq/compound-mini"
   pairs:
-    - "BTCUSDT"
-    - "ETHUSDT"
-    - "SOLUSDT"
-    - "BNBUSDT"
+    - "BTC-USDT-SWAP"
+    - "ETH-USDT-SWAP"
+    - "SOL-USDT-SWAP"
+    - "BNB-USDT-SWAP"
   timeframes:
     - "1h"
   candle_count: 150
@@ -71,23 +68,13 @@ ai:
   rotation:
     enabled: true
     retry_sleep_seconds: 30
-    # Close any position left from a previous run on startup so a fresh
-    # trade is opened next cycle instead of holding a stale one for hours.
     close_positions_on_start: true
-    # Roll every hour: close the current position at the start of each
-    # rotation cycle and open a fresh trade (1 trade per cycle) instead of
-    # holding until the TP/SL bracket triggers. Set false to restore the
-    # hold-until-TP/SL behavior.
     close_open_position_each_cycle: true
-    # Force-close a position held longer than this (seconds); 0 disables.
     max_hold_seconds: 21600
-    # Compare live mark price to the TP/SL bracket triggers each cycle and
-    # force-close when price is clearly beyond a trigger (bracket missed).
     price_bracket_check: true
     price_bracket_tolerance_pct: 0.5
   groq:
     token_budget:
-      # Daily token-budget cap removed (no local quota veto on AI).
       enabled: false
   validator:
     gate_mode: "warn"
@@ -101,10 +88,7 @@ ai:
 monitoring:
   health_server:
     port: 9090
-    # Bind to loopback by default; set QUAD_HEALTH_API_KEY (or api_key below)
-    # to require an X-API-Key header and allow binding to 0.0.0.0.
     bind_address: "127.0.0.1"
-    # api_key: ""  # prefer QUAD_HEALTH_API_KEY env var
     version: "0.1.0"
 
 strategy:

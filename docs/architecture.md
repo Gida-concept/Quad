@@ -38,7 +38,7 @@ The **Telegram bot** is the primary user-facing layer, providing real-time tradi
 │ MODULE        │ │ ADAPTER    │ │ ENGINE          │
 │ (WebSocket    │ │ (plugabble)│ │ (order gateway, │
 │  manager,     │ │            │ │  TWAP splitter, │
-│  data store,  │ │ Bybit      │ │  slippage est., │
+│  data store,  │ │ OKX        │ │  slippage est., │
 │  normalizer)  │ │ USDT       │ │  post-trade     │
 └────────────────┘ │ Perpetual  │ │  analysis)      │
                    │ adapter    │ └────────────────┘
@@ -76,14 +76,14 @@ Each trading cycle executes the following sequence:
 
 ### Step 1: Market Data Ingestion
 
-The Market Data module maintains persistent WebSocket connections to the Bybit V5 API for real-time data:
+The Market Data module maintains persistent WebSocket connections to the OKX V5 API for real-time data:
 - **Mini Ticker Stream:** Real-time 24hr ticker data for all traded symbols (`!miniTicker@arr`)
 - **Mark Price Stream:** Real-time mark prices and funding rates for all symbols (`!markPrice@arr@1s`)
 - **Book Ticker Stream:** Real-time best bid/ask for all symbols (`!bookTicker`)
 - **Force Order Stream:** Real-time liquidation order events (`!forceOrder@arr`)
 - **User Data Stream:** Account balance updates, order status, position changes
 
-A REST fallback polls the Bybit V5 API periodically if any WebSocket stream disconnects. All incoming data is validated for sequence numbers and timestamp freshness before being passed to the Data Store.
+A REST fallback polls the OKX V5 API periodically if any WebSocket stream disconnects. All incoming data is validated for sequence numbers and timestamp freshness before being passed to the Data Store.
 
 ### Step 2: Strategy Evaluation
 
@@ -114,7 +114,7 @@ For approved actions, the Execution Engine:
 1. Constructs the appropriate order(s) via the Exchange Adapter (MARKET, LIMIT, STOP, TAKE_PROFIT, STOP_MARKET, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET)
 2. Sets futures-specific order parameters (position_side, working_type, reduce_only, price_protect, closePosition)
 3. Applies rate limiting and TWAP splitting for large orders
-4. Submits to Bybit V5 API (USDT perpetual) via the adapter
+4. Submits to OKX V5 API (USDT perpetual) via the adapter
 5. Sets or verifies leverage and margin type for the symbol
 6. Tracks fill status and updates local position state
 7. Logs the order to the database
@@ -193,12 +193,12 @@ The Orchestrator periodically:
 | **Rationale** | Telegram provides push notifications, real-time status updates, and command execution from any device without SSH access. All monitoring (positions, P&L, risk status) and control (start, stop, config) are available via Telegram commands. The CLI remains available for advanced debugging, backtesting, and local operations. |
 | **Trade-offs** | Requires internet access to Telegram API. Polling mode adds minimal latency. CLI-only users must set up SSH or tmux. Chat ID whitelist adds an authentication step. |
 
-### AD-6: Bybit V5 USDT Perpetual API Integration
+### AD-6: OKX V5 USDT Perpetual API Integration
 
 | Aspect | Detail |
 |---|---|
-| **Decision** | Target Bybit V5 USDT perpetual futures (category=linear) as the initial exchange, using both REST and WebSocket APIs via the official `pybit` SDK |
-| **Rationale** | Bybit offers a unified V5 API for USDT perpetuals, a well-documented testnet with `category=linear` semantics, and competitive futures liquidity. Their API supports isolated/cross margin and HEDGE/ONE_WAY position modes, making it ideal for automated trading. |
+| **Decision** | Target OKX V5 USDT perpetual futures (instType=SWAP) as the exchange, using both REST and WebSocket APIs via the official `python-okx` SDK |
+| **Rationale** | OKX offers a unified V5 API for USDT perpetuals, a well-documented demo trading environment, and competitive futures liquidity. Their API supports isolated/cross margin and long/short position modes, making it ideal for automated trading. |
 | **Trade-offs** | Single exchange dependency creates counterparty risk. Funding rate costs must be managed actively. API changes or deprecations may require adapter updates. |
 
 ### AD-7: WebSocket Primary with REST Fallback
@@ -285,7 +285,7 @@ quad/
 │   ├── exchange/             # Exchange adapters
 │   │   ├── __init__.py
 │   │   ├── base.py           # ExchangeAdapter ABC + shared error hierarchy
-│   │   ├── bybit.py          # Bybit V5 USDT perpetual adapter (pybit SDK)
+│   │   ├── okx.py            # OKX V5 USDT perpetual adapter (python-okx SDK)
 │   │   └── factory.py        # create_exchange factory function
 │   ├── market_data/          # Market data engine
 │   │   ├── __init__.py

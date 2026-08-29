@@ -37,7 +37,7 @@ Futures trading introduces risk dimensions not present in spot trading:
 
 ## Pre-Execution Validation Pipeline
 
-Every trading decision flows through this pipeline before an order reaches Bybit:
+Every trading decision flows through this pipeline before an order reaches OKX:
 
 ```
 Strategy Suggestion

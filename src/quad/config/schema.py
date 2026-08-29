@@ -46,11 +46,11 @@ class TradingConfig(BaseModel):
     )
     underlyings: list[str] = Field(
         default_factory=lambda: [
-            "BTCUSDT",
-            "ETHUSDT",
-            "SOLUSDT",
-            "BNBUSDT",
-            "DOGEUSDT",
+            "BTC-USDT-SWAP",
+            "ETH-USDT-SWAP",
+            "SOL-USDT-SWAP",
+            "BNB-USDT-SWAP",
+            "DOGE-USDT-SWAP",
         ],
         description="List of underlying assets the bot monitors",
     )
@@ -97,30 +97,26 @@ class RateLimitConfig(BaseModel):
     )
 
 
-class BybitConfig(BaseModel):
-    """Bybit-specific adapter configuration (USDT perpetual / category=linear).
+class OkxConfig(BaseModel):
+    """OKX-specific adapter configuration (USDT perpetual / instType=SWAP).
 
-    Controls REST base URLs and a few adapter-tuning parameters.  Auth keys are
-    supplied via the ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET`` environment
-    variables (or the top-level ``exchange.api_key`` / ``api_secret`` config).
+    Controls REST base URLs and adapter-tuning parameters.  Auth keys are
+    supplied via the ``OKX_API_KEY`` / ``OKX_API_SECRET`` / ``OKX_PASSPHRASE``
+    environment variables (or the top-level ``exchange.api_key`` /
+    ``exchange.api_secret`` / ``exchange.passphrase`` config).
     """
 
     base_url: str = Field(
-        default="https://api.bybit.com",
-        description="Bybit V5 REST API base URL (live)",
+        default="https://www.okx.com",
+        description="OKX V5 REST API base URL (live + demo use same domain)",
     )
-    testnet_base_url: str = Field(
-        default="https://api-testnet.bybit.com",
-        description="Bybit V5 REST API base URL (testnet)",
+    ws_public_url: str = Field(
+        default="wss://ws.okx.com:8443/ws/v5/public",
+        description="OKX V5 public WebSocket base URL (USDT perp)",
     )
-    ws_base_url: str = Field(
-        default="wss://stream.bybit.com/v5/public/linear",
-        description="Bybit V5 public WebSocket base URL (linear/perp)",
-    )
-    recv_window: int = Field(
-        default=5000,
-        ge=1000,
-        description="Default receive window for signed requests (ms)",
+    ws_private_url: str = Field(
+        default="wss://ws.okx.com:8443/ws/v5/private",
+        description="OKX V5 private WebSocket base URL (account updates)",
     )
     exchange_info_ttl_seconds: float = Field(
         default=60.0,
@@ -178,12 +174,12 @@ class ExchangeConfig(BaseModel):
     """Exchange connection and rate limit configuration."""
 
     name: str = Field(
-        default="bybit",
+        default="okx",
         description="Exchange adapter name",
     )
     testnet: bool = Field(
         default=True,
-        description="Use testnet environment (default True for safety; live is opt-in)",
+        description="Use testnet/demo environment (default True for safety; live is opt-in)",
     )
     api_key: str | None = Field(
         default=None,
@@ -193,13 +189,17 @@ class ExchangeConfig(BaseModel):
         default=None,
         description="API secret (typically set via env var)",
     )
+    passphrase: str | None = Field(
+        default=None,
+        description="API passphrase (OKX-specific, set via env var or config)",
+    )
     rate_limit: RateLimitConfig = Field(
         default_factory=RateLimitConfig,
         description="Rate limiting configuration",
     )
-    bybit: BybitConfig = Field(
-        default_factory=BybitConfig,
-        description="Bybit-specific connection parameters",
+    okx: OkxConfig = Field(
+        default_factory=OkxConfig,
+        description="OKX-specific connection parameters",
     )
     gateway: OrderGatewayConfig = Field(
         default_factory=OrderGatewayConfig,
@@ -214,7 +214,7 @@ class ExchangeConfig(BaseModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         """Validate exchange name is supported."""
-        allowed = {"bybit"}
+        allowed = {"okx"}
         if value.lower() not in allowed:
             raise ValueError(f"exchange name must be one of {allowed}, got '{value}'")
         return value.lower()
@@ -572,8 +572,8 @@ class MarketDataWebSocketConfig(BaseModel):
     """Market data WebSocket connection parameters."""
 
     url: str = Field(
-        default="wss://stream.bybit.com/v5/public/linear",
-        description="Market data WebSocket base URL (Bybit V5 public/linear)",
+        default="wss://ws.okx.com:8443/ws/v5/public",
+        description="Market data WebSocket base URL (OKX V5 public)",
     )
     backoff: MarketDataBackoffConfig = Field(
         default_factory=MarketDataBackoffConfig,
@@ -1140,7 +1140,7 @@ class AiConfig(BaseModel):
         description="Maximum LLM API requests per day",
     )
     pairs: list[str] = Field(
-        default_factory=lambda: ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"],
+        default_factory=lambda: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "BNB-USDT-SWAP", "SOL-USDT-SWAP"],
         description="Trading pairs the AI module monitors",
     )
     timeframes: list[str] = Field(

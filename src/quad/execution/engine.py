@@ -671,7 +671,7 @@ class ExecutionEngine:
                     price = _as_dec(getattr(leg, "price", 0))
                     qty = _as_dec(getattr(leg, "quantity", 0))
                     # Prefer the exchange-reported realized PnL when available
-                    # (Bybit fills /v5/execution/list with realizedPnl).  The
+                    # (OKX fills include realizedPnl).  The
                     # FIFO computation below is only a fallback for when the
                     # exchange does not provide per-fill realized PnL.
                     exchange_pnl = _as_dec(getattr(leg, "pnl", 0))

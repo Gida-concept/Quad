@@ -112,9 +112,9 @@ class TrendFollowingStrategy(StrategyBase):
             List of Action objects representing trading decisions.
         """
         symbol = (
-            context.strategy_params.get("symbol", "BTCUSDT")
+            context.strategy_params.get("symbol", "BTC-USDT-SWAP")
             if context.strategy_params
-            else "BTCUSDT"
+            else "BTC-USDT-SWAP"
         )
 
         existing_positions = [

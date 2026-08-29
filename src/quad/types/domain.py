@@ -107,7 +107,7 @@ class Account:
     """Account identifier."""
 
     exchange: str
-    """Exchange name, e.g. 'bybit'."""
+    """Exchange name, e.g. 'okx'."""
 
     balances: dict[str, Balance] = field(default_factory=dict)
     """Mapping of asset symbol to Balance."""
@@ -191,7 +191,7 @@ class Order:
     """Represents an order placed on an exchange."""
 
     id: int | str | None = None
-    """Exchange order ID (int for Binance, UUID string for Bybit V5). None if not yet assigned."""
+    """Exchange order ID (OKX uses clOrdId strings). None if not yet assigned."""
 
     client_order_id: str = ""
     """Client-assigned order identifier."""
@@ -278,7 +278,7 @@ class OrderResult:
     """Result returned after submitting or querying an order."""
 
     order_id: int | str
-    """Exchange-assigned order ID (int for Binance, UUID string for Bybit V5)."""
+    """Exchange-assigned order ID (OKX uses ordId strings)."""
 
     client_order_id: str = ""
     """Client-assigned order identifier."""
@@ -319,7 +319,7 @@ class Trade:
     """Position this trade belongs to."""
 
     order_id: int | str | None = None
-    """Order this trade originated from (int for Binance, UUID string for Bybit V5)."""
+    """Order this trade originated from (OKX uses ordId strings)."""
 
     symbol: str = ""
     """Trading pair symbol."""

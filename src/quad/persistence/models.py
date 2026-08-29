@@ -51,7 +51,7 @@ SCHEMA_MIGRATIONS: dict[int, list[str]] = {
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "start_time BIGINT NOT NULL, "
             "end_time BIGINT, "
-            "mode TEXT NOT NULL DEFAULT 'bybit', "
+            "mode TEXT NOT NULL DEFAULT 'okx', "
             "state TEXT NOT NULL DEFAULT 'running', "
             "pnl TEXT NOT NULL DEFAULT '0', "
             "trades_count INTEGER NOT NULL DEFAULT 0)"
@@ -512,7 +512,7 @@ class SessionModel:
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     start_time BIGINT NOT NULL,
     end_time BIGINT,
-    mode TEXT NOT NULL DEFAULT 'bybit',
+    mode TEXT NOT NULL DEFAULT 'okx',
     state TEXT NOT NULL DEFAULT 'running',
     pnl TEXT NOT NULL DEFAULT '0',
     trades_count INTEGER NOT NULL DEFAULT 0

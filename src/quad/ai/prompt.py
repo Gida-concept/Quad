@@ -27,7 +27,7 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT_TEMPLATE = """You are a Bybit USDT perpetual trading AI (category=linear). Analyze the market data and recommend exactly one trade.
+_SYSTEM_PROMPT_TEMPLATE = """You are an OKX USDT perpetual trading AI (instType=SWAP). Analyze the market data and recommend exactly one trade.
 
 ## Rules
 1. Capital preservation first — never risk more than the setup justifies.
@@ -397,7 +397,7 @@ def build_trading_prompt(
 # Compact final-judgement prompt (local analysis → AI decides)
 # ============================================================================
 
-_FINAL_JUDGEMENT_SYSTEM = """You are a Bybit USDT perpetual trading AI acting as the FINAL DECISION MAKER.
+_FINAL_JUDGEMENT_SYSTEM = """You are an OKX USDT perpetual trading AI acting as the FINAL DECISION MAKER.
 
 The bot has already computed all technical analysis locally.  You receive a
 pre-computed LOCAL SIGNAL (indicators, direction, strength, volatility,

@@ -105,7 +105,7 @@ quad orders --open
 ```
 
 **Possible causes:**
-- **Rate limited**: Bybit has strict rate limits. Check logs for `429` errors.
+- **Rate limited**: OKX has strict rate limits. Check logs for `429` errors.
 - **Invalid price**: Option prices change quickly. Your limit price may be too far from market.
 - **Insufficient margin**: The exchange rejected the order. Check account balance.
 - **Expired contract**: The symbol may have been delisted or renamed. Verify contract symbol.
@@ -137,15 +137,15 @@ quad cancel <order-id>
 
 **Check 1: Network stability**
 ```bash
-# Ping Bybit testnet
-ping testnet.bybit.com
+# Ping OKX
+ping www.okx.com
 # Look for packet loss or high latency
 ```
 
 **Check 2: Connection count**
 ```bash
 quad health
-# Check ws streams count -- Bybit limits concurrent connections
+# Check ws streams count -- OKX limits concurrent connections
 ```
 
 **Check 3: Logs for disconnection reasons**
@@ -292,8 +292,8 @@ quad start --log-level DEBUG
 
 ```bash
 # Check API key validity
-curl -H "X-BAPI-APIKEY: $BYBIT_API_KEY" \
-  "https://api-testnet.bybit.com/v5/account/info"
+curl -H "X-OKX-APIKEY: $OKX_API_KEY" \
+  "https://api.okx.com/v5/account/info"
 
 # Expected: 200 with account data
 # 401: Invalid API key
@@ -309,7 +309,7 @@ curl -H "X-BAPI-APIKEY: $BYBIT_API_KEY" \
 
 ### Symptom: Rate Limited (HTTP 429)
 
-Bybit has strict rate limits (V5 API). The bot monitors its weight usage:
+OKX has strict rate limits (V5 API). The bot monitors its weight usage:
 
 ```bash
 # The bot will automatically back off when approaching limits
@@ -395,7 +395,7 @@ Common causes:
 
 | Error | Meaning | Action |
 |---|---|---|
-| `ExchangeConnectionError` | Can't reach Bybit API | Check network, API status |
+| `ExchangeConnectionError` | Can.*reach OKX API | Check network, API status |
 | `InvalidApiKeyError` | API key rejected | Verify key in `.env` |
 | `RateLimitError` | Hit API rate limits | Reduce request frequency |
 | `OrderRejectedError` | Exchange rejected order | Check order parameters |
