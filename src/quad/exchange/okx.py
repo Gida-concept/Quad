@@ -875,6 +875,29 @@ class OkxFuturesAdapter(ExchangeAdapter):
         text = str(exc)
         return any(c in text for c in _ORDER_NOT_FOUND_CODES) or "order does not exist" in text.lower()
 
+    # ---- Klines / Candles --------------------------------------------------
+
+    async def get_klines(self, symbol: str, interval: str, limit: int = 100) -> list[list]:
+        """Fetch candlestick/kline data from OKX.
+
+        OKX V5 API: GET /api/v5/market/candles
+        Parameters: instId, bar, limit
+
+        Args:
+            symbol: OKX instrument ID (e.g. "BTC-USDT-SWAP").
+            interval: Candle interval (e.g. "1m", "5m", "1h", "1D").
+            limit: Number of candles to fetch (max 300).
+
+        Returns:
+            List of candle arrays in OKX format:
+            [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        """
+        data = await self._get_market(
+            "get_candlesticks",
+            {"instId": symbol, "bar": interval, "limit": str(limit)},
+        )
+        return data if isinstance(data, list) else []
+
     # ======================================================================
     # Internal helpers
     # ======================================================================
