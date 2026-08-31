@@ -734,7 +734,7 @@ class OkxFuturesAdapter(ExchangeAdapter):
         inst_id = okx_symbol(symbol)
         data = await self._get_account(
             "set_leverage",
-            {"lever": str(leverage), "mgnMode": "isolated", "instId": inst_id},
+            {"lever": str(leverage), "mgnMode": "isolated", "instId": inst_id, "posSide": "net"},
         )
         return data[0] if isinstance(data, list) and data else {}
 

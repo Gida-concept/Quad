@@ -88,24 +88,47 @@ class OkxMcpClient:
 
         self._log.info("mcp_starting", command=self._command)
 
-        # Open stdio transport
-        read, write = await asyncio.wait_for(
-            stdio_client(params).__aenter__(),
-            timeout=self._startup_timeout,
-        )
+        # Open stdio transport with proper cleanup on failure
+        try:
+            read, write = await asyncio.wait_for(
+                stdio_client(params).__aenter__(),
+                timeout=self._startup_timeout,
+            )
+        except Exception as exc:
+            self._log.error("mcp_stdio_failed", error=str(exc))
+            raise McpConnectionError(f"Failed to start MCP server: {exc}") from exc
+
         self._read_stream = read
         self._write_stream = write
 
         # Create and initialize session
-        self._session = ClientSession(read, write)
-        await asyncio.wait_for(
-            self._session.__aenter__(),
-            timeout=self._startup_timeout,
-        )
-        await asyncio.wait_for(
-            self._session.initialize(),
-            timeout=self._startup_timeout,
-        )
+        try:
+            self._session = ClientSession(read, write)
+            await asyncio.wait_for(
+                self._session.__aenter__(),
+                timeout=self._startup_timeout,
+            )
+            await asyncio.wait_for(
+                self._session.initialize(),
+                timeout=self._startup_timeout,
+            )
+        except Exception as exc:
+            # Clean up stdio streams if session init fails
+            self._log.error("mcp_session_failed", error=str(exc))
+            try:
+                if write:
+                    await write.aclose()
+            except Exception:
+                pass
+            try:
+                if read:
+                    await read.aclose()
+            except Exception:
+                pass
+            self._session = None
+            self._read_stream = None
+            self._write_stream = None
+            raise McpConnectionError(f"MCP session failed: {exc}") from exc
 
         # Discover tools
         tools_result = await asyncio.wait_for(
