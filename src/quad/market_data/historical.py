@@ -35,19 +35,16 @@ _TRADE_COLUMNS = [
 
 
 class HistoricalDataProvider:
-    """Provides historical market data from the database and MCP server.
+    """Provides historical market data from the database and exchange.
 
     Implements queries against the persistence layer for backtesting and
-    strategy analysis.  When an MCP client is provided, historical candle
-    data is fetched directly from the MCP server (fixing the previous
-    stub limitation).
+    strategy analysis.
     """
 
     def __init__(
         self,
         db_manager: DatabaseManager,
         exchange_adapter: ExchangeAdapter | None = None,
-        mcp_client: Any | None = None,
     ) -> None:
         """Initialize the provider.
 
@@ -57,12 +54,9 @@ class HistoricalDataProvider:
             The ``DatabaseManager`` instance to query.
         exchange_adapter:
             Optional exchange adapter for REST-based history queries.
-        mcp_client:
-            Optional ``OkxMcpClient`` for MCP-powered candle fetching.
         """
         self._db = db_manager
         self._exchange = exchange_adapter
-        self._mcp = mcp_client
         self._log = logger.bind(dsn=str(db_manager.dsn))
 
     # ------------------------------------------------------------------
@@ -77,9 +71,7 @@ class HistoricalDataProvider:
     ) -> list[Candle]:
         """Return OHLCV candle data for *symbol* over the date range.
 
-        When an MCP client is available, fetches candles directly from
-        the OKX MCP server.  Falls back to the exchange adapter if MCP
-        is unavailable.
+        When available, fetches candles from the exchange adapter.
 
         Parameters
         ----------
@@ -96,22 +88,12 @@ class HistoricalDataProvider:
 
         from quad.types.market import Candle
 
-        # MCP path: fetch candles directly from the MCP server
-        if self._mcp is not None and hasattr(self._mcp, "call_tool"):
+        # Exchange adapter path
+        if self._exchange is not None:
             try:
-                inst_id = symbol
-                if "-" not in symbol and "SWAP" not in symbol:
-                    # Convert BTCUSDT → BTC-USDT-SWAP
-                    inst_id = symbol.replace("USDT", "-USDT-SWAP") if "USDT" in symbol else f"{symbol}-USDT-SWAP"
-
-                result = await self._mcp.call_tool(
-                    "market_get_candles",
-                    {"instId": inst_id, "bar": bar, "limit": "300"},
-                )
-                data = result.get("data", []) if isinstance(result, dict) else []
-
+                raw = await self._exchange.get_klines(symbol, bar, limit=300)
                 candles: list[Candle] = []
-                for row in data:
+                for row in raw:
                     if not isinstance(row, (list, tuple)) or len(row) < 6:
                         continue
                     ts_ms = int(row[0])
@@ -129,7 +111,7 @@ class HistoricalDataProvider:
                             )
                         )
                 self._log.debug(
-                    "mcp_candles_fetched",
+                    "candles_fetched",
                     symbol=symbol,
                     bar=bar,
                     count=len(candles),
@@ -137,49 +119,29 @@ class HistoricalDataProvider:
                 return candles
             except Exception as exc:
                 self._log.warning(
-                    "mcp_candles_fetch_failed",
+                    "exchange_candles_fetch_failed",
                     symbol=symbol,
                     bar=bar,
                     error=str(exc),
                 )
 
-        # Fallback: exchange adapter
-        if self._exchange is not None and hasattr(self._exchange, "get_klines"):
-            try:
-                interval_map = {"1H": "1H", "4H": "4H", "1D": "1D", "15m": "15m"}
-                interval = interval_map.get(bar, bar)
-                raw_klines = await self._exchange.get_klines(symbol, interval, 300)
-                if raw_klines:
-                    candles = []
-                    for k in raw_klines:
-                        ts_ms = int(k[0])
-                        candle_ts = datetime.fromtimestamp(ts_ms / 1000)
-                        if start <= candle_ts <= end:
-                            candles.append(
-                                Candle(
-                                    symbol=symbol,
-                                    open=Decimal(str(k[1])),
-                                    high=Decimal(str(k[2])),
-                                    low=Decimal(str(k[3])),
-                                    close=Decimal(str(k[4])),
-                                    volume=Decimal(str(k[5])),
-                                    timestamp=ts_ms,
-                                )
-                            )
-                    return candles
-            except Exception as exc:
-                self._log.warning(
-                    "exchange_candles_fetch_failed",
-                    symbol=symbol,
-                    error=str(exc),
-                )
+        # Fallback: empty list
+        return []
 
-        self._log.warning(
-            "get_candles_no_data_source",
-            symbol=symbol,
-            start=start.isoformat(),
-            end=end.isoformat(),
-        )
+    # ------------------------------------------------------------------
+    # Trade data
+    # ------------------------------------------------------------------
+
+    async def get_trades(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]:
+        """Return historical trades for *symbol* in the given time window.
+
+        Returns an empty list if no trade data is available.
+        """
         return []
 
     # ------------------------------------------------------------------

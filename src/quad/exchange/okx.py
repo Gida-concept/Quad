@@ -49,12 +49,14 @@ try:  # pragma: no cover - import guard for environments without the SDK
     from okx import MarketData as OkxMarketData
     from okx import PublicData as OkxPublicData
     from okx import Trade as OkxTrade
+    from okx import TradingData as OkxTradingData
 except Exception:  # pragma: no cover
     OkxAccount = None  # type: ignore[assignment]
     OkxTrade = None  # type: ignore[assignment]
     OkxMarketData = None  # type: ignore[assignment]
     OkxPublicData = None  # type: ignore[assignment]
     OkxFunding = None  # type: ignore[assignment]
+    OkxTradingData = None  # type: ignore[assignment]
 
 from quad.exchange.base import (
     ExchangeAdapter,
@@ -205,6 +207,7 @@ class OkxFuturesAdapter(ExchangeAdapter):
         self._account_client: Any = None  # OkxAccount.AccountAPI
         self._market_client: Any = None  # OkxMarketData.MarketAPI
         self._public_client: Any = None  # OkxPublicData.PublicAPI
+        self._trading_data_client: Any = None  # OkxTradingData.TradingDataAPI
 
         self._connected: bool = False
 
@@ -250,6 +253,13 @@ class OkxFuturesAdapter(ExchangeAdapter):
             passphrase=self._passphrase,
             flag=flag,
         )
+        if OkxTradingData is not None:
+            self._trading_data_client = OkxTradingData.TradingDataAPI(
+                api_key=self._api_key,
+                api_secret_key=self._api_secret,
+                passphrase=self._passphrase,
+                flag=flag,
+            )
 
         # Verify connectivity / credentials by hitting the server time.
         # Temporarily mark as connected so _require_clients() passes during init.
@@ -357,6 +367,19 @@ class OkxFuturesAdapter(ExchangeAdapter):
         self._require_clients()
         try:
             client_method = getattr(self._market_client, method)
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client_method(**(params or {}))
+            )
+            return self._unwrap(result)
+        except Exception as exc:  # noqa: BLE001
+            raise self._normalize_error(exc) from exc
+
+    async def _get_trading_data(self, method: str, params: dict | None = None) -> Any:
+        """Run a TradingData API call in an executor."""
+        if self._trading_data_client is None:
+            raise ExchangeError("TradingData client not initialized")
+        try:
+            client_method = getattr(self._trading_data_client, method)
             result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: client_method(**(params or {}))
             )
@@ -730,11 +753,16 @@ class OkxFuturesAdapter(ExchangeAdapter):
     # ======================================================================
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict:
-        """Set leverage for a symbol."""
+        """Set leverage for a symbol.
+
+        OKX V5 API: POST /api/v5/account/set-leverage
+        For one-way mode, posSide is not needed.
+        For hedge mode, posSide must be 'long' or 'short'.
+        """
         inst_id = okx_symbol(symbol)
         data = await self._get_account(
             "set_leverage",
-            {"lever": str(leverage), "mgnMode": "isolated", "instId": inst_id, "posSide": "net"},
+            {"lever": str(leverage), "mgnMode": "isolated", "instId": inst_id},
         )
         return data[0] if isinstance(data, list) and data else {}
 
@@ -749,8 +777,8 @@ class OkxFuturesAdapter(ExchangeAdapter):
             inst_id = okx_symbol(symbol)
             try:
                 data = await self._get_account(
-                    "set_isolated_mode",
-                    {"isoMode": "isolated", "type": "margin"},
+                    "set_margin_mode",
+                    {"type": "isolated", "instId": inst_id},
                 )
                 return data[0] if isinstance(data, list) and data else {}
             except Exception as exc:  # noqa: BLE001
@@ -898,6 +926,131 @@ class OkxFuturesAdapter(ExchangeAdapter):
             {"instId": symbol, "bar": interval, "limit": str(limit)},
         )
         return data if isinstance(data, list) else []
+
+    # ---- Smart Money / Sentiment Data (via TradingData) -------------------
+
+    async def get_long_short_ratio(self, ccy: str = "BTC", period: str = "5m") -> list:
+        """Get long/short account ratio for a coin.
+
+        Returns the ratio of long vs short accounts holding positions.
+        Useful as a sentiment indicator — extreme readings often precede reversals.
+        """
+        if self._trading_data_client is None:
+            return []
+        try:
+            result = await self._get_trading_data(
+                "get_long_short_ratio",
+                {"ccy": ccy, "period": period},
+            )
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            self._log.debug("long_short_ratio_failed", ccy=ccy, error=str(exc))
+            return []
+
+    async def get_taker_volume(self, ccy: str = "BTC", instType: str = "SWAP", period: str = "5m") -> list:
+        """Get taker buy/sell volume ratio.
+
+        Shows whether buyers or sellers are more aggressive.
+        High taker buy volume = bullish pressure, high taker sell = bearish.
+        """
+        if self._trading_data_client is None:
+            return []
+        try:
+            result = await self._get_trading_data(
+                "get_taker_volume",
+                {"ccy": ccy, "instType": instType, "period": period},
+            )
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            self._log.debug("taker_volume_failed", ccy=ccy, error=str(exc))
+            return []
+
+    async def get_margin_lending_ratio(self, ccy: str = "BTC", period: str = "5m") -> list:
+        """Get margin lending ratio.
+
+        Shows the ratio of margin borrowed vs lent. High ratio = bullish leverage.
+        """
+        if self._trading_data_client is None:
+            return []
+        try:
+            result = await self._get_trading_data(
+                "get_margin_lending_ratio",
+                {"ccy": ccy, "period": period},
+            )
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            self._log.debug("margin_lending_ratio_failed", ccy=ccy, error=str(exc))
+            return []
+
+    async def get_open_interest_history(self, instId: str, period: str = "5m") -> list:
+        """Get open interest history for a symbol.
+
+        Rising open interest + rising price = bullish continuation.
+        Rising open interest + falling price = bearish continuation.
+        Falling open interest = trend weakening.
+        """
+        if self._trading_data_client is None:
+            return []
+        try:
+            result = await self._get_trading_data(
+                "get_open_interest_history",
+                {"instId": instId, "period": period},
+            )
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            self._log.debug("open_interest_history_failed", instId=instId, error=str(exc))
+            return []
+
+    async def get_put_call_ratio(self, ccy: str = "BTC", period: str = "5m") -> list:
+        """Get put/call ratio for options.
+
+        High put/call ratio = bearish sentiment (contrarian: bullish).
+        Low put/call ratio = bullish sentiment (contrarian: bearish).
+        """
+        if self._trading_data_client is None:
+            return []
+        try:
+            result = await self._get_trading_data(
+                "get_put_call_ratio",
+                {"ccy": ccy, "period": period},
+            )
+            return result if isinstance(result, list) else []
+        except Exception as exc:
+            self._log.debug("put_call_ratio_failed", ccy=ccy, error=str(exc))
+            return []
+
+    async def get_smart_money_summary(self, coin: str = "BTC") -> dict:
+        """Aggregate smart money indicators into a single summary.
+
+        Combines long/short ratio, taker volume, margin lending, and open
+        interest into a sentiment snapshot for the AI analysis prompt.
+        """
+        results = {}
+        try:
+            ls = await self.get_long_short_ratio(coin)
+            if ls:
+                results["long_short_ratio"] = ls[-1] if ls else {}
+        except Exception:
+            pass
+        try:
+            tv = await self.get_taker_volume(coin)
+            if tv:
+                results["taker_volume"] = tv[-1] if tv else {}
+        except Exception:
+            pass
+        try:
+            ml = await self.get_margin_lending_ratio(coin)
+            if ml:
+                results["margin_lending_ratio"] = ml[-1] if ml else {}
+        except Exception:
+            pass
+        try:
+            oi = await self.get_open_interest_history(f"{coin}-USDT-SWAP")
+            if oi:
+                results["open_interest"] = oi[-1] if oi else {}
+        except Exception:
+            pass
+        return results
 
     # ======================================================================
     # Internal helpers
