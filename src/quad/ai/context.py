@@ -234,5 +234,102 @@ async def collect_market_context(
     return context
 
 
+# ============================================================================
+# Exchange adapter context collection
+# ============================================================================
+
+
+async def _collect_context_via_adapter(
+    context: MarketContext,
+    exchange_adapter: Any,
+    market_data_engine: Any,
+    pairs: list[str],
+    timeframes: list[str],
+    candle_count: int,
+) -> None:
+    """Collect market context via the exchange adapter and market data engine.
+
+    Fetches candles, positions, account, funding rates, tickers, and order
+    books for all configured pairs.
+    """
+    # 1. Fetch candles for all pairs × timeframes (parallelized)
+    async def _fetch_candles(pair: str, tf: str) -> tuple[str, list] | None:
+        try:
+            raw = await _fetch_klines(exchange_adapter, pair, tf, candle_count)
+            if raw:
+                return (f"{pair}_{tf}", raw)
+            return None
+        except Exception as exc:
+            context.errors[f"candles_{pair}_{tf}"] = str(exc)
+            return None
+
+    candle_tasks = [_fetch_candles(p, tf) for p in pairs for tf in timeframes]
+    candle_results = await asyncio.gather(*candle_tasks, return_exceptions=True)
+
+    for result in candle_results:
+        if isinstance(result, Exception) or result is None:
+            continue
+        key, raw_klines = result
+        pair = key.split("_")[0]
+        candles = _klines_to_candles(pair, raw_klines)
+        context.candles[key] = candles
+
+    # 2. Fetch positions from exchange adapter
+    try:
+        positions = await exchange_adapter.get_positions()
+        context.positions = positions or []
+    except Exception as exc:
+        context.errors["positions"] = str(exc)
+
+    # 3. Fetch account balance
+    try:
+        account = await exchange_adapter.get_account()
+        context.account = account
+    except Exception as exc:
+        context.errors["account"] = str(exc)
+
+    # 4. Fetch funding rates, tickers, order books for each pair
+    for pair in pairs:
+        inst_id = pair.replace("USDT", "-USDT-SWAP") if "USDT" in pair and "-" not in pair else pair
+
+        # Funding rate
+        try:
+            fr = await market_data_engine.get_funding_rate(inst_id)
+            if fr:
+                context.funding_rates[pair] = fr
+        except Exception as exc:
+            context.errors[f"funding_{pair}"] = str(exc)
+
+        # Mark price / ticker
+        try:
+            ticker = await market_data_engine.get_ticker(inst_id)
+            if ticker:
+                mark = float(getattr(ticker, "mark_price", 0) or 0)
+                if mark > 0:
+                    context.mark_prices[pair] = mark
+                context.futures_contracts[pair] = ticker
+        except Exception as exc:
+            context.errors[f"ticker_{pair}"] = str(exc)
+
+        # Order book
+        try:
+            ob = await market_data_engine.get_order_book(inst_id)
+            if ob:
+                context.order_books[pair] = ob
+        except Exception as exc:
+            context.errors[f"orderbook_{pair}"] = str(exc)
+
+    # 5. Fetch smart money data via exchange adapter (if available)
+    if hasattr(exchange_adapter, "get_smart_money_summary"):
+        for pair in pairs:
+            coin = pair.replace("-USDT-SWAP", "").replace("USDT", "")
+            try:
+                sm = await exchange_adapter.get_smart_money_summary(coin)
+                if sm:
+                    context.smart_money[pair] = sm
+            except Exception as exc:
+                context.errors[f"smart_money_{pair}"] = str(exc)
+
+
 
 
