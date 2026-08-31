@@ -1330,6 +1330,49 @@ class ExecutionConfig(BaseModel):
 
 
 # ============================================================================
+# MCP Section
+# ============================================================================
+
+
+class McpConfig(BaseModel):
+    """OKX MCP (Model Context Protocol) server configuration.
+
+    When enabled, the MCP server replaces direct python-okx SDK calls
+    for market data, TA indicators, order execution, and account queries.
+    The MCP server runs as a subprocess communicating over stdio.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable MCP server mode (default: true, replaces python-okx SDK adapter)",
+    )
+    command: str = Field(
+        default="okx-trade-mcp",
+        description="MCP server binary command or path",
+    )
+    modules: str = Field(
+        default="all",
+        description="MCP modules to enable (e.g. 'all', 'market,swap,account')",
+    )
+    profile: str = Field(
+        default="default",
+        description="OKX API profile name for the MCP server",
+    )
+    request_timeout: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=120.0,
+        description="Timeout in seconds for individual MCP tool calls",
+    )
+    startup_timeout: float = Field(
+        default=15.0,
+        ge=5.0,
+        le=60.0,
+        description="Timeout in seconds for MCP server startup handshake",
+    )
+
+
+# ============================================================================
 # Backtesting Section
 # ============================================================================
 
@@ -1422,6 +1465,10 @@ class QuadConfig(BaseModel):
         default_factory=BacktestConfig,
         description="Backtest engine simulation parameters",
     )
+    mcp: McpConfig = Field(
+        default_factory=McpConfig,
+        description="OKX MCP server configuration (replaces python-okx SDK when enabled)",
+    )
     strategy: dict[str, Any] = Field(
         default_factory=lambda: {
             "trend_following": TrendFollowingParams().model_dump(),
@@ -1429,7 +1476,7 @@ class QuadConfig(BaseModel):
         description="Strategy-specific parameters",
     )
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "ignore"}
 
 
 # ============================================================================
@@ -1453,6 +1500,18 @@ def validate_config(
         If invalid, error_messages contains human-readable validation errors.
     """
     errors: list[str] = []
+
+    # Warn about unknown top-level keys (Pydantic extra='ignore' drops them)
+    known_fields = set(QuadConfig.model_fields.keys())
+    for key in config_dict:
+        if key not in known_fields:
+            import structlog
+            _log = structlog.get_logger(__name__)
+            _log.warning(
+                "config_unknown_key_ignored",
+                key=key,
+                known_keys=sorted(known_fields),
+            )
 
     try:
         QuadConfig.model_validate(config_dict)

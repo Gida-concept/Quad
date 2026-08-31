@@ -523,16 +523,33 @@ class CircuitBreakerManager:
                 self._log.info("volatility_breaker_auto_reset")
 
     def _update_consecutive_losses(self, context: StrategyContext) -> None:
-        """Track consecutive losses from realized PnL in context."""
+        """Track consecutive losses from realized PnL in context.
+
+        Only increments when daily PnL *decreases* (a new losing trade
+        closed), and only resets when daily PnL *increases* (a new winning
+        trade closed). This prevents the counter from inflating every cycle
+        while the bot sits flat at a negative daily PnL.
+        """
         breaker = self._breakers[CONSECUTIVE_LOSS_BREAKER]
 
         daily_pnl = context.risk_status.daily_pnl if context.risk_status else Decimal(0)
 
-        if daily_pnl < Decimal(0):
+        # Track the previous cycle's daily PnL to detect actual trade events
+        prev_pnl = getattr(breaker, "_prev_daily_pnl", None)
+        if prev_pnl is None:
+            # First cycle: initialise without counting
+            breaker._prev_daily_pnl = daily_pnl  # type: ignore[attr-defined]
+            return
+
+        if daily_pnl < prev_pnl:
+            # Daily PnL decreased → a new losing trade closed
             if breaker.consecutive_losses < 100:  # prevent overflow
                 breaker.consecutive_losses += 1
-        else:
-            breaker.consecutive_losses = min(breaker.consecutive_losses, 0)
+        elif daily_pnl > prev_pnl:
+            # Daily PnL increased → a new winning trade closed, reset streak
+            breaker.consecutive_losses = 0
+
+        breaker._prev_daily_pnl = daily_pnl  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
     # Internal helpers

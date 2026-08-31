@@ -6,7 +6,7 @@
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Python | 3.12+ | Required |
+| Python | 3.10+ | Required |
 | Docker & Docker Compose | Docker 24+, Compose 2.20+ | Optional, recommended for production |
 | OKX USDT Perpetual Account | -- | API keys with trading permissions (V5 API, instType=SWAP) |
 | Telegram Bot Token | -- | From @BotFather (required for Telegram interface) |
@@ -44,7 +44,7 @@ cp .env.example .env
 # (Only needed for live or demo trading)
 
 # Create local config overrides
-cp config/config.default.yaml config/config.local.yaml
+cp config/config.yaml config/config.local.yaml
 # Edit config.local.yaml with your preferences
 ```
 
@@ -241,26 +241,26 @@ services:
 
 ---
 
-## PostgreSQL Database Management
+## SQLite Database Management
 
 ### Connection
 
-Quad connects to PostgreSQL via a DSN configured in `config/config.default.yaml` or the `DATABASE_URL` environment variable:
+Quad uses SQLite for persistence, configured via `config/config.yaml` or the `DATABASE_URL` environment variable:
 
 ```yaml
 persistence:
-  dsn: "${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}"
-  busy_timeout: 5000
+  dsn: "${DATABASE_URL:-data/quad.db}"
 ```
 
 ### Backup
 
 ```bash
-# Manual backup using pg_dump (safe to run while bot is running)
-pg_dump "postgresql://quad:quad@localhost:5432/quad" > data/backups/quad_$(date +%Y%m%d_%H%M%S).sql
+# Manual backup (safe to run while bot is running)
+# SQLite supports hot backups via the .backup command or file copy
+cp data/quad.db data/backups/quad_$(date +%Y%m%d_%H%M%S).db
 
-# Or compressed
-pg_dump "postgresql://quad:quad@localhost:5432/quad" | gzip > data/backups/quad_$(date +%Y%m%d_%H%M%S).sql.gz
+# Or using SQLite's backup command
+sqlite3 data/quad.db ".backup 'data/backups/quad_$(date +%Y%m%d_%H%M%S).db'"
 ```
 
 ### Restore
@@ -270,9 +270,7 @@ pg_dump "postgresql://quad:quad@localhost:5432/quad" | gzip > data/backups/quad_
 quad stop
 
 # Restore from backup
-dropdb "postgresql://quad:quad@localhost:5432/quad"
-createdb "postgresql://quad:quad@localhost:5432/quad"
-psql "postgresql://quad:quad@localhost:5432/quad" < data/backups/quad_20260707_120000.sql
+cp data/backups/quad_20260707_120000.db data/quad.db
 
 # Restart
 quad start
@@ -282,18 +280,18 @@ quad start
 
 ```bash
 # VACUUM to reclaim space (run while bot is stopped)
-psql "postgresql://quad:quad@localhost:5432/quad" -c "VACUUM ANALYZE;"
+sqlite3 data/quad.db "VACUUM;"
 
 # Check database size
-psql "postgresql://quad:quad@localhost:5432/quad" -c "SELECT pg_size_pretty(pg_database_size(current_database()));"
+ls -lh data/quad.db
 
 # List table sizes
-psql "postgresql://quad:quad@localhost:5432/quad" -c "SELECT relname, pg_size_pretty(pg_total_relation_size(relid)) FROM pg_catalog.pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC;"
+sqlite3 data/quad.db "SELECT name, (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=m.name) as rows FROM sqlite_master m WHERE type='table' ORDER BY name;"
 ```
 
 ### Connection Pooling
 
-Quad uses asyncpg's built-in connection pool (default `min_size=1, max_size=5`). The pool is created on startup and connections are acquired/released per query. No additional PgBouncer or external pooler is required for single-instance deployments.
+Quad uses aiosqlite with a single connection pool (SQLite doesn't benefit from multiple concurrent writers). The pool is created on startup and connections are acquired/released per query.
 
 ---
 
@@ -384,7 +382,7 @@ curl http://localhost:9090/metrics
 | Firewall | Allow only port 22 (SSH) and 9090 (health, internal only) | Never expose 9090 to the public internet |
 | OKX API Keys | Create keys with trading only (disable withdrawals) | Rotate keys every 90 days |
 | Docker Security | Run container as non-root | Add `user: "1000:1000"` to compose services |
-| Database Access | Restrict PostgreSQL access to trusted network | Use firewall or pg_hba.conf rules |
+| Database Access | Restrict SQLite file permissions to trusted users | Use filesystem permissions (chmod 600) |
 | Secrets | Store API keys in `.env`, never in code | Keep `.env` out of version control |
 
 ---

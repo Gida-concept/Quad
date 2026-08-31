@@ -13,6 +13,7 @@ typing-extensions==4.16.0
 pydantic==2.13.4
 python-telegram-bot[job-queue]==22.8
 python-okx==0.4.3
+mcp>=2.0.0
 
 # Build
 setuptools>=68

@@ -97,6 +97,9 @@ class MarketContext:
     futures_contracts: dict[str, FuturesContract] = field(default_factory=dict)
     order_books: dict[str, dict] = field(default_factory=dict)
     mark_prices: dict[str, float] = field(default_factory=dict)
+    smart_money: dict[str, dict] = field(default_factory=dict)
+    sentiment: dict[str, dict] = field(default_factory=dict)
+    news: list[dict] = field(default_factory=list)
     timestamp: float = 0.0
     errors: dict[str, str] = field(default_factory=dict)
 
@@ -194,13 +197,13 @@ async def collect_market_context(
     market_data_engine: Any,
     db_manager: Any | None = None,
     config: dict[str, Any] | None = None,
+    mcp_client: Any | None = None,
 ) -> MarketContext:
     """Collect a complete market snapshot for AI trading decisions.
 
-    Fetches candles (from the exchange adapter's klines endpoint), current positions and
-    account state (from the exchange adapter), and futures market data
-    (funding rates, mark prices, order books, ticker info) from the
-    market data engine.
+    When ``mcp_client`` is provided, all data is fetched via the OKX MCP
+    server (no WebSocket needed).  Falls back to the exchange adapter +
+    market data engine path when MCP is unavailable.
 
     Parameters
     ----------
@@ -215,19 +218,11 @@ async def collect_market_context(
         Optional database manager (currently unused; reserved for future
         historical queries).
     config:
-        Optional configuration dict.  Recognised keys:
-
-        * ``ai.pairs`` — list of pair symbols (default
-          ``["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]``).
-        * ``ai.timeframes`` — list of timeframe strings (default
-          ``["15m", "1h"]``).
-        * ``ai.candle_count`` — number of candles per pair per timeframe
-          (default 300).
-
-    Returns
-    -------
-    MarketContext
-        A snapshot dataclass with all collected data.
+        Optional configuration dict.
+    mcp_client:
+        Optional ``OkxMcpClient`` for MCP-powered data collection.
+        When provided, bypasses exchange adapter and market data engine
+        for all data fetching.
     """
     cfg = config or {}
     ai_cfg = AiConfig.model_validate(cfg.get("ai", {}))
@@ -239,8 +234,230 @@ async def collect_market_context(
     context = MarketContext(timestamp=time.time())
 
     # ------------------------------------------------------------------
-    # 1. Fetch candles via exchange klines API (via exchange adapter)
+    # MCP-powered data collection (when available)
     # ------------------------------------------------------------------
+    if mcp_client is not None and hasattr(mcp_client, "call_tool"):
+        try:
+            await _collect_context_via_mcp(context, mcp_client, pairs, timeframes, candle_count)
+            logger.info(
+                "market_context_collected_via_mcp",
+                pairs=len(pairs),
+                timeframes=len(timeframes),
+            )
+            return context
+        except Exception as exc:
+            context.errors["mcp_fallback"] = str(exc)
+            logger.warning(
+                "mcp_context_collection_failed_falling_back",
+                error=str(exc),
+            )
+            # Fall through to exchange adapter path
+
+    # ------------------------------------------------------------------
+    # Exchange adapter path (default)
+    # ------------------------------------------------------------------
+    await _collect_context_via_adapter(context, exchange_adapter, market_data_engine, pairs, timeframes, candle_count)
+
+    return context
+
+
+# ============================================================================
+# MCP-powered context collection
+# ============================================================================
+
+
+async def _collect_context_via_mcp(
+    context: MarketContext,
+    mcp_client: Any,
+    pairs: list[str],
+    timeframes: list[str],
+    candle_count: int,
+) -> None:
+    """Collect market context entirely via MCP tools."""
+
+    # 1. Fetch candles for all pairs × timeframes (parallelized)
+    async def _fetch_candles(pair: str, tf: str) -> tuple[str, list] | None:
+        try:
+            inst_id = pair.replace("USDT", "-USDT-SWAP") if "USDT" in pair and "-" not in pair else pair
+            raw_candles = await mcp_client.get_candles(inst_id, tf.upper(), candle_count)
+            return (f"{pair}_{tf}", raw_candles)
+        except Exception as exc:
+            context.errors[f"mcp_candles_{pair}_{tf}"] = str(exc)
+            return None
+
+    candle_tasks = [_fetch_candles(p, tf) for p in pairs for tf in timeframes]
+    candle_results = await asyncio.gather(*candle_tasks, return_exceptions=True)
+
+    for result in candle_results:
+        if isinstance(result, Exception) or result is None:
+            continue
+        key, raw_candles = result
+        if not raw_candles:
+            context.errors[f"candles_{key}"] = "empty_response"
+            continue
+        pair = key.split("_")[0]
+        candles = _klines_to_candles(pair, raw_candles)
+        context.candles[key] = candles
+        logger.debug("mcp_candles_fetched", key=key, count=len(candles))
+
+    # 2. Fetch positions via MCP
+    try:
+        from quad.types.domain import (
+            Position, PositionSide, PositionStatus,
+            FuturesPositionSide, MarginType, Account, Balance,
+        )
+        from decimal import Decimal
+
+        raw_positions = await mcp_client.get_positions("SWAP")
+        positions: list[Position] = []
+        for pos in raw_positions:
+            pos_val = pos.get("pos", "0")
+            if pos_val == "0" or pos_val == "" or pos_val is None:
+                continue
+            side_str = pos.get("posSide", "net")
+            qty = abs(Decimal(str(pos_val)))
+            if side_str == "long" or (side_str == "net" and qty > 0):
+                position_side = PositionSide.LONG
+                fut_side = FuturesPositionSide.LONG
+            else:
+                position_side = PositionSide.SHORT
+                fut_side = FuturesPositionSide.SHORT
+            positions.append(Position(
+                symbol=pos.get("instId", ""),
+                side=position_side,
+                quantity=qty,
+                entry_price=Decimal(str(pos.get("avgPx", "0") or "0")),
+                current_price=Decimal(str(pos.get("markPx", pos.get("last", "0")) or "0")),
+                unrealized_pnl=Decimal(str(pos.get("upl", "0") or "0")),
+                leverage=int(float(pos.get("lever", "1") or "1")),
+                margin_type=MarginType.ISOLATED if pos.get("mgnMode") == "isolated" else MarginType.CROSS,
+                position_side=fut_side,
+                liquidation_price=Decimal(str(pos.get("liqPx", "0") or "0")),
+                status=PositionStatus.OPEN,
+                opened_at=int(pos.get("cTime", "0") or "0"),
+                updated_at=int(pos.get("uTime", "0") or "0"),
+            ))
+        context.positions = positions
+    except Exception as exc:
+        context.errors["mcp_positions"] = str(exc)
+
+    # 3. Fetch account via MCP
+    try:
+        from quad.types.domain import Account, Balance
+        from decimal import Decimal
+
+        result = await mcp_client.get_account_balance_all()
+        balances: dict[str, Balance] = {}
+        total_usdt = Decimal(0)
+        details = result.get("details", []) if isinstance(result, dict) else []
+        for detail in details:
+            ccy = detail.get("ccy", "")
+            avail_eq = Decimal(str(detail.get("availEq", detail.get("eq", "0"))))
+            frozen_bal = Decimal(str(detail.get("frozenBal", "0")))
+            bal = Balance(asset=ccy, free=avail_eq, locked=frozen_bal)
+            balances[ccy] = bal
+            if ccy == "USDT":
+                total_usdt = bal.total
+
+        import time as _time
+        context.account = Account(
+            id="mcp",
+            exchange="okx",
+            balances=balances,
+            total_usdt=total_usdt,
+            timestamp=int(_time.time() * 1000),
+            total_wallet_balance=total_usdt,
+            total_margin_balance=total_usdt,
+            available_balance=total_usdt,
+        )
+    except Exception as exc:
+        context.errors["mcp_account"] = str(exc)
+
+    # 4. Fetch futures market data for all pairs (parallelized)
+    async def _fetch_one_mcp_data(pair: str) -> dict[str, Any]:
+        out: dict[str, Any] = {"pair": pair}
+        inst_id = pair.replace("USDT", "-USDT-SWAP") if "USDT" in pair and "-" not in pair else pair
+
+        try:
+            fr_raw = await mcp_client.get_funding_rate(inst_id)
+            fr_data = fr_raw.get("data", [{}]) if isinstance(fr_raw, dict) else [{}]
+            fr_item = fr_data[0] if fr_data else {}
+            out["funding_rate"] = FundingRate(
+                symbol=pair,
+                funding_rate=Decimal(str(fr_item.get("fundingRate", "0") or "0")),
+                next_funding_time=int(fr_item.get("fundingTime", "0") or "0"),
+                mark_price=Decimal(str(fr_item.get("markPx", "0") or "0")),
+            )
+        except Exception as exc:
+            context.errors[f"mcp_funding_{pair}"] = str(exc)
+
+        try:
+            ticker_raw = await mcp_client.get_ticker(inst_id)
+            ticker_data = ticker_raw.get("data", [{}]) if isinstance(ticker_raw, dict) else [{}]
+            ticker_item = ticker_data[0] if ticker_data else {}
+            if ticker_item:
+                last_px = Decimal(str(ticker_item.get("last", "0") or "0"))
+                out["mark_price"] = float(last_px)
+                out["ticker"] = ticker_item
+                contract = FuturesContract(
+                    symbol=pair,
+                    mark_price=last_px,
+                    last_price=last_px,
+                    volume_24h=Decimal(str(ticker_item.get("vol24h", "0") or "0")),
+                    price_change_24h=Decimal(str(ticker_item.get("sodUtc8", "0") or "0")),
+                    high_24h=Decimal(str(ticker_item.get("high24h", "0") or "0")),
+                    low_24h=Decimal(str(ticker_item.get("low24h", "0") or "0")),
+                    last_update=int(time.time()),
+                )
+                context.futures_contracts[pair] = contract
+        except Exception as exc:
+            context.errors[f"mcp_ticker_{pair}"] = str(exc)
+
+        try:
+            ob_raw = await mcp_client.get_orderbook(inst_id, 20)
+            if isinstance(ob_raw, dict):
+                ob_data = ob_raw.get("data", [{}]) if "data" in ob_raw else ob_raw
+                if isinstance(ob_data, list) and ob_data:
+                    out["order_book"] = ob_data[0] if isinstance(ob_data[0], dict) else ob_data
+                elif isinstance(ob_data, dict):
+                    out["order_book"] = ob_data
+        except Exception as exc:
+            context.errors[f"mcp_orderbook_{pair}"] = str(exc)
+
+        return out
+
+    data_results = await asyncio.gather(
+        *[_fetch_one_mcp_data(p) for p in pairs], return_exceptions=True
+    )
+    for result in data_results:
+        if isinstance(result, Exception):
+            continue
+        pair = result["pair"]
+        fr = result.get("funding_rate")
+        if fr is not None:
+            context.funding_rates[pair] = fr
+        mp = result.get("mark_price")
+        if mp is not None:
+            context.mark_prices[pair] = mp
+        ob = result.get("order_book")
+        if ob is not None:
+            context.order_books[pair] = ob
+
+
+# ============================================================================
+# Exchange adapter context collection (default path)
+# ============================================================================
+
+
+async def _collect_context_via_adapter(
+    context: MarketContext,
+    exchange_adapter: Any,
+    market_data_engine: Any,
+    pairs: list[str],
+    timeframes: list[str],
+    candle_count: int,
+) -> None:
+    """Collect market context via exchange adapter + market data engine."""
     try:
         tasks: list[Any] = []
         for pair in pairs:
@@ -389,5 +606,40 @@ async def collect_market_context(
             except Exception as exc:
                 context.errors[f"contract_{pair}"] = str(exc)
                 logger.warning("contract_build_failed", pair=pair, error=str(exc))
+
+    # 5. Fetch smart money signals + sentiment for each pair (MCP-only features)
+    async def _fetch_smart_money(pair: str) -> tuple[str, dict, dict] | None:
+        try:
+            coin = pair.replace("USDT", "") if "USDT" in pair else pair
+            sm_raw = await mcp_client.get_smart_money_signals(coin, "7D")
+            sm_data = sm_raw.get("data", {}) if isinstance(sm_raw, dict) else {}
+
+            sent_raw = await mcp_client.get_coin_sentiment(coin)
+            sent_data = sent_raw.get("data", {}) if isinstance(sent_raw, dict) else {}
+
+            return (pair, sm_data, sent_data)
+        except Exception as exc:
+            context.errors[f"mcp_smart_money_{pair}"] = str(exc)
+            return None
+
+    sm_tasks = [_fetch_smart_money(p) for p in pairs]
+    sm_results = await asyncio.gather(*sm_tasks, return_exceptions=True)
+    for result in sm_results:
+        if isinstance(result, Exception) or result is None:
+            continue
+        pair, sm_data, sent_data = result
+        if sm_data:
+            context.smart_money[pair] = sm_data
+        if sent_data:
+            context.sentiment[pair] = sent_data
+
+    # 6. Fetch latest news (global, not per-pair)
+    try:
+        news_raw = await mcp_client.get_latest_news(20)
+        news_data = news_raw.get("data", []) if isinstance(news_raw, dict) else []
+        if isinstance(news_data, list):
+            context.news = news_data[:20]
+    except Exception as exc:
+        context.errors["mcp_news"] = str(exc)
 
     return context

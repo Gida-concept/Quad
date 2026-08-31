@@ -144,7 +144,7 @@ Quad v2.0.0 starting...
   Mode: testnet
   Strategy: trend_following
   Exchange: okx (USDT perpetual demo)
-  Database: postgresql://quad@localhost:5432/quad
+  Database: data/quad.db (SQLite)
   Log level: INFO
   Telegram: enabled (polling mode)
 

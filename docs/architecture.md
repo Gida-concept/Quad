@@ -36,8 +36,8 @@ The **Telegram bot** is the primary user-facing layer, providing real-time tradi
 ┌────────────────┐ ┌────────────┐ ┌────────────────┐
 │ MARKET DATA   │ │ EXCHANGE   │ │ EXECUTION      │
 │ MODULE        │ │ ADAPTER    │ │ ENGINE          │
-│ (WebSocket    │ │ (plugabble)│ │ (order gateway, │
-│  manager,     │ │            │ │  TWAP splitter, │
+│ (WebSocket    │ │ (MCP or   │ │ (order gateway, │
+│  manager,     │ │  SDK)      │ │  TWAP splitter, │
 │  data store,  │ │ OKX        │ │  slippage est., │
 │  normalizer)  │ │ USDT       │ │  post-trade     │
 └────────────────┘ │ Perpetual  │ │  analysis)      │
@@ -77,10 +77,10 @@ Each trading cycle executes the following sequence:
 ### Step 1: Market Data Ingestion
 
 The Market Data module maintains persistent WebSocket connections to the OKX V5 API for real-time data:
-- **Mini Ticker Stream:** Real-time 24hr ticker data for all traded symbols (`!miniTicker@arr`)
-- **Mark Price Stream:** Real-time mark prices and funding rates for all symbols (`!markPrice@arr@1s`)
-- **Book Ticker Stream:** Real-time best bid/ask for all symbols (`!bookTicker`)
-- **Force Order Stream:** Real-time liquidation order events (`!forceOrder@arr`)
+- **Ticker Stream:** Real-time 24hr ticker data for all traded symbols
+- **Mark Price Stream:** Real-time mark prices and funding rates for all symbols
+- **Order Book Stream:** Real-time best bid/ask for all symbols
+- **Liquidation Stream:** Real-time liquidation order events
 - **User Data Stream:** Account balance updates, order status, position changes
 
 A REST fallback polls the OKX V5 API periodically if any WebSocket stream disconnects. All incoming data is validated for sequence numbers and timestamp freshness before being passed to the Data Store.
@@ -157,7 +157,7 @@ The Orchestrator periodically:
 
 | Aspect | Detail |
 |---|---|
-| **Decision** | Build Quad entirely in Python 3.12+ with asyncio, running as a single process |
+| **Decision** | Build Quad entirely in Python 3.10+ with asyncio, running as a single process |
 | **Rationale** | Options trading requires deterministic strategy execution with access to mathematical libraries (pandas, numpy, scipy). Python's asyncio provides excellent I/O performance for WebSocket streams and API calls. A single process eliminates serialization overhead, simplifies deployment, and avoids the operational complexity of multi-service architectures. |
 | **Trade-offs** | No language-level parallelism for CPU-heavy tasks. GIL limits concurrent computation. Backtesting and live trading cannot run simultaneously in the same process. |
 
@@ -168,6 +168,14 @@ The Orchestrator periodically:
 | **Decision** | Abstract the exchange interface behind an `ExchangeAdapter` ABC, enabling swap-in adapters for different exchanges |
 | **Rationale** | Decouples trading logic from exchange-specific API details. Enables testnet (simulated fills using real market data) and dry-run mode without changing core engine code. Future exchange support requires only a new adapter class. |
 | **Trade-offs** | Interface design must accommodate all exchange capabilities without being overly generic. Some exchange-specific features may not map cleanly to the abstraction. Additional abstraction layer adds development overhead. |
+
+### AD-2b: OKX MCP Server Integration (Optional)
+
+| Aspect | Detail |
+|---|---|
+| **Decision** | Optional MCP (Model Context Protocol) server backend that replaces the python-okx SDK for data fetching, TA indicators, and order execution |
+| **Rationale** | The OKX MCP server (`@okx_ai/okx-trade-mcp`) provides 228 built-in TA indicators, smart money signals, news sentiment, and advanced order types (TWAP, iceberg, chase) without maintaining custom code. When enabled, the `McpExchangeAdapter` routes all calls through the MCP server subprocess via JSON-RPC 2.0 over stdio. |
+| **Trade-offs** | Adds a Node.js dependency. MCP server subprocess adds memory overhead (~50MB). Not suitable for high-frequency trading due to subprocess IPC latency. Feature flag (`config.mcp.enabled`) allows instant rollback to python-okx SDK. |
 
 ### AD-3: Plugin-Based Strategy Framework
 
@@ -264,7 +272,7 @@ quad/
 ├── requirements.txt          # Python dependencies
 │
 ├── config/                   # Configuration files
-│   ├── config.default.yaml   # Default configuration with all keys
+│   ├── config.yaml        # Default configuration with all keys
 │   └── config.local.yaml     # Local overrides (not committed)
 │
 ├── data/                     # Runtime data directory

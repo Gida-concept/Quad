@@ -120,6 +120,11 @@ SCHEMA_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_funding_rate_records_symbol ON funding_rate_records(symbol)",
         "CREATE INDEX IF NOT EXISTS idx_funding_rate_records_time ON funding_rate_records(time)",
     ],
+    # NOTE: Version 3 is intentionally skipped. The migration from v2->v4
+    # is safe because the migration loop uses .get(version, []) which
+    # returns an empty list for missing versions. This skip was introduced
+    # when the Phase-1 inversion-proof upgrade (v4) was added directly
+    # after v2, bypassing v3.
     4: [
         # Version 3 --> 4: Phase 1 inversion-proof upgrade.  The LLM now
         # forecasts a DIRECTION and the bot derives the order side

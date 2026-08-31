@@ -2,11 +2,16 @@
 
 Creates the correct ``ExchangeAdapter`` implementation based on the
 application configuration.
+
+When ``config.mcp.enabled`` is ``True``, the orchestrator calls MCP
+tools directly (no adapter wrapper needed).  This factory only creates
+``OkxFuturesAdapter`` for the non-MCP fallback path.
 """
 
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import structlog
 
@@ -24,19 +29,9 @@ def create_exchange(
     Testnet is the default safety environment and live is opt-in via
     ``exchange.testnet: false``.
 
-    Args:
-        config: Application configuration dictionary.  May be ``None``
-            (all defaults are used, which resolves to OKX testnet).
-
-    Returns:
-        An initialized ``ExchangeAdapter`` instance.
-
-    Examples::
-
-        adapter = create_exchange({
-            "exchange.name": "okx",
-            "exchange.testnet": True,
-        })
+    When MCP is enabled, the orchestrator calls MCP tools directly
+    instead of going through this adapter.  This factory is only
+    used for the non-MCP fallback path.
     """
     from quad.exchange.okx import OkxFuturesAdapter
 
@@ -71,14 +66,7 @@ def create_exchange(
 
 
 def _coerce_bool(value: object) -> bool:
-    """Coerce a value to bool, handling string representations.
-
-    Args:
-        value: The value to coerce (bool, str, int, etc.).
-
-    Returns:
-        The coerced boolean.
-    """
+    """Coerce a value to bool, handling string representations."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):

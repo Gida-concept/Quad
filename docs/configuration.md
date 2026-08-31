@@ -19,13 +19,13 @@ The `.env` file at the project root holds secrets and environment-specific value
 | `QUAD_LOG_LEVEL` | No | `INFO` | Logging level: DEBUG, INFO, WARN, ERROR |
 | `QUAD_LOG_FORMAT` | No | `json` | Log format: json or text |
 | `QUAD_LOG_FILE` | No | `./data/logs/quad.log` | Log file path |
-| `DATABASE_URL` | No | `postgresql://quad:quad@localhost:5432/quad` | PostgreSQL DSN (overrides persistence.dsn in config) |
+| `DATABASE_URL` | No | `data/quad.db` | SQLite database path (overrides persistence.dsn in config) |
 | `QUAD_HEALTH_PORT` | No | `9090` | Health check HTTP server port |
 | `QUAD_MODE` | No | `okx` | Exchange mode: `okx` (USDT perpetual). `dry_run` runs demo trading in dry-run mode. |
-| `QUAD_DEFAULT_STRATEGY` | No | `cash_secured_put` | Default strategy to load on start |
+| `QUAD_DEFAULT_STRATEGY` | No | `trend_following` | Default strategy to load on start |
 | `QUAD_MAX_CYCLE_INTERVAL` | No | `60` | Trading cycle interval in seconds |
 | `QUAD_DRY_RUN` | No | `true` | Run in dry-run mode (no real orders) |
-| `QUAD_CONFIG_PATH` | No | `config/config.local.yaml` | Path to local config YAML file |
+| `QUAD_CONFIG_PATH` | No | `config/config.yaml` | Path to local config YAML file |
 | `QUAD_LOG_DIR` | No | `./data/logs` | Log output directory |
 | `QUAD_AI_ENABLED` | No | `false` | Enable AI-driven trading analysis |
 | `QUAD_AI_MODEL` | No | `groq/compound-mini` | Groq LLM model identifier for AI analysis |
@@ -46,103 +46,128 @@ The `config/` directory contains the main configuration files. Each file is opti
 
 | File | Purpose | Hot-Reloadable |
 |---|---|---|
-| `config.default.yaml` | All configuration keys with default values | N/A |
+| `config.yaml` | All configuration keys with default values | N/A |
 | `config.local.yaml` | Local overrides (not committed to git) | No |
 | `risk.yaml` | Risk management parameters | Yes |
 | `strategy.yaml` | Strategy-specific settings | Yes |
 | `exchange.yaml` | Exchange connection settings | No |
 | `logging.yaml` | Logging configuration | Yes |
 
-### config.default.yaml
+### config.yaml
 
 ```yaml
-# Trading
+# Quad — Minimal Configuration for BTCUSDT USDT-Perpetual Bot (OKX)
+_mode: "okx"
+_dry_run: true
+
 trading:
-  default_strategy: trend_following
-  max_positions: 5
-  max_cycle_interval: 60  # seconds
-  serial_trade_mode: false  # close all positions before new ENTER
-  leverage: 3  # default leverage for new positions
-  margin_mode: isolated  # isolated, cross
-  position_mode: hedge  # one_way, hedge
+  # One trade per cycle: force-close every open position before a new ENTER.
+  # Only one position may ever be open (see also ai.rotation below).
+  serial_trade_mode: true
+  default_strategy: "trend_following"
+  ai_cycle_interval: 3600
+  underlyings:
+    - "BTC-USDT-SWAP"
+    - "ETH-USDT-SWAP"
+    - "SOL-USDT-SWAP"
+    - "BNB-USDT-SWAP"
+  leverage: 50
+  margin_mode: "isolated"
+  position_mode: "one_way"
 
-# Exchange
 exchange:
-  name: okx
-  testnet: true  # demo trading is the default safety environment; set false for live
+  name: "okx"
+  testnet: true
 
-# Risk Management
 risk:
-  max_positions: 5
-  max_portfolio_risk: 0.02  # 2% of portfolio per trade
-  max_daily_loss: 0.05  # 5% of portfolio per day
-  max_drawdown: 0.15  # 15% circuit breaker
-  min_distance_to_liquidation_pct: 0.20  # 20% min distance to liquidation price
-  max_funding_rate_cost: 0.001  # max funding rate cost per 8h cycle (0.1%)
-  max_leverage: 10  # maximum leverage allowed
-  max_position_concentration: 0.4  # 40% max per symbol
-  max_correlation: 0.7  # max portfolio correlation coefficient
-  circuit_breakers:
-    pnl_drawdown:
-      enabled: true
-      threshold: 0.15  # 15% portfolio drawdown
-      cooldown: 3600  # seconds before auto-reset
-    daily_loss:
-      enabled: true
-      threshold: 0.10  # 10% daily loss
-    consecutive_losses:
-      enabled: true
-      threshold: 3  # consecutive losing trades
-    position_growth:
-      enabled: true
-      threshold: 0.50  # 50% position growth in 24h
-    liquidation_cascade:
-      enabled: true
-      proximity_threshold: 0.10  # 10% from liquidation
-    funding_rate_spike:
-      enabled: true
-      change_threshold: 0.002  # 0.2% funding rate change
-      window: 24  # hours
-    volatility:
-      enabled: true
-      change_threshold: 0.50  # 50% volatility change
-      window: 24  # hours
-  stop_loss:
+  max_positions: 1
+  max_leverage: 50
+  min_distance_to_liquidation_pct: 0.20
+  liquidation_distance_fraction: 0.5
+  per_position_sl:
     enabled: true
-    type: fixed  # fixed, trail
-    fixed_loss_per_contract: 100  # USDT
-    trail_activation_pnl: 50  # USDT profit
-    trail_distance: 0.5  # multiple of position value
-  take_profit:
+    type: "fixed"
+    capital_pct: 30.0
+  per_position_tp:
     enabled: true
-    target_pnl_percent: 50  # % of position value
-    target_pnl_fixed: 200  # USDT
+    type: "fixed"
+    capital_pct: 50.0
 
-# Strategy
+execution:
+  reconcile_interval_seconds: 60
+
+persistence:
+  dsn: "data/quad.db"
+
+telegram:
+  enabled: true
+  job_intervals:
+    status_summary_seconds: 3600
+    risk_alert_seconds: 300
+
+ai:
+  enabled: true
+  model: "groq/compound-mini"
+  pairs:
+    - "BTC-USDT-SWAP"
+    - "ETH-USDT-SWAP"
+    - "SOL-USDT-SWAP"
+    - "BNB-USDT-SWAP"
+  timeframes:
+    - "1h"
+  candle_count: 150
+  max_tokens: 4096
+  prompt:
+    max_candles: 20
+  rotation:
+    enabled: true
+    retry_sleep_seconds: 30
+    close_positions_on_start: true
+    close_open_position_each_cycle: true
+    max_hold_seconds: 21600
+    price_bracket_check: true
+    price_bracket_tolerance_pct: 0.5
+  groq:
+    token_budget:
+      enabled: false
+  validator:
+    gate_mode: "warn"
+    min_confidence_to_trade: 0.0
+  metrics:
+    enabled: true
+    interval_cycles: 1
+    min_resolved: 5
+    only_directional: true
+
+monitoring:
+  health_server:
+    port: 9090
+    bind_address: "127.0.0.1"
+    version: "0.1.0"
+
 strategy:
   trend_following:
     enabled: true
-    ema_fast: 9
-    ema_slow: 21
-    atr_period: 14
-    atr_multiplier: 2.0
-    stop_loss_atr: 2.0
-    take_profit_atr: 4.0
-    max_position_size: 1.0  # contracts
+    fast_ema: 9
+    slow_ema: 21
+    adx_threshold: 25
+    trade_capital_usd: 5
 
-  grid_trading:
-    enabled: false
-    grid_levels: 10
-    grid_spread_pct: 0.5  # % between grid levels
-    grid_size_pct: 10  # % of capital per grid
-    take_profit_pct: 1.0  # % per grid level
+retrain:
+  enabled: true
+  interval_days: 7
 
-  mean_reversion:
-    enabled: false
-    rsi_period: 14
-    rsi_oversold: 30
-    rsi_overbought: 70
-    bb_period: 20
+# OKX MCP Server — when enabled, replaces python-okx SDK for data, TA, and execution.
+# Requires: npm install -g @okx_ai/okx-trade-mcp
+# Set exchange.api_key, exchange.api_secret, exchange.passphrase via env vars or config.
+mcp:
+  enabled: true           # true = use MCP server (default); false = use python-okx SDK
+  command: "okx-trade-mcp"
+  modules: "all"          # market,swap,account,spot,futures,option,smartmoney,news
+  profile: "default"      # OKX API profile (~/.okx/config.toml)
+  request_timeout: 30.0   # seconds per tool call
+  startup_timeout: 15.0   # seconds for MCP handshake
+```
     bb_std: 2.0
     entry_timeout: 3600  # seconds
     max_position_size: 1.0
@@ -174,7 +199,7 @@ market_data:
 
 # Persistence
 persistence:
-  dsn: "${DATABASE_URL:-postgresql://quad:quad@localhost:5432/quad}"
+  dsn: "${DATABASE_URL:-data/quad.db}"
   snapshot_interval: 300  # seconds
   backup:
     enabled: true
@@ -209,7 +234,7 @@ monitoring:
 The bot resolves configuration from 4 layers, each overriding the previous:
 
 ```
-Layer 1: config.default.yaml (packaged defaults)
+Layer 1: config.yaml (packaged defaults)
     │
     ▼
 Layer 2: config.local.yaml (user overrides, not in git)
@@ -221,7 +246,7 @@ Layer 3: Environment Variables (.env)
 Layer 4: Runtime CLI flags / `quad config set` commands
 ```
 
-**Layer 1 -- config.default.yaml:** Contains every configuration key with safe default values. Ships with the package.
+**Layer 1 -- config.yaml:** Contains every configuration key with safe default values. Ships with the package.
 
 **Layer 2 -- config.local.yaml:** User-specific overrides for local setup. Should not be committed to version control.
 
@@ -300,6 +325,6 @@ Before starting the bot, verify the following:
 
 **Start in dry-run or demo mode.** Before risking real capital, run the bot with `quad start --dry-run` or `OKX_TESTNET=true` (demo trading is the default).
 
-**Restrict database access.** The PostgreSQL database contains your trading history and configuration. Use a strong database password, restrict network access via `pg_hba.conf`, and never expose the database port to the public internet.
+**Restrict database access.** The SQLite database contains your trading history and configuration. Use file permissions to restrict access, and never expose the data directory to the public internet.
 
 **Monitor log files.** Regularly check logs for suspicious activity, unexpected errors, or authorization failures. Configure log rotation to prevent disk exhaustion.

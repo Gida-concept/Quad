@@ -59,6 +59,10 @@ ENV_VAR_MAP: dict[str, str] = {
     "QUAD_TRADINGVIEW_WEBHOOK_ENABLED": "tradingview_webhook.enabled",
     "QUAD_TRADINGVIEW_WEBHOOK_PORT": "tradingview_webhook.port",
     "QUAD_TRADINGVIEW_WEBHOOK_SECRET": "tradingview_webhook.secret",
+    # MCP server configuration
+    "QUAD_MCP_ENABLED": "mcp.enabled",
+    "QUAD_MCP_PROFILE": "mcp.profile",
+    "QUAD_MCP_MODULES": "mcp.modules",
 }
 
 # Default config directory search order

@@ -35,7 +35,7 @@ pip list | grep quad
 
 **Check 3: Config directory**
 ```bash
-ls -la config/config.default.yaml
+ls -la config/config.yaml
 # Must exist and be valid YAML
 ```
 
@@ -46,10 +46,8 @@ touch data/test_write && rm data/test_write
 
 **Check 5: Database connection**
 ```bash
-# Verify the PostgreSQL server is reachable
-pg_isready
-# If DATABASE_URL is set, verify credentials and connectivity
-psql "$DATABASE_URL" -c "SELECT 1;"
+# Verify the SQLite database is accessible
+ls -la data/quad.db
 ```
 
 ### Symptom: `ImportError: No module named 'quad'`
@@ -165,38 +163,34 @@ quad logs --level WARN | grep -i websocket
 
 ### Symptom: `connection refused` or `could not connect to server` Errors
 
-Quad connects to a PostgreSQL server via the configured DSN. This error can occur if:
-- The PostgreSQL server is not running or not reachable
-- The DSN credentials (host, port, user, password) are incorrect
-- The database does not exist
-- Network/firewall is blocking the connection
-- The connection pool is exhausted (unlikely with default `max_size=5`)
+Quad uses SQLite for persistence. This error can occur if:
+- The data directory is not writable
+- The database file path is incorrect
+- The SQLite file is corrupted
+- The connection pool is exhausted (unlikely with default settings)
 
 **Resolution:**
 ```bash
-# Check PostgreSQL server status
-pg_isready
+# Check the data directory exists and is writable
+ls -la data/
 
 # Verify the DSN is configured correctly
 quad config persistence.dsn
 
-# Test the connection manually
-psql "$DATABASE_URL" -c "SELECT 1;"
-
-# Ensure the database exists
-createdb "$DATABASE_URL"
+# Test the database file exists
+ls -la data/quad.db
 ```
 
 ### Symptom: Database Connection Timeout
 
-If the bot logs `TimeoutError` or `ConnectionDoesNotExistError`:
+If the bot logs `TimeoutError` or `ConnectionError`:
 
 ```bash
-# Check if the server is overwhelmed
-psql "$DATABASE_URL" -c "SELECT count(*) FROM pg_stat_activity;"
+# Check if the data directory is writable
+ls -la data/
 
-# Increase the pool size or command_timeout in config
-# persistence.busy_timeout: 10000  # ms
+# Increase the busy_timeout in config
+# persistence.dsn: "data/quad.db"
 
 # Restart the bot
 quad stop && quad start
@@ -209,7 +203,7 @@ quad stop && quad start
 df -h data/
 
 # Check database size
-psql "$DATABASE_URL" -c "SELECT pg_size_pretty(pg_database_size(current_database()));"
+ls -lh data/quad.db
 
 # Free space
 # - Run VACUUM ANALYZE to reclaim space
@@ -400,7 +394,7 @@ Common causes:
 | `RateLimitError` | Hit API rate limits | Reduce request frequency |
 | `OrderRejectedError` | Exchange rejected order | Check order parameters |
 | `InsufficientMarginError` | Not enough margin | Deposit USDT or reduce risk |
-| `ConnectionError` | PostgreSQL connection failed | Check `pg_isready` and DSN config |
+| `ConnectionError` | Database connection failed | Check data directory and DSN config |
 | `ConfigValidationError` | Invalid configuration | Run `quad config` to validate |
 | `StrategyValidationError` | Strategy params invalid | Check strategy parameters |
 | `CircuitBreakerTripped` | A circuit breaker is active | Check `quad risk` and resolve |

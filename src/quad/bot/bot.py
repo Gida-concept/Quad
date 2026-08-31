@@ -350,6 +350,7 @@ class QuadBot:
             "ai_strategy",
             "ai_status",
             "ai_decision",
+            "mcp_status",
         ]
         for name in _command_names:
             handler = getattr(self._commands, f"cmd_{name}", None)

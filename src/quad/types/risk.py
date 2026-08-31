@@ -124,6 +124,11 @@ class Action:
     reason: str = ""
     confidence: float = 1.0
     risk_checked: bool = False
+    risk_result: RiskResult | None = None
+    """Pre-evaluated risk result. When set, the execution engine skips its
+    own risk evaluation and uses this result directly. This is the safe
+    alternative to the ``risk_checked`` boolean flag — it carries the
+    actual evaluation details so the engine can inspect them."""
     metadata: dict[str, Any] = field(default_factory=dict)
     contract: str = ""
     side: str = ""

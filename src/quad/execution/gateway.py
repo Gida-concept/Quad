@@ -210,7 +210,8 @@ class OrderGateway:
             self._pending_confirmations.pop(client_order_id, None)
 
         # 5. Track in active orders
-        assert result is not None, "order submission produced no result"
+        if result is None:
+            raise RuntimeError("order submission produced no result")
         order = Order(
             id=result.order_id,
             client_order_id=client_order_id,

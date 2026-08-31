@@ -1,9 +1,9 @@
 # Quad
 
-_USDT Perpetual Futures Trading Bot for Bybit_
+_USDT Perpetual Futures Trading Bot for OKX_
 
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.12%2B-blue" alt="Python 3.12+">
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
   <img src="https://img.shields.io/badge/docker-ready-2496ED" alt="Docker Ready">
 </p>
@@ -12,7 +12,7 @@ _USDT Perpetual Futures Trading Bot for Bybit_
 
 ## Executive Summary
 
-Quad is a production-grade, open-source USDT perpetual futures trading bot purpose-built for Bybit (category=linear). It is a **single-process Python 3.12+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, futures strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
+Quad is a production-grade, open-source USDT perpetual futures trading bot purpose-built for OKX (USDT-M perpetual / instType=SWAP). It is a **single-process Python 3.10+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, futures strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
 
 Unlike the previous Quadrant project (Node.js/Python dual-runtime, Binance Futures), Quad is:
 
@@ -69,12 +69,12 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐
 │   RISK MANAGER   │  │    STRATEGY      │  │  EXCHANGE ADAPTER    │
 │                  │  │    PLUGIN        │  │                      │
-│  9 Pre-Trade     │  │                  │  │ Bybit USDT Perp    │
-│   Gates          │  │  Trend Following │  │  (category=linear)  │
-│  7 Circuit       │  │  Grid Trading    │  │  REST + WebSocket   │
-│   Breakers       │  │  Mean Reversion  │  │                     │
-│  Position Sizing │  │  DCA Bot         │  │  Testnet / Live     │
-│  (Leverage-Adj.) │  │  Market Making   │  │  only               │
+│  9 Pre-Trade     │  │                  │  │ OKX USDT Perp      │
+│   Gates          │  │  Trend Following │  │  (instType=SWAP)   │
+│  7 Circuit       │  │                  │  │  REST + WebSocket   │
+│   Breakers       │  │                  │  │                     │
+│  Position Sizing │  │                  │  │  Testnet / Live     │
+│  (Leverage-Adj.) │  │                  │  │  only               │
 └──────────────────┘  └──────────────────┘  └──────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -92,9 +92,9 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 ## Key Features
 
-- **Futures-Native** -- Built for Bybit USDT perpetual futures with one-way and hedge position modes, isolated or cross margin, and full leverage control
+- **Futures-Native** -- Built for OKX USDT perpetual futures with one-way and hedge position modes, isolated or cross margin, and full leverage control
 - **Telegram Commands** -- 18+ user commands (/start, /status, /help, /balance, /positions, /orders, /funding_rate, /book, /strategies, /execute, /risk, /kill, /cancel, /settings, /set, /analyze, /ai_strategy, /ai_status, /ai_decision)
-- **5 Built-in Strategies** -- Trend following, grid trading, mean reversion, DCA bot, market making, each with leverage-aware sizing and configurable position limits
+- **1 Built-in Strategy** -- Trend following with leverage-aware sizing and configurable position limits
 - **Plugin Architecture** -- Write custom strategies as Python classes with setuptools entry point registration
 - **9-Gate Risk Pipeline** -- Every trade validated against max positions, portfolio risk, daily loss, drawdown, liquidation risk, funding rate cost, leverage limit, position concentration, and correlation
 - **7 Circuit Breakers** -- P&L drawdown, daily loss, consecutive losses, position growth, liquidation cascade, funding rate spike, and volatility with graduated responses
@@ -112,14 +112,14 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 | Component | Technology | Purpose |
 |---|---|---|
-| Runtime | Python 3.12+ asyncio | Single-process event-driven architecture |
+| Runtime | Python 3.10+ asyncio | Single-process event-driven architecture |
 | Telegram Bot | python-telegram-bot v20+ | Primary user interface via Telegram |
 | CLI Framework | Typer | Secondary command-line interface for debugging |
-| Exchange API | Bybit V5 (USDT perpetual / category=linear) | Market data, account, order execution |
+| Exchange API | OKX MCP Server (okx-trade-mcp) | Market data, account, order execution via MCP protocol |
 | Persistence | SQLite + aiosqlite | Single file, zero config |
 | Configuration | PyYAML + python-dotenv | Layered config with hot-reload |
 | Logging | structlog | Structured JSON logging |
-| Async HTTP | aiohttp | REST API calls to Bybit |
+| Exchange Fallback | python-okx SDK | Used when MCP server is disabled |
 | Containerization | Docker | Single-container deployment |
 | Monitoring | Built-in HTTP server | Health checks, Prometheus metrics |
 
@@ -127,9 +127,8 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 ## Quick Start
 
-> **Python version**: Quad targets **Python 3.12+** (matching the Docker images
-> and CI). The codebase also runs on **3.10+** (`requires-python = ">=3.10"`), so
-> existing 3.10 environments work, but 3.12 is the reference runtime.
+> **Python version**: Quad targets **Python 3.10+** (matching the Docker images
+> and CI). The codebase runs on **3.10+** (`requires-python = ">=3.10"`).
 
 ```bash
 # Clone and install
@@ -139,9 +138,9 @@ pip install -e .
 
 # Configure
 cp .env.example .env
-# Edit .env with your Bybit API keys (optional for dry-run)
+# Edit .env with your OKX API keys (optional for dry-run)
 # Set TELEGRAM_BOT_TOKEN from @BotFather (required for Telegram interface)
-cp config/config.default.yaml config/config.local.yaml
+cp config/config.yaml config/config.local.yaml
 # Edit config.local.yaml with your preferences
 
 # Run in dry-run mode (safest first step)
@@ -152,9 +151,6 @@ quad status
 
 # View available strategies
 quad strategies
-
-# Run a backtest
-quad backtest --strategy covered_call --symbol BTC
 
 # Full command reference
 quad --help
@@ -231,7 +227,7 @@ quad/
 ├── requirements.txt          # Python dependencies
 │
 ├── config/                   # Configuration files
-│   └── config.default.yaml   # Default configuration
+│   └── config.yaml        # Default configuration
 │
 ├── data/                     # Runtime data directory
 │   ├── logs/                 # Log files
@@ -244,11 +240,12 @@ quad/
 │   ├── telegram/             # Telegram bot interface (primary interface)
 │   ├── config/               # Configuration manager
 │   ├── engine/               # Orchestrator, state machine
-│   ├── exchange/             # Exchange adapters (Bybit USDT perpetual via pybit)
+│   ├── exchange/             # Exchange adapters (OKX USDT perpetual via MCP or python-okx)
 │   ├── strategy/             # Strategy base class + built-in strategies
 │   ├── risk/                 # Risk manager, gates, circuit breakers
 │   ├── execution/            # Order gateway, TWAP
 │   ├── market_data/          # WebSocket streaming, data cache
+│   ├── mcp/                  # OKX MCP server client (primary exchange interface)
 │   ├── persistence/          # SQLite database, repositories, models
 │   ├── monitoring/           # Health server, metrics
 │   ├── backtesting/          # Backtest engine
@@ -287,13 +284,13 @@ __main__.py  -->  QuadOrchestrator()  -->  orchestrator.run_forever()
 
    | Order | Subsystem | What happens |
    |-------|-----------|-------------|
-   | 1 | ConfigManager | Loads `config.default.yaml`, overlays `config.local.yaml`, overlays env vars. Resolves `${VAR}` substitutions. |
+   | 1 | ConfigManager | Loads `config.yaml`, overlays `config.local.yaml`, overlays env vars. Resolves `${VAR}` substitutions. |
    | 2 | DatabaseManager | Connects to SQLite, runs DDL and migrations. |
-   | 3 | ExchangeAdapter | Created via factory (`bybit` based on mode). Connects and authenticates. |
+   | 3 | ExchangeAdapter | Created via factory (`okx` based on mode). Connects and authenticates. |
    | 4 | MarketDataEngine | Starts WebSocket subscriptions, initialises price buffers, funding rate cache, order book cache, and mark price cache. |
    | 5 | RiskManager | Initialises 9 pre-trade gates, 7 circuit breakers, leverage-adjusted position sizer. |
    | 6 | ExecutionEngine | Starts order gateway (UUID idempotency), background reconciliation loop. |
-   | 7 | Strategies | Loads all auto-registered strategies (5 built-in) via `__init_subclass__`. |
+   | 7 | Strategies | Loads all auto-registered strategies (1 built-in: trend_following) via `__init_subclass__`. |
    | 8 | QuadBot (Telegram) | Initialises PTB v20+ Application, registers 18+ command handlers, 5 recurring jobs. Starts polling. |
    | 9 | HealthServer | Starts aiohttp HTTP server on port 9090 (configurable) with `/health`, `/readiness`, `/liveness`, `/metrics`. |
    | 10 | MetricsCollector | Creates in-memory metrics registry (gauges, counters, histograms). |
@@ -381,10 +378,10 @@ Telegram User --- /command --- Telegram Servers
 ### Data Flow: WebSocket to SQLite
 
 ```
-Binance USD-M Futures API
+OKX V5 API
         |
    WebSocket Streams
-   (!miniTicker@arr, !markPrice@arr@1s, !bookTicker, !forceOrder@arr, user data)
+   (tickers, mark prices, funding rates, order book, user data)
         |
         v
   WebSocketManager
@@ -416,7 +413,7 @@ Binance USD-M Futures API
         |
         v
   ExecutionEngine.execute()
-   +-- OrderGateway.submit() --- Bybit V5 REST API
+   +-- OrderGateway.submit() --- OKX V5 REST API
    +-- Background reconciliation loop (60s)
    +-- FillReconciler (detects missed fills, stale orders)
         |

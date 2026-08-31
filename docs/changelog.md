@@ -6,6 +6,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ---
 
+## [2.2.0] - 2025-08-29 -- OKX MCP Server Integration
+
+### Added
+- **OKX MCP server integration** (`src/quad/mcp/`) — async `OkxMcpClient` class
+  communicating with the `okx-trade-mcp` binary over stdio (JSON-RPC 2.0).
+  Provides 228 built-in TA indicators, smart money signals, news sentiment,
+  and advanced order types (TWAP, iceberg, chase).
+- **MCP exchange adapter** (`src/quad/exchange/mcp_adapter.py`) — drop-in
+  `ExchangeAdapter` implementation that routes all OKX API calls through the
+  MCP server subprocess. Maps market data, account, swap orders, algo orders,
+  and configuration endpoints.
+- **MCP config schema** (`src/quad/config/schema.py`) — `McpConfig` model with
+  `enabled`, `command`, `modules`, `profile`, `request_timeout`, `startup_timeout`.
+- **MCP-powered context collection** (`src/quad/ai/context.py`) — `collect_market_context()`
+  now accepts `mcp_client` parameter for direct MCP data fetching, bypassing
+  WebSocket entirely.
+- **MCP-powered indicator computation** (`src/quad/ai/ta.py`) — `compute_indicators_via_mcp()`
+  function using MCP server's 228 built-in indicators.
+- **Historical data fix** (`src/quad/market_data/historical.py`) — `get_candles()` stub
+  replaced with MCP-powered implementation + exchange adapter fallback.
+- **Backtesting engine MCP support** (`src/quad/backtesting/engine.py`) — `_build_context()`
+  now fetches real candle and indicator data via MCP.
+- **Optimizer MCP enrichment** (`src/quad/ai/optimizer.py`) — accepts `mcp_client`
+  for market context during retraining cycles.
+- **Telegram `/mcp_status` command** — shows MCP server uptime, tool count,
+  call statistics, and error rate.
+- **Dual-mode factory** (`src/quad/exchange/factory.py`) — `create_exchange()`
+  accepts `mcp_client` parameter; returns `McpExchangeAdapter` when MCP is enabled.
+- **Orchestrator MCP lifecycle** (`src/quad/orchestrator/orchestrator.py`) —
+  `_init_mcp_client()` method, MCP client passed to exchange adapter, cleanup
+  in `_shutdown_all()`.
+
+### Changed
+- `/status` command now shows MCP server state (Active/Disabled).
+- `/start` command lists `/mcp_status` in available commands.
+- Exchange adapter factory accepts optional `mcp_client` parameter (backward compatible).
+
+### Architecture Decision
+- AD-2b: OKX MCP Server Integration (optional) — feature-flagged behind
+  `config.mcp.enabled` with instant rollback to python-okx SDK.
+
+---
+
 ## [2.1.0] - 2025-08-25 -- Bybit USDT-Perpetual Switch
 
 ### Added

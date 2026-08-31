@@ -554,10 +554,11 @@ class OkxFuturesAdapter(ExchangeAdapter):
         # Build OKX params
         params = {
             "instId": request.symbol,
-            "tdMode": "cross",  # default; can be overridden by config
+            "tdMode": "isolated",  # OKX demo uses isolated margin
             "side": request.side.lower() if request.side else "buy",
             "ordType": request.order_type.lower() if request.order_type else "market",
             "sz": str(request.quantity) if request.quantity else "0",
+            "stpMode": "cancel_maker",  # OKX requires this parameter
         }
 
         # Set position side for hedge mode

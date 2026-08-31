@@ -40,6 +40,11 @@ services:
       - OKX_PASSPHRASE=${OKX_PASSPHRASE:-}
       - OKX_TESTNET=${OKX_TESTNET:-true}
 
+      # --- OKX MCP Server (optional — auto-installed in Docker image) ---
+      - QUAD_MCP_ENABLED=${QUAD_MCP_ENABLED:-true}
+      - QUAD_MCP_PROFILE=${QUAD_MCP_PROFILE:-default}
+      - QUAD_MCP_MODULES=${QUAD_MCP_MODULES:-all}
+
       # --- Telegram Bot (REQUIRED) ---
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
       - TELEGRAM_NOTIFICATION_CHAT_ID=${TELEGRAM_NOTIFICATION_CHAT_ID:-}

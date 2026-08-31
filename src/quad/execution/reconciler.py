@@ -233,6 +233,10 @@ class FillReconciler:
     ) -> list[Trade]:
         """Detect fills that exist on the exchange but are missing locally.
 
+        Uses a composite deduplication key (order_id, timestamp, quantity,
+        price) instead of trade.id, because some exchanges (e.g. OKX) return
+        id=0 for all fills, making id-based dedup broken.
+
         Parameters
         ----------
         local_trades:
@@ -245,22 +249,31 @@ class FillReconciler:
         list[Trade]
             Trades that appear on the exchange but not in the local dataset.
         """
-        local_ids: set[int] = {t.id for t in local_trades if t.id is not None}
-        missed = [
-            t for t in exchange_trades if t.id is not None and t.id not in local_ids
-        ]
+
+        def _dedup_key(t: Trade) -> tuple:
+            """Composite key for deduplication when trade.id is unreliable."""
+            return (
+                str(t.order_id),
+                int(t.timestamp),
+                str(t.quantity),
+                str(t.price),
+            )
+
+        local_keys: set[tuple] = {_dedup_key(t) for t in local_trades}
+        missed = [t for t in exchange_trades if _dedup_key(t) not in local_keys]
 
         if missed:
             self._log.warning(
                 "missed_fills_detected",
                 count=len(missed),
-                trade_ids=[t.id for t in missed],
+                symbols=[t.symbol for t in missed],
             )
             for trade in missed:
                 self._discrepancy_history.append(
                     {
                         "type": "MISSED_FILL",
                         "trade_id": trade.id,
+                        "order_id": trade.order_id,
                         "symbol": trade.symbol,
                         "side": trade.side,
                         "quantity": str(trade.quantity),
@@ -358,7 +371,13 @@ class FillReconciler:
         timestamp_ms: int,
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create a discrepancy record and append to the history ring buffer."""
+        """Create a discrepancy record and append to the history ring buffer.
+
+        NOTE: Discrepancy records are stored in-memory only. If the bot
+        restarts, history is lost. For persistent storage, the error_logs
+        table can be queried using event names like
+        ``RECONCILIATION_MISSED_FILL``.
+        """
         record: dict[str, Any] = {
             "type": disc_type,
             "client_order_id": order.client_order_id,

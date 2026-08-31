@@ -172,6 +172,7 @@ class PositionSizer:
             reason=action.reason,
             confidence=action.confidence,
             risk_checked=action.risk_checked,
+            risk_result=action.risk_result,
             side=action.side,
             order_type=action.order_type,
             stop_loss_price=action.stop_loss_price,

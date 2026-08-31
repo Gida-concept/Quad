@@ -102,3 +102,14 @@ strategy:
 retrain:
   enabled: true
   interval_days: 7
+
+# OKX MCP Server — when enabled, replaces python-okx SDK for data, TA, and execution.
+# Requires: npm install -g @okx_ai/okx-trade-mcp
+# Set exchange.api_key, exchange.api_secret, exchange.passphrase via env vars or config.
+mcp:
+  enabled: true           # true = use MCP server (default); false = use python-okx SDK
+  command: "okx-trade-mcp"
+  modules: "all"          # market,swap,account,spot,futures,option,smartmoney,news
+  profile: "default"      # OKX API profile (~/.okx/config.toml)
+  request_timeout: 30.0   # seconds per tool call
+  startup_timeout: 15.0   # seconds for MCP handshake

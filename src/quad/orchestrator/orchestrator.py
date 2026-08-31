@@ -95,6 +95,7 @@ class QuadOrchestrator:
         # ------------------------------------------------------------------
         self._config_manager: ConfigManager | None = None
         self._db_manager: DatabaseManager | None = None
+        self._mcp_client: Any = None
         self._exchange_adapter: Any = None
         self._market_data: MarketDataEngine | None = None
         self._risk_manager: RiskManager | None = None
@@ -181,6 +182,7 @@ class QuadOrchestrator:
             # database or exchange init is slow or failing.
             await self._init_health_server()
             await self._init_database()
+            await self._init_mcp_client()
             await self._init_exchange_adapter()
 
             # Sync position state from exchange on startup
@@ -414,12 +416,53 @@ class QuadOrchestrator:
         await self._db_manager.migrate()
         self._log.info("database_initialized", dsn=self._db_manager.dsn)
 
+    async def _init_mcp_client(self) -> None:
+        """Initialize the OKX MCP client (when enabled).
+
+        Creates an ``OkxMcpClient`` and starts the MCP server subprocess
+        if ``config.mcp.enabled`` is ``True``.  Stores the client as
+        ``self._mcp_client`` for use by the exchange adapter, context
+        collector, optimizer, and backtest engine.
+        """
+        mcp_cfg = self._config_dict.get("mcp", {})
+        if not mcp_cfg.get("enabled", True):
+            self._mcp_client = None
+            self._log.info("mcp_disabled")
+            return
+
+        from quad.mcp.client import McpConnectionError, OkxMcpClient
+
+        try:
+            self._mcp_client = OkxMcpClient(
+                command=mcp_cfg.get("command", "okx-trade-mcp"),
+                modules=mcp_cfg.get("modules", "all"),
+                profile=mcp_cfg.get("profile", "default"),
+                request_timeout=mcp_cfg.get("request_timeout", 30.0),
+                startup_timeout=mcp_cfg.get("startup_timeout", 15.0),
+            )
+            await self._mcp_client.start()
+            self._log.info(
+                "mcp_client_initialized",
+                tools=len(self._mcp_client._tools),
+                profile=mcp_cfg.get("profile", "default"),
+            )
+        except McpConnectionError as exc:
+            self._log.error("mcp_client_init_failed", error=str(exc))
+            self._mcp_client = None
+        except Exception as exc:
+            self._log.error("mcp_client_init_failed", error=str(exc))
+            self._mcp_client = None
+
     async def _init_exchange_adapter(self) -> None:
         """Create and connect the exchange adapter.
 
         Maps ``QUAD_MODE`` to the exchange implementation:
             - ``"dry_run"`` -> OKX with testnet=True
             - ``"okx"`` -> configured exchange (testnet or live)
+
+        When ``self._mcp_client`` is available and MCP is enabled,
+        the orchestrator calls MCP tools directly instead of going
+        through the exchange adapter for data collection.
         """
         # Override exchange name based on mode
         mode = self._mode
@@ -913,25 +956,43 @@ class QuadOrchestrator:
             body = await request.read()
             raw_text = body.decode("utf-8", errors="replace")
 
-            # Secret check (shared secret in payload)
+            # Secret check — two methods supported:
+            # 1. HMAC-SHA256 signature in X-Webhook-Signature header (preferred)
+            # 2. Shared secret in JSON payload body (TradingView-compatible)
             if secret:
+                import hashlib
+                import hmac
+
                 import json as _json
 
-                try:
-                    payload = (
-                        _json.loads(raw_text)
-                        if raw_text.strip().startswith("{")
-                        else {}
-                    )
-                    if payload.get("secret") != secret:
-                        log.warning("tv_webhook_invalid_secret")
+                # Method 1: HMAC-SHA256 header verification
+                sig_header = request.headers.get("X-Webhook-Signature", "")
+                if sig_header:
+                    expected = hmac.new(
+                        secret.encode("utf-8"),
+                        body,
+                        hashlib.sha256,
+                    ).hexdigest()
+                    if not hmac.compare_digest(sig_header, expected):
+                        log.warning("tv_webhook_invalid_hmac_signature")
                         return web.Response(status=403, text="Forbidden")
-                except _json.JSONDecodeError:
-                    log.warning("tv_webhook_invalid_json")
-                    return web.Response(
-                        status=400,
-                        text="Invalid JSON payload",
-                    )
+                else:
+                    # Method 2: Shared secret in JSON payload (TradingView fallback)
+                    try:
+                        payload = (
+                            _json.loads(raw_text)
+                            if raw_text.strip().startswith("{")
+                            else {}
+                        )
+                        if payload.get("secret") != secret:
+                            log.warning("tv_webhook_invalid_secret")
+                            return web.Response(status=403, text="Forbidden")
+                    except _json.JSONDecodeError:
+                        log.warning("tv_webhook_invalid_json")
+                        return web.Response(
+                            status=400,
+                            text="Invalid JSON payload",
+                        )
 
             # Parse the alert
             parsed = parse_alert(body, content_type)
@@ -1063,6 +1124,14 @@ class QuadOrchestrator:
             except Exception:
                 self._log.exception("exchange_disconnect_error")
             self._exchange_adapter = None
+
+        # 3b. MCP client (stop subprocess)
+        if self._mcp_client is not None:
+            try:
+                await self._mcp_client.stop()
+            except Exception:
+                self._log.exception("mcp_client_stop_error")
+            self._mcp_client = None
 
         # 2. Database manager
         if self._db_manager is not None:
@@ -1339,6 +1408,7 @@ class QuadOrchestrator:
                 market_data_engine=self._market_data,
                 db_manager=self._db_manager,
                 config=self._config_dict,
+                mcp_client=self._mcp_client,
             )
             self._log.debug(
                 "market_context_collected",
@@ -1347,20 +1417,48 @@ class QuadOrchestrator:
                 errors=len(context.errors),
             )
 
-            # 2. Compute technical indicators per pair/timeframe (cache disabled)
-            from quad.ai.ta import compute_indicators
-
+            # 2. Compute technical indicators per pair/timeframe
+            #    Use MCP server indicators when available (228 built-in),
+            #    fall back to local computation when MCP is unavailable.
             indicators: dict[str, dict[str, Any]] = {}
-            for key, candles in context.candles.items():
-                try:
-                    indicators[key] = compute_indicators(candles)
-                except Exception as exc:
-                    self._log.warning(
-                        "indicator_computation_failed",
-                        key=key,
-                        error=str(exc),
-                    )
-                    indicators[key] = {}
+            if self._mcp_client is not None and self._mcp_client.is_running:
+                from quad.ai.ta import compute_indicators_via_mcp
+
+                for key, _candles in context.candles.items():
+                    try:
+                        # Extract inst_id from key (e.g. "BTCUSDT_1h" → "BTC-USDT-SWAP")
+                        pair = key.split("_")[0]
+                        inst_id = pair
+                        if "-" not in pair and "SWAP" not in pair:
+                            inst_id = pair.replace("USDT", "-USDT-SWAP") if "USDT" in pair else f"{pair}-SWAP"
+                        timeframe = key.split("_")[1] if "_" in key else "1H"
+                        indicators[key] = await compute_indicators_via_mcp(
+                            self._mcp_client, inst_id, timeframe.upper()
+                        )
+                    except Exception as exc:
+                        self._log.warning(
+                            "mcp_indicator_computation_failed",
+                            key=key,
+                            error=str(exc),
+                        )
+                        # Fallback to local indicators
+                        try:
+                            indicators[key] = compute_indicators(candles)
+                        except Exception:
+                            indicators[key] = {}
+            else:
+                from quad.ai.ta import compute_indicators
+
+                for key, candles in context.candles.items():
+                    try:
+                        indicators[key] = compute_indicators(candles)
+                    except Exception as exc:
+                        self._log.warning(
+                            "indicator_computation_failed",
+                            key=key,
+                            error=str(exc),
+                        )
+                        indicators[key] = {}
 
             # 3. Build structured prompts
             from quad.ai.prompt import build_trading_prompt
@@ -1801,21 +1899,44 @@ class QuadOrchestrator:
             market_data_engine=self._market_data,
             db_manager=self._db_manager,
             config=cfg,
+            mcp_client=self._mcp_client,
         )
 
-        from quad.ai.ta import compute_indicators
+        from quad.ai.ta import compute_indicators, compute_indicators_via_mcp
 
         indicators: dict[str, dict[str, Any]] = {}
-        for key, candles in context.candles.items():
-            try:
-                indicators[key] = compute_indicators(candles)
-            except Exception as exc:
-                self._log.warning(
-                    "indicator_computation_failed",
-                    key=key,
-                    error=str(exc),
-                )
-                indicators[key] = {}
+        if self._mcp_client is not None and self._mcp_client.is_running:
+            for key, _candles in context.candles.items():
+                try:
+                    pair = key.split("_")[0]
+                    inst_id = pair
+                    if "-" not in pair and "SWAP" not in pair:
+                        inst_id = pair.replace("USDT", "-USDT-SWAP") if "USDT" in pair else f"{pair}-SWAP"
+                    timeframe = key.split("_")[1] if "_" in key else "1H"
+                    indicators[key] = await compute_indicators_via_mcp(
+                        self._mcp_client, inst_id, timeframe.upper()
+                    )
+                except Exception as exc:
+                    self._log.warning(
+                        "mcp_indicator_computation_failed",
+                        key=key,
+                        error=str(exc),
+                    )
+                    try:
+                        indicators[key] = compute_indicators(candles)
+                    except Exception:
+                        indicators[key] = {}
+        else:
+            for key, candles in context.candles.items():
+                try:
+                    indicators[key] = compute_indicators(candles)
+                except Exception as exc:
+                    self._log.warning(
+                        "indicator_computation_failed",
+                        key=key,
+                        error=str(exc),
+                    )
+                    indicators[key] = {}
 
         # Merge per-timeframe indicators for this symbol and resolve the
         # open position side — both needed before the local signal build.
@@ -2483,6 +2604,7 @@ class QuadOrchestrator:
             # exceeding the AI's original request (the "pre-cap").
             sized_action = result.details.get("action", action)
             sized_action.risk_checked = True
+            sized_action.risk_result = result
             sized_action.metadata = {
                 **(sized_action.metadata or {}),
                 "pre_size_quantity": str(action.quantity),

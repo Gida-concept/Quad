@@ -499,13 +499,25 @@ class DatabaseManager:
             return
 
         name = snapshot_name or time.strftime("snapshot_%Y%m%d_%H%M%S")
+
+        # Sanitize snapshot_name to prevent SQL injection via VACUUM INTO.
+        # Only allow alphanumeric, underscore, and hyphen characters.
+        if not re.match(r"^[a-zA-Z0-9_-]+$", name):
+            raise ValueError(
+                f"Invalid snapshot name '{name}': only alphanumeric, "
+                "underscore, and hyphen characters are allowed."
+            )
+
         db_stem = Path(db_path).stem
         dest_file = Path(db_path).parent / f"{db_stem}_{name}.db"
 
         try:
             async with self._pool.acquire() as conn:
-                # VACUUM INTO creates a consistent point-in-time copy
-                await conn.execute(f"VACUUM INTO '{dest_file}'")
+                # VACUUM INTO creates a consistent point-in-time copy.
+                # dest_file is built from sanitized name + db_stem, both
+                # safe for SQL string interpolation.
+                safe_dest = str(dest_file).replace("'", "''")
+                await conn.execute(f"VACUUM INTO '{safe_dest}'")
                 self._log.info(
                     "snapshot_completed",
                     destination=str(dest_file),

@@ -110,6 +110,40 @@ class GatePipeline:
         self._enabled: dict[str, bool] = {g: True for g in ALL_GATES}
 
     # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _proposed_notional(self, action: Action, context: StrategyContext) -> Decimal:
+        """Compute the USD notional value of a proposed action.
+
+        For entry actions, multiplies ``abs(action.quantity)`` by the mark
+        price of the target symbol. Falls back to the raw quantity (as a
+        rough estimate) when mark price is unavailable.
+        """
+        mark = self._resolve_mark_price(action.symbol, context)
+        if mark > Decimal(0):
+            return abs(action.quantity) * mark
+        # Fallback: raw quantity (safe underestimate, prevents false passes)
+        return abs(action.quantity)
+
+    def _resolve_mark_price(
+        self, symbol: str, context: StrategyContext
+    ) -> Decimal:
+        """Look up the current mark price for *symbol* from context data."""
+        # 1. Try futures contracts map (most current)
+        contracts = context.futures_contracts or {}
+        contract = contracts.get(symbol)
+        if contract is not None:
+            mp = getattr(contract, "mark_price", None)
+            if mp is not None and mp > Decimal(0):
+                return Decimal(str(mp))
+        # 2. Fall back to existing position mark price
+        for pos in context.futures_positions or []:
+            if pos.symbol == symbol and pos.mark_price > Decimal(0):
+                return Decimal(str(pos.mark_price))
+        return Decimal(0)
+
+    # ------------------------------------------------------------------
     # Public evaluation API
     # ------------------------------------------------------------------
 
@@ -240,7 +274,7 @@ class GatePipeline:
 
         # Include proposed position notional for entry actions
         if _is_entry(action.type):
-            proposed_notional = abs(action.quantity)
+            proposed_notional = self._proposed_notional(action, context)
             total_notional += proposed_notional
 
         risk_pct = (total_notional / portfolio_value) * Decimal(100)
@@ -392,7 +426,7 @@ class GatePipeline:
                 reason="Not an entry action",
             )
 
-        position_value = abs(action.quantity)
+        position_value = self._proposed_notional(action, context)
         if position_value <= Decimal(0):
             return RiskResult(
                 passed=True,
@@ -475,7 +509,7 @@ class GatePipeline:
 
         # Include proposed position for entry actions
         if _is_entry(action.type):
-            total_notional += abs(action.quantity)
+            total_notional += self._proposed_notional(action, context)
 
         effective_leverage = total_notional / wallet_balance
 
@@ -533,7 +567,7 @@ class GatePipeline:
         if _is_entry(action.type) and action.quantity > Decimal(0):
             notional_by_symbol[target_symbol] = notional_by_symbol.get(
                 target_symbol, Decimal(0)
-            ) + abs(action.quantity)
+            ) + self._proposed_notional(action, context)
 
         # Check each symbol against the concentration limit
         limit_value = max_conc * portfolio_value
@@ -598,9 +632,7 @@ class GatePipeline:
         # Add proposed position for entry actions
         if _is_entry(action.type) and action.quantity > Decimal(0) and action.symbol:
             quote = action.symbol[-4:] if len(action.symbol) >= 4 else action.symbol
-            notional_by_quote[quote] = notional_by_quote.get(quote, Decimal(0)) + abs(
-                action.quantity
-            )
+            notional_by_quote[quote] = notional_by_quote.get(quote, Decimal(0)) + self._proposed_notional(action, context)
 
         threshold_value = threshold_pct / Decimal(100) * portfolio_value
         violations: list[dict[str, Any]] = []

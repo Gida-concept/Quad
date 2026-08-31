@@ -113,6 +113,7 @@ class QuadBotCommands:
             "position_mode": 2.0,
             "set": 2.0,
             "ai_status": 2.0,
+            "mcp_status": 2.0,
             # Critical safety commands: no cooldown
             "kill": 0.0,
             "cancel": 0.0,
@@ -194,6 +195,7 @@ class QuadBotCommands:
             "• `/ai_strategy` — Groq AI recommends a strategy\n"
             "• `/ai_status` — AI trading system status and metrics\n"
             "• `/ai_decision` — Request an AI-driven trading decision\n"
+            "• `/mcp_status` — OKX MCP server status and statistics\n"
             "• `/help` — Full command reference"
         )
         await message.reply_text(msg, parse_mode="Markdown")
@@ -253,6 +255,7 @@ class QuadBotCommands:
             daily_pnl = Decimal(0)
             circuit_breakers_active = 0
             active_strategies: list[str] = []
+            mcp_enabled = False
 
             # Get risk status
             risk_status = None
@@ -280,6 +283,15 @@ class QuadBotCommands:
                     )
                 except Exception as exc:
                     self._log.warning("status_positions_error", error=str(exc))
+
+            # Check MCP status
+            mcp_client = (
+                getattr(self._orchestrator, "_mcp_client", None)
+                if self._orchestrator
+                else None
+            )
+            if mcp_client is not None and hasattr(mcp_client, "is_running"):
+                mcp_enabled = mcp_client.is_running
 
             # Get active strategies
             if self._orchestrator is not None:
@@ -311,6 +323,7 @@ class QuadBotCommands:
             # Format the status message
             pnl_emoji = "🟢" if daily_pnl >= 0 else "🔴"
             cb_emoji = "⚠️" if circuit_breakers_active > 0 else "✅"
+            mcp_emoji = "🟢" if mcp_enabled else "⚪"
 
             msg = (
                 f"📊 *Bot Status*\n\n"
@@ -318,6 +331,7 @@ class QuadBotCommands:
                 f"*Daily PnL:* {pnl_emoji} ${float(daily_pnl):,.2f}\n"
                 f"*Circuit Breakers:* {cb_emoji} {circuit_breakers_active} active\n"
                 f"*Active Strategies:* {', '.join(active_strategies) if active_strategies else 'None'}\n"
+                f"*MCP Server:* {mcp_emoji} {'Active' if mcp_enabled else 'Disabled'}\n"
                 f"*Orders Submitted:* {exec_stats.get('total_submitted', 0)}\n"
                 f"*Orders Filled:* {exec_stats.get('total_filled', 0)}\n"
                 f"*Orders Rejected:* {exec_stats.get('total_rejected', 0)}"
@@ -1562,6 +1576,58 @@ class QuadBotCommands:
         except Exception as exc:
             self._log.exception("cmd_ai_status_error", error=str(exc))
             await message.reply_text(f"⚠️ AI status error: {exc}", parse_mode="Markdown")
+
+    async def cmd_mcp_status(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show OKX MCP server status and statistics."""
+        message, user = self._narrow(update)
+
+        self._log.info("cmd_mcp_status", user=user.id)
+
+        mcp_client = (
+            getattr(self._orchestrator, "_mcp_client", None)
+            if self._orchestrator
+            else None
+        )
+
+        if mcp_client is None:
+            msg = (
+                "ℹ️ *MCP Server Status*\n\n"
+                "MCP server is **disabled**.\n\n"
+                "To enable, set `mcp.enabled: true` in `config.yaml` "
+                "and restart the bot.\n\n"
+                "Requires: `npm install -g @okx_ai/okx-trade-mcp`"
+            )
+            await message.reply_text(msg, parse_mode="Markdown")
+            return
+
+        try:
+            stats = mcp_client.stats if hasattr(mcp_client, "stats") else {}
+            is_running = mcp_client.is_running if hasattr(mcp_client, "is_running") else False
+            uptime = mcp_client.uptime if hasattr(mcp_client, "uptime") else 0
+
+            status_emoji = "🟢" if is_running else "🔴"
+            status_text = "Running" if is_running else "Stopped"
+
+            msg = (
+                f"🔧 *MCP Server Status*\n\n"
+                f"*Status:* {status_emoji} {status_text}\n"
+                f"*Profile:* `{stats.get('profile', 'default')}`\n"
+                f"*Modules:* `{stats.get('modules', 'all')}`\n"
+                f"*Tools Discovered:* {stats.get('tools_discovered', 0)}\n"
+                f"*Uptime:* {uptime:.0f}s\n\n"
+                f"*Statistics:*\n"
+                f"  Total calls: {stats.get('total_calls', 0)}\n"
+                f"  Total errors: {stats.get('total_errors', 0)}\n"
+                f"  Last call: {stats.get('last_call_at', 0):.0f}s ago\n"
+            )
+
+            await message.reply_text(msg, parse_mode="Markdown")
+
+        except Exception as exc:
+            self._log.exception("cmd_mcp_status_error", error=str(exc))
+            await message.reply_text(f"⚠️ MCP status error: {exc}", parse_mode="Markdown")
 
     def _build_usage_bar(self, used: int, total: int, width: int = 10) -> str:
         """Build a simple text progress bar for rate limit usage."""

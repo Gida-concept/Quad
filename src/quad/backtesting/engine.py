@@ -60,6 +60,7 @@ class BacktestEngine:
         strategy: Any,
         db_manager: Any = None,
         config: dict[str, Any] | None = None,
+        mcp_client: Any = None,
     ) -> None:
         self._log = logger.bind(
             strategy=getattr(strategy, "get_name", lambda: "unknown")()
@@ -68,6 +69,7 @@ class BacktestEngine:
         )
         self._strategy = strategy
         self._db = db_manager
+        self._mcp = mcp_client
 
         assert config is not None, "BacktestEngine requires a config dict"
         self._config: dict[str, Any] = config
@@ -347,12 +349,59 @@ class BacktestEngine:
     ) -> StrategyContext:
         """Build a ``StrategyContext`` from historical data at a given timestamp.
 
-        Falls back to empty data if the database is unavailable.
+        When an MCP client is available, fetches real candle and indicator
+        data.  Falls back to empty context if no data source is available.
         """
         context = StrategyContext(
             config=dict(self._config),
             strategy_params={},
         )
+
+        # MCP-powered context building
+        if self._mcp is not None and hasattr(self._mcp, "call_tool"):
+            try:
+                # Fetch candles up to this point in the backtest
+                from datetime import timedelta
+
+                inst_id = underlying
+                if "-" not in underlying and "SWAP" not in underlying:
+                    inst_id = underlying.replace("USDT", "-USDT-SWAP") if "USDT" in underlying else f"{underlying}-USDT-SWAP"
+
+                raw_candles = await self._mcp.call_tool(
+                    "market_get_candles",
+                    {"instId": inst_id, "bar": "1H", "limit": "150"},
+                )
+                data = raw_candles.get("data", []) if isinstance(raw_candles, dict) else []
+                if data:
+                    from quad.types.market import Candle
+                    from decimal import Decimal as D
+
+                    context.candles = [
+                        Candle(
+                            symbol=underlying,
+                            open=D(str(row[1])),
+                            high=D(str(row[2])),
+                            low=D(str(row[3])),
+                            close=D(str(row[4])),
+                            volume=D(str(row[5])),
+                            timestamp=int(row[0]),
+                        )
+                        for row in data
+                        if isinstance(row, (list, tuple)) and len(row) >= 6
+                    ]
+
+                # Fetch indicators
+                from quad.ai.ta import compute_indicators_via_mcp
+
+                context.indicators = await compute_indicators_via_mcp(
+                    self._mcp, inst_id, "1H"
+                )
+            except Exception as exc:
+                self._log.warning(
+                    "backtest_mcp_context_failed",
+                    underlying=underlying,
+                    error=str(exc),
+                )
 
         return context
 

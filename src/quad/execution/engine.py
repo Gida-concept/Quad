@@ -229,8 +229,11 @@ class ExecutionEngine:
         context = self._ensure_context(context)
         original_qty = action.quantity
 
-        # 1. Risk check (skip if already checked upstream)
-        if action.risk_checked:
+        # 1. Risk check (skip if already evaluated upstream)
+        #    Prefer the explicit risk_result over the legacy risk_checked flag.
+        if action.risk_result is not None:
+            risk_result = action.risk_result
+        elif action.risk_checked:
             risk_result = RiskResult(passed=True)
         else:
             risk_result = await self._risk_manager.evaluate(action, context)
@@ -473,8 +476,11 @@ class ExecutionEngine:
         context = self._ensure_context(context)
         original_qty = action.quantity
 
-        # 1. Risk check (skip if already checked upstream)
-        if action.risk_checked:
+        # 1. Risk check (skip if already evaluated upstream)
+        #    Prefer the explicit risk_result over the legacy risk_checked flag.
+        if action.risk_result is not None:
+            risk_result = action.risk_result
+        elif action.risk_checked:
             risk_result = RiskResult(passed=True)
         else:
             risk_result = await self._risk_manager.evaluate(action, context)

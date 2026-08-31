@@ -77,6 +77,7 @@ class Optimizer:
         recommendation_repo: OptimizationRecommendationRepository,
         config_change_repo: ConfigChangeRepository | None = None,
         config_dict: dict[str, Any] | None = None,
+        mcp_client: Any | None = None,
     ) -> None:
         self._config = config
         self._retrain_cfg = config.retrain
@@ -88,6 +89,7 @@ class Optimizer:
         self._rec_repo = recommendation_repo
         self._config_change_repo = config_change_repo
         self._config_dict = config_dict
+        self._mcp = mcp_client
         self._config_lock = asyncio.Lock()
         self._log = logger.bind()
         self._consecutive_failures = 0
