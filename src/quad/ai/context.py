@@ -142,8 +142,11 @@ async def _fetch_klines(
         Each tuple: (open_time, open, high, low, close, volume, ...).
         Timestamps are in seconds.
     """
+    # Convert lowercase intervals to OKX format (e.g. "1h" -> "1H")
+    okx_interval = _TIMEFRAME_MAP.get(interval.lower(), interval)
+
     try:
-        return await exchange_adapter.get_klines(pair, interval, limit)
+        return await exchange_adapter.get_klines(pair, okx_interval, limit)
     except Exception as exc:
         logger.warning(
             "kline_request_error",
