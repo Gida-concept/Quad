@@ -20,6 +20,10 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+#: Maximum distinct metric series rendered by ``get_metrics_text``.  Series
+#: beyond the cap are dropped (with a warning) to bound scrape size.
+MAX_SERIES = 5000
+
 
 # ============================================================================
 # MetricsCollector
@@ -173,8 +177,15 @@ class MetricsCollector:
             lines.append("# TYPE quad_uptime_seconds gauge")
             lines.append(f"quad_uptime_seconds {uptime:.2f}")
 
+            emitted = 0
+            capped = False
+
             # Gauges
             for name, value in self._gauges.items():
+                if emitted >= MAX_SERIES:
+                    capped = True
+                    break
+                emitted += 1
                 labels = self._gauge_labels.get(name, {})
                 label_str = _format_labels(labels)
 
@@ -185,6 +196,10 @@ class MetricsCollector:
 
             # Counters
             for name, value in self._counters.items():
+                if emitted >= MAX_SERIES:
+                    capped = True
+                    break
+                emitted += 1
                 labels = self._counter_labels.get(name, {})
                 label_str = _format_labels(labels)
 
@@ -195,6 +210,10 @@ class MetricsCollector:
 
             # Histograms (summary stats)
             for name, values in self._histograms.items():
+                if emitted >= MAX_SERIES:
+                    capped = True
+                    break
+                emitted += 1
                 labels = self._histogram_labels.get(name, {})
                 label_str = _format_labels(labels)
 
@@ -236,6 +255,12 @@ class MetricsCollector:
                         )
 
         lines.append("")
+        if capped:
+            logger.warning(
+                "metrics_series_cap_dropped",
+                emitted=emitted,
+                cap=MAX_SERIES,
+            )
         return "\n".join(lines)
 
     def reset(self) -> None:
@@ -260,12 +285,18 @@ class MetricsCollector:
 # ============================================================================
 
 
+def _escape_label_value(value: str) -> str:
+    """Escape a Prometheus label value (``\\``, ``"``, newlines)."""
+    return str(value).replace("\\", r"\\").replace("\n", r"\n").replace('"', r"\"")
+
+
 def _format_labels(labels: dict[str, str]) -> str:
     """Format a label dict as a Prometheus label string.
 
     Returns ``""`` for empty labels, or ``'{key="val",key2="val2"}'``.
+    Label values are escaped so quotes/newlines cannot break the scrape.
     """
     if not labels:
         return ""
-    parts = [f'{k}="{v}"' for k, v in sorted(labels.items())]
+    parts = [f'{k}="{_escape_label_value(v)}"' for k, v in sorted(labels.items())]
     return "{" + ",".join(parts) + "}"

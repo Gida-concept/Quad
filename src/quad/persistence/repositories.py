@@ -8,32 +8,49 @@ SQLite ``?`` parameter style (via automatic $N to ? conversion).
 from __future__ import annotations
 
 import time
-from typing import Any, Generic, TypeVar, cast
+from decimal import Decimal
+from typing import Any, Generic, Protocol, TypeVar, cast
 
 import structlog
 
-from .database import DatabaseManager
 from .models import (
     AccountModel,
     CircuitBreakerEventModel,
     ConfigChangeModel,
     DecisionModel,
     ErrorLogModel,
+    ExchangeCredentialModel,
     FundingPaymentModel,
     LiquidationEventModel,
     OptimizationRecommendationModel,
     OptimizationRunModel,
     OrderModel,
+    PairingCodeModel,
     PerformanceSnapshotModel,
     PositionModel,
     SessionModel,
     StrategyStateModel,
+    TelegramBindingModel,
+    TenantConfigModel,
+    TenantModel,
     TradeModel,
 )
 
 logger = structlog.get_logger(__name__)
 
 T = TypeVar("T")
+
+
+class _DbManager(Protocol):
+    """Structural DB-manager type (SQLite or Postgres).
+
+    Typing-only (no runtime import of either backend) so repositories stay
+    importable without a persistence <-> pg circular import.
+    """
+
+    @property
+    def pool(self) -> Any: ...
+
 
 # ---------------------------------------------------------------------------
 # Base repository (generic CRUD)
@@ -54,9 +71,10 @@ class BaseRepository(Generic[T]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[T] | None = None,
         slow_query_threshold_ms: int = 500,
+        tenant_id: str | None = None,
     ) -> None:
         self._db = db_manager
         assert model_cls is not None, "BaseRepository requires a model class"
@@ -65,6 +83,11 @@ class BaseRepository(Generic[T]):
         self._columns = self._model_cls.columns()
         self._log = logger.bind(table=self._table)
         self._slow_query_threshold_ms = slow_query_threshold_ms
+        # Multi-tenant scope (quad-api workers).  When set, writes are
+        # stamped, reads auto-filter, and update/delete/get are guarded to
+        # this tenant.  Tables without a tenant_id column are unaffected.
+        self._tenant_id: str | None = tenant_id
+        self._tenant_scoped = tenant_id is not None and "tenant_id" in self._columns
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -80,8 +103,31 @@ class BaseRepository(Generic[T]):
             parts.append(f"{n} = ${start + i}")
         return ", ".join(parts)
 
+    def _where_clause(self, names: list[str], start: int = 1) -> str:
+        """Return a WHERE clause with positional placeholders.
+
+        Example: ``"col1 = $1 AND col2 = $2"``
+        """
+        parts = []
+        for i, n in enumerate(names):
+            parts.append(f"{n} = ${start + i}")
+        return " AND ".join(parts)
+
     def _column_list(self) -> str:
         return ", ".join(self._columns)
+
+    def _tenant_pred(self, n_params: int, prefix_and: bool = True) -> tuple[str, list]:
+        """Tenant predicate fragment for raw-SQL custom methods.
+
+        Returns ``("", [])`` when this repo is unscoped.  *n_params* is the
+        number of ``$N`` placeholders already used; the tenant placeholder
+        continues the numbering.  With ``prefix_and=False`` the fragment is
+        a standalone ``WHERE`` clause (for queries with no WHERE yet).
+        """
+        if not self._tenant_scoped or self._tenant_id is None:
+            return "", []
+        frag = f"tenant_id = ${n_params + 1}"
+        return (f" AND {frag}" if prefix_and else f" WHERE {frag}", [self._tenant_id])
 
     def _from_row(self, row: Any) -> T:
         """Build a model instance from a database row (cast for typing)."""
@@ -114,7 +160,13 @@ class BaseRepository(Generic[T]):
                 self._log.warning("slow_query", ms=round(dur), method="get", id=id)
             if row is None:
                 return None
-            return self._from_row(row)
+            model = self._from_row(row)
+            if (
+                self._tenant_scoped
+                and getattr(model, "tenant_id", None) != self._tenant_id
+            ):
+                return None
+            return model
         except Exception:
             self._log.exception("get_failed", id=id)
             raise
@@ -127,13 +179,16 @@ class BaseRepository(Generic[T]):
         t0 = time.monotonic()
         try:
             async with self._db.pool.acquire() as conn:
-                if filters:
-                    keys = list(filters.keys())
-                    where = self._placeholder_clause(keys)
+                scoped = dict(filters)
+                if self._tenant_scoped and "tenant_id" not in scoped:
+                    scoped["tenant_id"] = self._tenant_id
+                if scoped:
+                    keys = list(scoped.keys())
+                    where = self._where_clause(keys)
                     sql = (
                         f"SELECT {self._column_list()} FROM {self._table} WHERE {where}"
                     )
-                    rows = await conn.fetch(sql, *filters.values())
+                    rows = await conn.fetch(sql, *scoped.values())
                 else:
                     sql = f"SELECT {self._column_list()} FROM {self._table}"
                     rows = await conn.fetch(sql)
@@ -148,6 +203,15 @@ class BaseRepository(Generic[T]):
 
     async def create(self, model: T) -> int:
         """Insert a new row and return the generated id (via RETURNING)."""
+        if (
+            self._tenant_scoped
+            and self._tenant_id is not None
+            and hasattr(model, "tenant_id")
+        ):
+            try:
+                model.tenant_id = self._tenant_id
+            except Exception:
+                pass
         t0 = time.monotonic()
         try:
             async with self._db.pool.acquire() as conn:
@@ -175,15 +239,20 @@ class BaseRepository(Generic[T]):
         t0 = time.monotonic()
         try:
             keys = list(updates.keys())
-            # $N placeholders: last one is id
+            # $N placeholders: values first, then id, then tenant guard.
             set_clause = self._placeholder_clause(keys, start=1)
             values = list(updates.values())
             id_placeholder = f"${len(values) + 1}"
+            params: list = list(values) + [id]
+            where = f"id = {id_placeholder}"
+            if self._tenant_scoped:
+                tenant_placeholder = f"${len(values) + 2}"
+                where += f" AND tenant_id = {tenant_placeholder}"
+                params.append(self._tenant_id)
             async with self._db.pool.acquire() as conn:
                 await conn.execute(
-                    f"UPDATE {self._table} SET {set_clause} WHERE id = {id_placeholder}",
-                    *values,
-                    id,
+                    f"UPDATE {self._table} SET {set_clause} WHERE {where}",
+                    *params,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -198,10 +267,17 @@ class BaseRepository(Generic[T]):
         t0 = time.monotonic()
         try:
             async with self._db.pool.acquire() as conn:
-                await conn.execute(
-                    f"DELETE FROM {self._table} WHERE id = $1",
-                    id,
-                )
+                if self._tenant_scoped:
+                    await conn.execute(
+                        f"DELETE FROM {self._table} WHERE id = $1 AND tenant_id = $2",
+                        id,
+                        self._tenant_id,
+                    )
+                else:
+                    await conn.execute(
+                        f"DELETE FROM {self._table} WHERE id = $1",
+                        id,
+                    )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="delete", id=id)
@@ -215,12 +291,15 @@ class BaseRepository(Generic[T]):
         t0 = time.monotonic()
         try:
             async with self._db.pool.acquire() as conn:
-                if filters:
-                    keys = list(filters.keys())
-                    where = self._placeholder_clause(keys)
+                scoped = dict(filters)
+                if self._tenant_scoped and "tenant_id" not in scoped:
+                    scoped["tenant_id"] = self._tenant_id
+                if scoped:
+                    keys = list(scoped.keys())
+                    where = self._where_clause(keys)
                     row = await conn.fetchval(
                         f"SELECT COUNT(*) FROM {self._table} WHERE {where}",
-                        *filters.values(),
+                        *scoped.values(),
                     )
                 else:
                     row = await conn.fetchval(f"SELECT COUNT(*) FROM {self._table}")
@@ -233,6 +312,16 @@ class BaseRepository(Generic[T]):
             raise
 
 
+def make_repo(repo_cls: type[T], db_manager: _DbManager, config: dict | None) -> T:
+    """Construct a repository, applying the config's tenant scope if present.
+
+    Workers set ``config["_tenant_id"]``; single-tenant runs leave it unset
+    and repositories behave exactly as before.
+    """
+    tenant_id = (config or {}).get("_tenant_id")
+    return repo_cls(db_manager, tenant_id=tenant_id)  # type: ignore[call-arg]
+
+
 # ---------------------------------------------------------------------------
 # Domain-specific repositories
 # ---------------------------------------------------------------------------
@@ -243,10 +332,11 @@ class AccountRepository(BaseRepository[AccountModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[AccountModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or AccountModel)
+        super().__init__(db_manager, model_cls or AccountModel, tenant_id=tenant_id)
 
     async def get_by_exchange(self, exchange: str) -> AccountModel | None:
         """Return the account for a given exchange name.
@@ -257,9 +347,11 @@ class AccountRepository(BaseRepository[AccountModel]):
         t0 = time.monotonic()
         try:
             async with self._db.pool.acquire() as conn:
+                pred_sql, pred_params = self._tenant_pred(1)
                 row = await conn.fetchrow(
-                    f"SELECT {self._column_list()} FROM {self._table} WHERE exchange = $1",
+                    f"SELECT {self._column_list()} FROM {self._table} WHERE exchange = $1{pred_sql}",
                     exchange,
+                    *pred_params,
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -293,6 +385,15 @@ class AccountRepository(BaseRepository[AccountModel]):
         """
         t0 = time.monotonic()
         try:
+            if (
+                self._tenant_scoped
+                and self._tenant_id is not None
+                and hasattr(account, "tenant_id")
+            ):
+                try:
+                    account.tenant_id = self._tenant_id
+                except Exception:
+                    pass
             columns = self._column_list()
             placeholders = self._param_placeholders()
             set_pairs = self._column_set_pairs(self._columns)
@@ -318,10 +419,11 @@ class PositionRepository(BaseRepository[PositionModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[PositionModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or PositionModel)
+        super().__init__(db_manager, model_cls or PositionModel, tenant_id=tenant_id)
 
     async def get_open(self) -> list[PositionModel]:
         """Return all positions with status ``'OPEN'``."""
@@ -345,15 +447,17 @@ class PositionRepository(BaseRepository[PositionModel]):
                 if position_side:
                     rows = await conn.fetch(
                         f"SELECT {self._column_list()} FROM {self._table} "
-                        "WHERE status = 'OPEN' AND symbol = $1 AND position_side = $2",
+                        f"WHERE status = 'OPEN' AND symbol = $1 AND position_side = $2{self._tenant_pred(2)[0]}",
                         symbol,
                         position_side,
+                        *self._tenant_pred(2)[1],
                     )
                 else:
                     rows = await conn.fetch(
                         f"SELECT {self._column_list()} FROM {self._table} "
-                        "WHERE status = 'OPEN' AND symbol = $1",
+                        f"WHERE status = 'OPEN' AND symbol = $1{self._tenant_pred(1)[0]}",
                         symbol,
+                        *self._tenant_pred(1)[1],
                     )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -378,7 +482,8 @@ class PositionRepository(BaseRepository[PositionModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "WHERE status = 'OPEN' AND liquidation_price != '0' AND current_price != '0'",
+                    f"WHERE status = 'OPEN' AND liquidation_price != '0' AND current_price != '0'{self._tenant_pred(0)[0]}",
+                    *self._tenant_pred(0)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -420,10 +525,11 @@ class OrderRepository(BaseRepository[OrderModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[OrderModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or OrderModel)
+        super().__init__(db_manager, model_cls or OrderModel, tenant_id=tenant_id)
 
     async def get_open(self) -> list[OrderModel]:
         """Return orders that are still active (NEW or PARTIALLY_FILLED)."""
@@ -432,7 +538,8 @@ class OrderRepository(BaseRepository[OrderModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"WHERE status IN ('NEW', 'PARTIALLY_FILLED')",
+                    f"WHERE status IN ('NEW', 'PARTIALLY_FILLED'){self._tenant_pred(0)[0]}",
+                    *self._tenant_pred(0)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -468,7 +575,9 @@ class OrderRepository(BaseRepository[OrderModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"ORDER BY created_at DESC LIMIT $1",
+                    f"{self._tenant_pred(0, prefix_and=False)[0]} "
+                    f"ORDER BY created_at DESC LIMIT ${len(self._tenant_pred(0, prefix_and=False)[1]) + 1}",
+                    *self._tenant_pred(0, prefix_and=False)[1],
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
@@ -485,10 +594,11 @@ class TradeRepository(BaseRepository[TradeModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[TradeModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or TradeModel)
+        super().__init__(db_manager, model_cls or TradeModel, tenant_id=tenant_id)
 
     async def get_by_position(self, position_id: int) -> list[TradeModel]:
         """Return all trades belonging to a position."""
@@ -501,7 +611,9 @@ class TradeRepository(BaseRepository[TradeModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"ORDER BY timestamp DESC LIMIT $1",
+                    f"{self._tenant_pred(0, prefix_and=False)[0]} "
+                    f"ORDER BY timestamp DESC LIMIT ${len(self._tenant_pred(0, prefix_and=False)[1]) + 1}",
+                    *self._tenant_pred(0, prefix_and=False)[1],
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
@@ -510,6 +622,39 @@ class TradeRepository(BaseRepository[TradeModel]):
             return [TradeModel.from_row(r) for r in rows]
         except Exception:
             self._log.exception("get_recent_trades_failed")
+            raise
+
+    async def sum_pnl_since(self, tenant_id: str, since_ms: int) -> Decimal:
+        """Sum realized PnL for trades since a given timestamp.
+
+        Performs the aggregation in SQL rather than loading all trade rows
+        into memory, which is critical for high-frequency tenants with
+        large trade histories.
+        """
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                if self._tenant_scoped:
+                    row = await conn.fetchrow(
+                        f"SELECT COALESCE(SUM(pnl), 0) as total FROM {self._table} "
+                        f"WHERE tenant_id = $1 AND timestamp >= $2",
+                        tenant_id,
+                        since_ms,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        f"SELECT COALESCE(SUM(pnl), 0) as total FROM {self._table} "
+                        f"WHERE timestamp >= $1",
+                        since_ms,
+                    )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > self._slow_query_threshold_ms:
+                self._log.warning("slow_query", ms=round(dur), method="sum_pnl_since")
+            # Positional access: SQLite returns plain tuples while asyncpg
+            # returns Records (both support [0]); key access works only on PG.
+            return Decimal(str(row[0])) if row else Decimal(0)
+        except Exception:
+            self._log.exception("sum_pnl_since_failed")
             raise
 
     async def exists_for_order(self, order_id: int, side: str) -> bool:
@@ -525,9 +670,10 @@ class TradeRepository(BaseRepository[TradeModel]):
             async with self._db.pool.acquire() as conn:
                 row = await conn.fetchval(
                     f"SELECT 1 FROM {self._table} "
-                    f"WHERE order_id = $1 AND side = $2 LIMIT 1",
+                    f"WHERE order_id = $1 AND side = $2{self._tenant_pred(2)[0]} LIMIT 1",
                     order_id,
                     side,
+                    *self._tenant_pred(2)[1],
                 )
             return row is not None
         except Exception:
@@ -545,10 +691,11 @@ class TradeRepository(BaseRepository[TradeModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"WHERE timestamp >= $1 AND timestamp <= $2 "
+                    f"WHERE timestamp >= $1 AND timestamp <= $2{self._tenant_pred(2)[0]} "
                     f"ORDER BY timestamp ASC",
                     start,
                     end,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -566,10 +713,11 @@ class DecisionRepository(BaseRepository[DecisionModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[DecisionModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or DecisionModel)
+        super().__init__(db_manager, model_cls or DecisionModel, tenant_id=tenant_id)
 
     async def get_recent(self, limit: int = 20) -> list[DecisionModel]:
         """Return the most recent *limit* decisions by timestamp."""
@@ -578,7 +726,9 @@ class DecisionRepository(BaseRepository[DecisionModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"ORDER BY timestamp DESC LIMIT $1",
+                    f"{self._tenant_pred(0, prefix_and=False)[0]} "
+                    f"ORDER BY timestamp DESC LIMIT ${len(self._tenant_pred(0, prefix_and=False)[1]) + 1}",
+                    *self._tenant_pred(0, prefix_and=False)[1],
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
@@ -604,10 +754,11 @@ class DecisionRepository(BaseRepository[DecisionModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"WHERE timestamp >= $1 AND timestamp <= $2 "
+                    f"WHERE timestamp >= $1 AND timestamp <= $2{self._tenant_pred(2)[0]} "
                     f"ORDER BY timestamp ASC",
                     start,
                     end,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -641,7 +792,8 @@ class DecisionRepository(BaseRepository[DecisionModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"WHERE outcome = 'open' ORDER BY timestamp ASC LIMIT $1",
+                    f"WHERE outcome = 'open'{self._tenant_pred(0)[0]} ORDER BY timestamp ASC LIMIT ${len(self._tenant_pred(0)[1]) + 1}",
+                    *self._tenant_pred(0)[1],
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
@@ -693,18 +845,20 @@ class DecisionRepository(BaseRepository[DecisionModel]):
                             f"SELECT {self._column_list()} FROM {self._table} "
                             f"WHERE outcome != 'open' "
                             f"AND predicted_direction IN ('LONG', 'SHORT') "
-                            f"AND timestamp >= $1 "
-                            f"ORDER BY timestamp ASC LIMIT $2",
+                            f"AND timestamp >= $1{self._tenant_pred(1)[0]} "
+                            f"ORDER BY timestamp ASC LIMIT ${len(self._tenant_pred(1)[1]) + 2}",
                             since,
+                            *self._tenant_pred(1)[1],
                             limit,
                         )
                     else:
                         rows = await conn.fetch(
                             f"SELECT {self._column_list()} FROM {self._table} "
                             f"WHERE outcome != 'open' "
-                            f"AND timestamp >= $1 "
-                            f"ORDER BY timestamp ASC LIMIT $2",
+                            f"AND timestamp >= $1{self._tenant_pred(1)[0]} "
+                            f"ORDER BY timestamp ASC LIMIT ${len(self._tenant_pred(1)[1]) + 2}",
                             since,
+                            *self._tenant_pred(1)[1],
                             limit,
                         )
                 else:
@@ -712,15 +866,17 @@ class DecisionRepository(BaseRepository[DecisionModel]):
                         rows = await conn.fetch(
                             f"SELECT {self._column_list()} FROM {self._table} "
                             f"WHERE outcome != 'open' "
-                            f"AND predicted_direction IN ('LONG', 'SHORT') "
-                            f"ORDER BY timestamp ASC LIMIT $1",
+                            f"AND predicted_direction IN ('LONG', 'SHORT'){self._tenant_pred(0)[0]} "
+                            f"ORDER BY timestamp ASC LIMIT ${len(self._tenant_pred(0)[1]) + 1}",
+                            *self._tenant_pred(0)[1],
                             limit,
                         )
                     else:
                         rows = await conn.fetch(
                             f"SELECT {self._column_list()} FROM {self._table} "
-                            f"WHERE outcome != 'open' "
-                            f"ORDER BY timestamp ASC LIMIT $1",
+                            f"WHERE outcome != 'open'{self._tenant_pred(0)[0]} "
+                            f"ORDER BY timestamp ASC LIMIT ${len(self._tenant_pred(0)[1]) + 1}",
+                            *self._tenant_pred(0)[1],
                             limit,
                         )
             dur = (time.monotonic() - t0) * 1000
@@ -756,10 +912,10 @@ class DecisionRepository(BaseRepository[DecisionModel]):
         exit_price:
             Price at which the position closed (decimal string).
         resolved_at:
-            Unix epoch seconds when the position closed.  Defaults to now.
+            Unix epoch milliseconds when the position closed.  Defaults to now.
         """
         if resolved_at is None:
-            resolved_at = int(time.time())
+            resolved_at = int(time.time() * 1000)
         await self.update(
             decision_id,
             outcome=outcome,
@@ -774,10 +930,11 @@ class SessionRepository(BaseRepository[SessionModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[SessionModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or SessionModel)
+        super().__init__(db_manager, model_cls or SessionModel, tenant_id=tenant_id)
 
     async def get_latest(self) -> SessionModel | None:
         """Return the most recently started session."""
@@ -786,7 +943,9 @@ class SessionRepository(BaseRepository[SessionModel]):
             async with self._db.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     f"SELECT {self._column_list()} FROM {self._table} "
+                    f"{self._tenant_pred(0, prefix_and=False)[0]} "
                     f"ORDER BY start_time DESC LIMIT 1",
+                    *self._tenant_pred(0, prefix_and=False)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -834,10 +993,13 @@ class PerformanceSnapshotRepository(BaseRepository[PerformanceSnapshotModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[PerformanceSnapshotModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or PerformanceSnapshotModel)
+        super().__init__(
+            db_manager, model_cls or PerformanceSnapshotModel, tenant_id=tenant_id
+        )
 
     async def get_recent(self, limit: int = 20) -> list[PerformanceSnapshotModel]:
         """Return the most recent *limit* snapshots by timestamp."""
@@ -846,7 +1008,9 @@ class PerformanceSnapshotRepository(BaseRepository[PerformanceSnapshotModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"ORDER BY timestamp DESC LIMIT $1",
+                    f"{self._tenant_pred(0, prefix_and=False)[0]} "
+                    f"ORDER BY timestamp DESC LIMIT ${len(self._tenant_pred(0, prefix_and=False)[1]) + 1}",
+                    *self._tenant_pred(0, prefix_and=False)[1],
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
@@ -868,10 +1032,11 @@ class PerformanceSnapshotRepository(BaseRepository[PerformanceSnapshotModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    f"WHERE timestamp >= $1 AND timestamp <= $2 "
+                    f"WHERE timestamp >= $1 AND timestamp <= $2{self._tenant_pred(2)[0]} "
                     f"ORDER BY timestamp ASC",
                     start,
                     end,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -889,10 +1054,13 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[OptimizationRunModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or OptimizationRunModel)
+        super().__init__(
+            db_manager, model_cls or OptimizationRunModel, tenant_id=tenant_id
+        )
 
     async def get_by_date_range(
         self, start: int, end: int
@@ -901,10 +1069,11 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {self._column_list()} FROM {self._table} "
-                "WHERE run_at >= $1 AND run_at <= $2 "
+                f"WHERE run_at >= $1 AND run_at <= $2{self._tenant_pred(2)[0]} "
                 "ORDER BY run_at DESC",
                 start,
                 end,
+                *self._tenant_pred(2)[1],
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -913,7 +1082,9 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {self._column_list()} FROM {self._table} "
-                "ORDER BY run_at DESC LIMIT $1",
+                f"{self._tenant_pred(0, prefix_and=False)[0]} "
+                f"ORDER BY run_at DESC LIMIT ${len(self._tenant_pred(0, prefix_and=False)[1]) + 1}",
+                *self._tenant_pred(0, prefix_and=False)[1],
                 limit,
             )
             return [self._model_cls.from_row(row) for row in rows]
@@ -922,9 +1093,10 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
         """Return runs with a given status."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT {self._column_list()} FROM {self._table} WHERE status = $1 "
+                f"SELECT {self._column_list()} FROM {self._table} WHERE status = $1{self._tenant_pred(1)[0]} "
                 "ORDER BY run_at DESC",
                 status,
+                *self._tenant_pred(1)[1],
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -933,7 +1105,9 @@ class OptimizationRunRepository(BaseRepository[OptimizationRunModel]):
         async with self._db.pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"SELECT {self._column_list()} FROM {self._table} "
-                "ORDER BY run_at DESC LIMIT 1"
+                f"{self._tenant_pred(0, prefix_and=False)[0]} "
+                "ORDER BY run_at DESC LIMIT 1",
+                *self._tenant_pred(0, prefix_and=False)[1],
             )
             return self._model_cls.from_row(row) if row else None
 
@@ -945,18 +1119,24 @@ class OptimizationRecommendationRepository(
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[OptimizationRecommendationModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or OptimizationRecommendationModel)
+        super().__init__(
+            db_manager,
+            model_cls or OptimizationRecommendationModel,
+            tenant_id=tenant_id,
+        )
 
     async def get_by_run(self, run_id: int) -> list[OptimizationRecommendationModel]:
         """Return all recommendations for a given run."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {self._column_list()} FROM {self._table} "
-                "WHERE run_id = $1 ORDER BY id",
+                f"WHERE run_id = $1{self._tenant_pred(1)[0]} ORDER BY id",
                 run_id,
+                *self._tenant_pred(1)[1],
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -965,7 +1145,8 @@ class OptimizationRecommendationRepository(
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {self._column_list()} FROM {self._table} "
-                "WHERE status = 'pending' ORDER BY run_id DESC, id"
+                f"WHERE status = 'pending'{self._tenant_pred(0)[0]} ORDER BY run_id DESC, id",
+                *self._tenant_pred(0)[1],
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -976,8 +1157,9 @@ class OptimizationRecommendationRepository(
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {self._column_list()} FROM {self._table} "
-                "WHERE recommendation_type = $1 ORDER BY id",
+                f"WHERE recommendation_type = $1{self._tenant_pred(1)[0]} ORDER BY id",
                 recommendation_type,
+                *self._tenant_pred(1)[1],
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -986,8 +1168,9 @@ class OptimizationRecommendationRepository(
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
                 f"SELECT {self._column_list()} FROM {self._table} "
-                "WHERE status = $1 ORDER BY run_id DESC",
+                f"WHERE status = $1{self._tenant_pred(1)[0]} ORDER BY run_id DESC",
                 status,
+                *self._tenant_pred(1)[1],
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -1000,10 +1183,11 @@ class OptimizationRecommendationRepository(
                 "UPDATE optimization_recommendations "
                 "SET status = 'applied', applied_at = $1, "
                 "    applied_strategy_params_json = $2 "
-                "WHERE id = $3",
+                f"WHERE id = $3{self._tenant_pred(3)[0]}",
                 applied_at,
                 strategy_params_json,
                 recommendation_id,
+                *self._tenant_pred(3)[1],
             )
 
 
@@ -1012,16 +1196,20 @@ class ConfigChangeRepository(BaseRepository[ConfigChangeModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[ConfigChangeModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or ConfigChangeModel)
+        super().__init__(
+            db_manager, model_cls or ConfigChangeModel, tenant_id=tenant_id
+        )
 
     async def get_recent(self, limit: int = 50) -> list[ConfigChangeModel]:
         """Return the most recent config changes."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT {self._column_list()} FROM {self._table} ORDER BY id DESC LIMIT $1",
+                f"SELECT {self._column_list()} FROM {self._table} {self._tenant_pred(0, prefix_and=False)[0]} ORDER BY id DESC LIMIT ${len(self._tenant_pred(0, prefix_and=False)[1]) + 1}",
+                *self._tenant_pred(0, prefix_and=False)[1],
                 limit,
             )
             return [self._model_cls.from_row(row) for row in rows]
@@ -1030,9 +1218,10 @@ class ConfigChangeRepository(BaseRepository[ConfigChangeModel]):
         """Return config changes for a specific key."""
         async with self._db.pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT {self._column_list()} FROM {self._table} WHERE key = $1 ORDER BY id DESC LIMIT $2",
+                f"SELECT {self._column_list()} FROM {self._table} WHERE key = $1{self._tenant_pred(2)[0]} ORDER BY id DESC LIMIT $2",
                 key,
                 limit,
+                *self._tenant_pred(2)[1],
             )
             return [self._model_cls.from_row(row) for row in rows]
 
@@ -1042,10 +1231,13 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[CircuitBreakerEventModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or CircuitBreakerEventModel)
+        super().__init__(
+            db_manager, model_cls or CircuitBreakerEventModel, tenant_id=tenant_id
+        )
 
     async def get_by_type(
         self, breaker_name: str, limit: int = 50
@@ -1056,9 +1248,10 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "WHERE breaker_name = $1 ORDER BY timestamp DESC LIMIT $2",
+                    f"WHERE breaker_name = $1{self._tenant_pred(2)[0]} ORDER BY timestamp DESC LIMIT $2",
                     breaker_name,
                     limit,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1075,7 +1268,9 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "ORDER BY timestamp DESC LIMIT $1",
+                    f"{self._tenant_pred(0, prefix_and=False)[0]} "
+                    f"ORDER BY timestamp DESC LIMIT ${len(self._tenant_pred(0, prefix_and=False)[1]) + 1}",
+                    *self._tenant_pred(0, prefix_and=False)[1],
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
@@ -1095,10 +1290,11 @@ class CircuitBreakerEventRepository(BaseRepository[CircuitBreakerEventModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "WHERE timestamp >= $1 AND timestamp <= $2 "
+                    f"WHERE timestamp >= $1 AND timestamp <= $2{self._tenant_pred(2)[0]} "
                     "ORDER BY timestamp ASC",
                     start,
                     end,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1116,10 +1312,11 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[ErrorLogModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or ErrorLogModel)
+        super().__init__(db_manager, model_cls or ErrorLogModel, tenant_id=tenant_id)
 
     async def get_by_level(self, level: str, limit: int = 50) -> list[ErrorLogModel]:
         """Return the most recent error logs for a given severity level."""
@@ -1128,9 +1325,10 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "WHERE level = $1 ORDER BY timestamp DESC LIMIT $2",
+                    f"WHERE level = $1{self._tenant_pred(2)[0]} ORDER BY timestamp DESC LIMIT $2",
                     level,
                     limit,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1147,7 +1345,9 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "ORDER BY timestamp DESC LIMIT $1",
+                    f"{self._tenant_pred(0, prefix_and=False)[0]} "
+                    f"ORDER BY timestamp DESC LIMIT ${len(self._tenant_pred(0, prefix_and=False)[1]) + 1}",
+                    *self._tenant_pred(0, prefix_and=False)[1],
                     limit,
                 )
             dur = (time.monotonic() - t0) * 1000
@@ -1165,10 +1365,11 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "WHERE timestamp >= $1 AND timestamp <= $2 "
+                    f"WHERE timestamp >= $1 AND timestamp <= $2{self._tenant_pred(2)[0]} "
                     "ORDER BY timestamp ASC",
                     start,
                     end,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1187,9 +1388,10 @@ class ErrorLogRepository(BaseRepository[ErrorLogModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "WHERE event = $1 ORDER BY timestamp DESC LIMIT $2",
+                    f"WHERE event = $1{self._tenant_pred(2)[0]} ORDER BY timestamp DESC LIMIT $2",
                     source,
                     limit,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1205,10 +1407,13 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[StrategyStateModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or StrategyStateModel)
+        super().__init__(
+            db_manager, model_cls or StrategyStateModel, tenant_id=tenant_id
+        )
 
     async def get_by_strategy(self, name: str) -> StrategyStateModel | None:
         """Return the state for a single strategy by name."""
@@ -1217,8 +1422,9 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
             async with self._db.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "WHERE strategy_name = $1",
+                    f"WHERE strategy_name = $1{self._tenant_pred(1)[0]}",
                     name,
+                    *self._tenant_pred(1)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1241,7 +1447,9 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
+                    f"{self._tenant_pred(0, prefix_and=False)[0]} "
                     "ORDER BY strategy_name ASC",
+                    *self._tenant_pred(0, prefix_and=False)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1254,24 +1462,69 @@ class StrategyStateRepository(BaseRepository[StrategyStateModel]):
     async def upsert(self, state: StrategyStateModel) -> int:
         """Insert or update a strategy state record.
 
-        Uses ``INSERT ... ON CONFLICT (strategy_name) DO UPDATE`` since
-        ``strategy_name`` is the natural key (UNIQUE constraint).
-
+        Scoped by ``(strategy_name, tenant_id)`` via a single atomic
+        ``INSERT ... ON CONFLICT DO UPDATE`` so concurrent writers cannot
+        race and one tenant can never clobber another's row.
         Returns the row id.
         """
         t0 = time.monotonic()
         try:
+            if (
+                self._tenant_scoped
+                and self._tenant_id is not None
+                and hasattr(state, "tenant_id")
+            ):
+                try:
+                    state.tenant_id = self._tenant_id
+                except Exception:
+                    pass
+            if getattr(state, "tenant_id", None) is None:
+                try:
+                    state.tenant_id = "default"
+                except Exception:
+                    pass
             columns = self._column_list()
             placeholders = self._param_placeholders()
-            set_pairs = self._column_set_pairs(self._columns)
+            update_cols = [
+                c
+                for c in self._columns
+                if c not in ("id", "strategy_name", "tenant_id")
+            ]
+            set_pairs = self._column_set_pairs(update_cols)
             async with self._db.pool.acquire() as conn:
-                last_id = await conn.fetchval(
-                    f"INSERT INTO {self._table} ({columns}) "
-                    f"VALUES ({placeholders}) "
-                    f"ON CONFLICT (strategy_name) DO UPDATE SET {set_pairs} "
-                    f"RETURNING id",
-                    *state.to_row(),
-                )
+                try:
+                    last_id = await conn.fetchval(
+                        f"INSERT INTO {self._table} ({columns}) "
+                        f"VALUES ({placeholders}) "
+                        f"ON CONFLICT (strategy_name, tenant_id) DO UPDATE "
+                        f"SET {set_pairs} "
+                        f"RETURNING id",
+                        *state.to_row(),
+                    )
+                except Exception:
+                    # Pre-migration DBs without the composite unique index:
+                    # fall back to a scoped update on conflict.
+                    set_clause = self._placeholder_clause(update_cols, start=3)
+                    row = dict(zip(self._columns, state.to_row()))
+                    set_vals = [row[c] for c in update_cols]
+                    await conn.execute(
+                        f"UPDATE {self._table} SET {set_clause} "
+                        f"WHERE strategy_name = $1 AND tenant_id = $2",
+                        state.strategy_name,
+                        state.tenant_id,
+                        *set_vals,
+                    )
+                    row2 = await conn.fetchrow(
+                        f"SELECT id FROM {self._table} "
+                        f"WHERE strategy_name = $1 AND tenant_id = $2",
+                        state.strategy_name,
+                        state.tenant_id,
+                    )
+                    last_id = (
+                        (row2["id"] if isinstance(row2, dict) else row2[0])
+                        if row2
+                        else 0
+                    )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
                 self._log.warning("slow_query", ms=round(dur), method="upsert")
@@ -1291,10 +1544,13 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[FundingPaymentModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or FundingPaymentModel)
+        super().__init__(
+            db_manager, model_cls or FundingPaymentModel, tenant_id=tenant_id
+        )
 
     async def save_funding_payment(
         self, symbol: str, position_id: int, amount: str, rate: str
@@ -1320,9 +1576,10 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
             async with self._db.pool.acquire() as conn:
                 rows = await conn.fetch(
                     f"SELECT {self._column_list()} FROM {self._table} "
-                    "WHERE symbol = $1 ORDER BY funding_time DESC LIMIT $2",
+                    f"WHERE symbol = $1{self._tenant_pred(2)[0]} ORDER BY funding_time DESC LIMIT $2",
                     symbol,
                     limit,
+                    *self._tenant_pred(2)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1341,8 +1598,9 @@ class FundingRepository(BaseRepository[FundingPaymentModel]):
             async with self._db.pool.acquire() as conn:
                 row = await conn.fetchval(
                     f"SELECT COALESCE(SUM(CAST(amount AS NUMERIC)), 0) FROM {self._table} "
-                    "WHERE position_id = $1",
+                    f"WHERE position_id = $1{self._tenant_pred(1)[0]}",
                     position_id,
+                    *self._tenant_pred(1)[1],
                 )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1360,10 +1618,13 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: _DbManager,
         model_cls: type[LiquidationEventModel] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
-        super().__init__(db_manager, model_cls or LiquidationEventModel)
+        super().__init__(
+            db_manager, model_cls or LiquidationEventModel, tenant_id=tenant_id
+        )
 
     async def record_liquidation(
         self, symbol: str, position_id: int, amount: str, price: str, side: str
@@ -1392,16 +1653,18 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
                 if symbol:
                     rows = await conn.fetch(
                         f"SELECT {self._column_list()} FROM {self._table} "
-                        "WHERE timestamp >= $1 AND symbol = $2 "
+                        f"WHERE timestamp >= $1 AND symbol = $2{self._tenant_pred(2)[0]} "
                         "ORDER BY timestamp DESC",
                         cutoff,
                         symbol,
+                        *self._tenant_pred(2)[1],
                     )
                 else:
                     rows = await conn.fetch(
                         f"SELECT {self._column_list()} FROM {self._table} "
-                        "WHERE timestamp >= $1 ORDER BY timestamp DESC",
+                        f"WHERE timestamp >= $1{self._tenant_pred(1)[0]} ORDER BY timestamp DESC",
                         cutoff,
+                        *self._tenant_pred(1)[1],
                     )
             dur = (time.monotonic() - t0) * 1000
             if dur > self._slow_query_threshold_ms:
@@ -1412,3 +1675,271 @@ class LiquidationRepository(BaseRepository[LiquidationEventModel]):
         except Exception:
             self._log.exception("get_recent_liquidations_failed")
             raise
+
+
+# ---------------------------------------------------------------------------
+# Multi-tenant repositories (quad-api, schema v5)
+# ---------------------------------------------------------------------------
+
+
+class TenantRepository(BaseRepository[TenantModel]):
+    """Repository for tenants (one human user per row)."""
+
+    def __init__(
+        self,
+        db_manager: _DbManager,
+        model_cls: type[TenantModel] | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or TenantModel, tenant_id=tenant_id)
+
+    async def get_by_uuid(self, tenant_uuid: str) -> TenantModel | None:
+        """Return the tenant with this uuid, or None."""
+        rows = await self.list(tenant_uuid=tenant_uuid)
+        return rows[0] if rows else None
+
+    async def get_by_telegram_user(self, telegram_user_id: int) -> TenantModel | None:
+        """Return the tenant linked to a Telegram user id, or None."""
+        rows = await self.list(telegram_user_id=telegram_user_id)
+        return rows[0] if rows else None
+
+    async def create_tenant(
+        self,
+        tenant_uuid: str,
+        telegram_user_id: int | None = None,
+        username: str = "",
+        display_name: str = "",
+    ) -> TenantModel:
+        """Insert a tenant row and return it."""
+        now = int(time.time() * 1000)
+        model = TenantModel(
+            id=0,
+            tenant_uuid=tenant_uuid,
+            telegram_user_id=telegram_user_id,
+            username=username,
+            display_name=display_name,
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
+        row_id = await self.create(model)
+        created = await self.get(row_id)
+        assert created is not None
+        return created
+
+    async def update_token_version(self, tenant_uuid: str, new_version: int) -> None:
+        """Bump a tenant's ``token_version`` column, invalidating all older JWTs.
+
+        Backed by schema v10 (``ALTER TABLE tenants ADD COLUMN
+        token_version``); invalidates every JWT whose ``ver`` claim is older.
+        """
+        try:
+            async with self._db.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE tenants SET token_version = $1 WHERE tenant_uuid = $2",
+                    new_version,
+                    tenant_uuid,
+                )
+        except Exception:
+            # Column may not exist yet — ignore until migration lands.
+            self._log.debug(
+                "update_token_version_skipped",
+                tenant_uuid=tenant_uuid,
+                new_version=new_version,
+            )
+
+
+class ExchangeCredentialRepository(BaseRepository[ExchangeCredentialModel]):
+    """Repository for per-tenant encrypted exchange credentials."""
+
+    def __init__(
+        self,
+        db_manager: _DbManager,
+        model_cls: type[ExchangeCredentialModel] | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            db_manager, model_cls or ExchangeCredentialModel, tenant_id=tenant_id
+        )
+
+    async def get_active(
+        self, tenant_uuid: str, exchange: str = "bybit"
+    ) -> ExchangeCredentialModel | None:
+        """Return the tenant's credential row for an exchange, or None."""
+        rows = await self.list(tenant_id=tenant_uuid, exchange=exchange)
+        return rows[0] if rows else None
+
+    async def upsert_encrypted(
+        self,
+        tenant_uuid: str,
+        api_key_enc: str,
+        api_secret_enc: str,
+        exchange: str = "bybit",
+        testnet: bool = True,
+        bybit_uid: str = "",
+        permissions: str = "",
+    ) -> ExchangeCredentialModel:
+        """Insert or replace the encrypted credential row for a tenant."""
+        now = int(time.time() * 1000)
+        existing = await self.get_active(tenant_uuid, exchange)
+        if existing is None:
+            model = ExchangeCredentialModel(
+                id=0,
+                tenant_id=tenant_uuid,
+                exchange=exchange,
+                api_key_enc=api_key_enc,
+                api_secret_enc=api_secret_enc,
+                testnet=1 if testnet else 0,
+                bybit_uid=bybit_uid,
+                permissions=permissions,
+                last_verified_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            row_id = await self.create(model)
+            created = await self.get(row_id)
+            assert created is not None
+            return created
+        await self.update(
+            existing.id,
+            api_key_enc=api_key_enc,
+            api_secret_enc=api_secret_enc,
+            testnet=1 if testnet else 0,
+            bybit_uid=bybit_uid,
+            permissions=permissions,
+            last_verified_at=now,
+            updated_at=now,
+        )
+        updated = await self.get(existing.id)
+        assert updated is not None
+        return updated
+
+
+class TenantConfigRepository(BaseRepository[TenantConfigModel]):
+    """Repository for per-tenant trading configuration."""
+
+    def __init__(
+        self,
+        db_manager: _DbManager,
+        model_cls: type[TenantConfigModel] | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            db_manager, model_cls or TenantConfigModel, tenant_id=tenant_id
+        )
+
+    async def get_by_tenant(self, tenant_uuid: str) -> TenantConfigModel | None:
+        """Return the tenant's config row, or None if never configured."""
+        rows = await self.list(tenant_uuid=tenant_uuid)
+        return rows[0] if rows else None
+
+    async def get_or_default(self, tenant_uuid: str) -> TenantConfigModel:
+        """Return config, creating a linear-default row on first use."""
+        existing = await self.get_by_tenant(tenant_uuid)
+        if existing is not None:
+            return existing
+        model = TenantConfigModel(
+            id=0,
+            tenant_uuid=tenant_uuid,
+            market="linear",
+            capital_pct_per_trade=2.0,
+            leverage=10,
+            take_profit_pct=50.0,
+            stop_loss_pct=30.0,
+            strategy="trend_following",
+            max_positions=1,
+            updated_at=int(time.time() * 1000),
+        )
+        row_id = await self.create(model)
+        created = await self.get(row_id)
+        assert created is not None
+        return created
+
+
+class TelegramBindingRepository(BaseRepository[TelegramBindingModel]):
+    """Repository for Telegram chat <-> tenant bindings."""
+
+    def __init__(
+        self,
+        db_manager: _DbManager,
+        model_cls: type[TelegramBindingModel] | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            db_manager, model_cls or TelegramBindingModel, tenant_id=tenant_id
+        )
+
+    async def get_by_chat_id(self, chat_id: int) -> TelegramBindingModel | None:
+        """Return the binding for a Telegram chat, or None (unbound)."""
+        rows = await self.list(chat_id=chat_id)
+        return rows[0] if rows else None
+
+    async def get_by_tenant(self, tenant_uuid: str) -> TelegramBindingModel | None:
+        """Return the tenant's binding, or None."""
+        rows = await self.list(tenant_uuid=tenant_uuid)
+        return rows[0] if rows else None
+
+    async def bind(self, tenant_uuid: str, chat_id: int) -> TelegramBindingModel:
+        """Bind a chat to a tenant (rebind moves the chat)."""
+        now = int(time.time() * 1000)
+        existing_chat = await self.get_by_chat_id(chat_id)
+        if existing_chat is not None:
+            await self.update(
+                existing_chat.id,
+                tenant_uuid=tenant_uuid,
+                last_seen_at=now,
+            )
+            bound = await self.get(existing_chat.id)
+            assert bound is not None
+            return bound
+        model = TelegramBindingModel(
+            id=0,
+            tenant_uuid=tenant_uuid,
+            chat_id=chat_id,
+            bound_at=now,
+            last_seen_at=now,
+        )
+        row_id = await self.create(model)
+        created = await self.get(row_id)
+        assert created is not None
+        return created
+
+
+class PairingCodeRepository(BaseRepository[PairingCodeModel]):
+    """Repository for single-use chat-linking pairing codes."""
+
+    def __init__(
+        self,
+        db_manager: _DbManager,
+        model_cls: type[PairingCodeModel] | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
+        super().__init__(db_manager, model_cls or PairingCodeModel, tenant_id=tenant_id)
+
+    async def get_valid(self, code: str, now_ms: int) -> PairingCodeModel | None:
+        """Return an unexpired, unused code row, or None."""
+        t0 = time.monotonic()
+        try:
+            async with self._db.pool.acquire() as conn:
+                pred_sql, pred_params = self._tenant_pred(2)
+                row = await conn.fetchrow(
+                    f"SELECT {self._column_list()} FROM {self._table} "
+                    f"WHERE code = $1 AND used = 0 AND expires_at > $2{pred_sql} "
+                    f"ORDER BY expires_at DESC LIMIT 1",
+                    code,
+                    now_ms,
+                    *pred_params,
+                )
+            dur = (time.monotonic() - t0) * 1000
+            if dur > self._slow_query_threshold_ms:
+                self._log.warning("slow_query", ms=round(dur), method="get_valid")
+            if row is None:
+                return None
+            return PairingCodeModel.from_row(row)
+        except Exception:
+            self._log.exception("get_valid_pairing_code_failed")
+            raise
+
+    async def mark_used(self, code_id: int, used_by_chat: int) -> None:
+        """Consume a pairing code after a successful bind."""
+        await self.update(code_id, used=1, used_by_chat=used_by_chat)

@@ -49,7 +49,9 @@ class PriceBuffer:
             ``max_ticks_per_symbol``, ``get_recent_count``, ``vwap_window``.
         """
         self._config = config or {}
-        self._buffer_config = self._config["market_data"]["buffer_sizes"]
+        self._buffer_config = self._config.get("market_data", {}).get(
+            "buffer_sizes", {}
+        )
         if max_ticks_per_symbol is None:
             max_ticks_per_symbol = int(
                 self._buffer_config.get("max_ticks_per_symbol") or 1000
@@ -150,6 +152,21 @@ class PriceBuffer:
         async with self._lock:
             return len(self._buffers)
 
+    def snapshot_counts(self) -> dict[str, int]:
+        """Return ``{"symbols_tracked", "total_ticks"}`` synchronously.
+
+        Safe to call from a sync status/health path: the method contains no
+        ``await``, so it runs atomically with respect to the WebSocket
+        handlers that mutate the deques (asyncio is cooperative and
+        single-threaded, so ``len()`` cannot observe a mid-iteration
+        mutation).  Prefer :meth:`total_ticks` / :meth:`symbols_tracked`
+        when awaiting is possible.
+        """
+        return {
+            "symbols_tracked": len(self._buffers),
+            "total_ticks": sum(len(buf) for buf in self._buffers.values()),
+        }
+
 
 class FundingRateRingBuffer:
     """Ring buffer for recent funding rate values.
@@ -176,7 +193,9 @@ class FundingRateRingBuffer:
             ``funding_rate_maxlen``, ``funding_rate_get_recent_count``.
         """
         self._config = config or {}
-        self._buffer_config = self._config["market_data"]["buffer_sizes"]
+        self._buffer_config = self._config.get("market_data", {}).get(
+            "buffer_sizes", {}
+        )
         if maxlen is None:
             maxlen = int(self._buffer_config.get("funding_rate_maxlen") or 100)
         self._maxlen = maxlen

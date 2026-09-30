@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 import structlog
 from typing_extensions import Self
 
@@ -28,6 +28,21 @@ from .models import (
 
 logger = structlog.get_logger(__name__)
 
+try:
+    import aiosqlite
+except ImportError:  # Postgres-only deploys need not install aiosqlite
+    aiosqlite = None  # type: ignore[assignment]
+
+
+def _require_aiosqlite() -> None:
+    """Fail loudly when SQLite is used without aiosqlite installed."""
+    if aiosqlite is None:
+        raise RuntimeError(
+            "aiosqlite is required for SQLite-backed persistence; "
+            "install it or use a postgresql:// DATABASE_URL"
+        )
+
+
 # ---------------------------------------------------------------------------
 # SQLite compatibility layer — translates asyncpg-style $N params to SQLite ?
 # ---------------------------------------------------------------------------
@@ -39,6 +54,10 @@ _PARAM_RE = re.compile(r"\$(\d+)")
 # migrations).  Group 1 = table name, Group 2 = column name.
 _ALTER_ADD_COL_RE = re.compile(
     r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+(?:COLUMN\s+)?(\w+)\s+",
+    re.IGNORECASE,
+)
+_DROP_COL_RE = re.compile(
+    r"ALTER\s+TABLE\s+(\w+)\s+DROP\s+(?:COLUMN\s+)?(\w+)",
     re.IGNORECASE,
 )
 
@@ -59,7 +78,7 @@ class _SQLiteConnection:
     (written for PostgreSQL) works without changes.
     """
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(self, conn: "aiosqlite.Connection") -> None:
         self._conn = conn
 
     async def fetch(self, query: str, *params: Any) -> list[Any]:
@@ -118,6 +137,7 @@ class _SQLitePool:
     """
 
     def __init__(self, db_path: str) -> None:
+        _require_aiosqlite()
         self._db_path = db_path
         self._conn: aiosqlite.Connection | None = None
 
@@ -381,21 +401,34 @@ class DatabaseManager:
                     if statements:
                         self._log.info("applying_migration", version=version)
                         for stmt in statements:
+                            # SQLite < 3.35 cannot DROP COLUMN (the dropped
+                            # column is deprecated anyway) — skip the
+                            # statement instead of failing the migration.
+                            if "drop column" in stmt.lower():
+                                if sqlite3.sqlite_version_info < (3, 35, 0):
+                                    self._log.warning(
+                                        "migration_skipped_drop_column",
+                                        statement=stmt,
+                                    )
+                                    continue
                             # Idempotent ALTER TABLE: before adding a
                             # column, check that it doesn't already exist.
                             # This handles the case where initialize() has
                             # already created the table with the column
                             # included in the base DDL.
                             m = _ALTER_ADD_COL_RE.match(stmt)
-                            if m:
-                                table_name, col_name = m.group(1), m.group(2)
+                            drop = None if m else _DROP_COL_RE.match(stmt)
+                            col_match = m or drop
+                            if col_match is not None:
+                                table_name = col_match.group(1)
+                                col_name = col_match.group(2)
                                 rows = await conn.fetch(
                                     f"PRAGMA table_info({table_name})"
                                 )
                                 col_exists = any(row[1] == col_name for row in rows)
-                                if col_exists:
+                                if col_exists == bool(m):
                                     self._log.debug(
-                                        "column_already_exists_skipping",
+                                        "column_migration_skipped",
                                         table=table_name,
                                         column=col_name,
                                     )

@@ -16,6 +16,8 @@ import sys
 import structlog
 from structlog.types import Processor
 
+from quad.monitoring.correlation import structlog_context_processor
+
 VERSION = "0.1.0"
 
 
@@ -42,6 +44,25 @@ class _TokenRedactionFilter(logging.Filter):
         return True
 
 
+def configure_console_encoding() -> None:
+    """Reconfigure stdout/stderr to UTF-8 on Windows.
+
+    The default Windows console codepage (cp1252) cannot encode the box-drawing
+    and status glyphs the CLI and log renderers emit, so a single ``❌`` or
+    ``→`` raises ``UnicodeEncodeError`` mid-command.  ``errors="replace"``
+    keeps output flowing rather than aborting the process.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):  # pragma: no cover - already closed
+                pass
+
+
 def _configure_logging() -> None:
     """Configure structlog for production logging.
 
@@ -56,10 +77,7 @@ def _configure_logging() -> None:
     log_format = os.environ.get("QUAD_LOG_FORMAT", "json").lower()
 
     # Windows console encoding workaround
-    if sys.platform == "win32":
-        for stream in (sys.stdout, sys.stderr):
-            if hasattr(stream, "reconfigure"):
-                stream.reconfigure(encoding="utf-8", errors="replace")
+    configure_console_encoding()
     processors: list[Processor] = [
         structlog.stdlib.filter_by_level,
         structlog.stdlib.add_logger_name,
@@ -68,6 +86,10 @@ def _configure_logging() -> None:
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        # Merge context-local bindings (correlation_id) into every event so
+        # interleaved logs from concurrent pair scans / webhooks / jobs can
+        # be separated after the fact.
+        structlog_context_processor,
     ]
 
     if log_format == "console":
@@ -155,7 +177,15 @@ async def main(argv: list[str] | None = None) -> None:
     log.info("quad_stopped", version=VERSION)
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Synchronous console-script entry point (``quad-run``).
+
+    Console scripts must be plain callables: the previous
+    ``quad-bot = quad.__main__:main`` entry pointed at the ``async def
+    main()`` coroutine, so the generated wrapper returned an un-awaited
+    coroutine and the bot never started.  Use ``python -m quad`` or
+    ``quad-run`` to launch the trading process.
+    """
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -166,3 +196,7 @@ if __name__ == "__main__":
 
         traceback.print_exc()
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    run()

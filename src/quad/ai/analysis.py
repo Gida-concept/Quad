@@ -11,6 +11,8 @@ import time
 from decimal import Decimal
 from typing import Any
 
+import re
+
 import structlog
 
 from .groq import GroqClient
@@ -84,8 +86,11 @@ async def analyze_market(
             f"\nOpen positions: {pos_count}, unrealised PnL: ${pos_pnl:+,.2f}"
         )
 
+    # Sanitize symbol to prevent prompt injection
+    safe_symbol = re.sub(r"[^A-Z0-9]", "", symbol.upper())
+
     user_prompt = (
-        f"Analyse {symbol} futures market:\n"
+        f"Analyse {safe_symbol} futures market:\n"
         f"Mark price: ${float(mark_price or 0):,.2f}\n"
         f"{market_summary}"
         f"{position_summary}"

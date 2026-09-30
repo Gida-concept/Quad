@@ -1,11 +1,8 @@
 """Exchange adapter factory.
 
-Creates the correct ``ExchangeAdapter`` implementation based on the
-application configuration.
-
-When ``config.mcp.enabled`` is ``True``, the orchestrator calls MCP
-tools directly (no adapter wrapper needed).  This factory only creates
-``OkxFuturesAdapter`` for the non-MCP fallback path.
+Creates the Bybit USDT-perpetual adapter — the only supported exchange.
+Testnet (``https://api-testnet.bybit.com``) is the default safety
+environment; live is opt-in via ``exchange.testnet: false``.
 """
 
 from __future__ import annotations
@@ -20,55 +17,42 @@ from quad.exchange.base import ExchangeAdapter
 logger = structlog.get_logger(__name__)
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True  # testnet-safe default
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 def create_exchange(
     config: dict | None = None,
 ) -> ExchangeAdapter:
-    """Create an exchange adapter based on the provided configuration.
+    """Create the Bybit USDT-perpetual adapter from configuration.
 
-    OKX USDT perpetual (instType=SWAP) is the only supported exchange.
-    Testnet is the default safety environment and live is opt-in via
-    ``exchange.testnet: false``.
-
-    When MCP is enabled, the orchestrator calls MCP tools directly
-    instead of going through this adapter.  This factory is only
-    used for the non-MCP fallback path.
+    Credentials resolve from ``exchange.api_key`` / ``exchange.api_secret``
+    first, then ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET``.
     """
-    from quad.exchange.okx import OkxFuturesAdapter
+    from quad.exchange.bybit import BybitFuturesAdapter
 
     cfg = config or {}
 
     exchange_cfg = cfg.get("exchange", {})
-    api_key = exchange_cfg.get("api_key") or os.environ.get("OKX_API_KEY", "")
+    api_key = exchange_cfg.get("api_key") or os.environ.get("BYBIT_API_KEY", "")
     api_secret = exchange_cfg.get("api_secret") or os.environ.get(
-        "OKX_API_SECRET", ""
+        "BYBIT_API_SECRET", ""
     )
-    passphrase = exchange_cfg.get("passphrase") or os.environ.get(
-        "OKX_PASSPHRASE", ""
-    )
-    testnet = _coerce_bool(
-        exchange_cfg.get("testnet") or os.environ.get("OKX_TESTNET", "")
-    )
+    # Testnet-safe default: absent/empty resolves to True (never live by accident).
+    raw_testnet = exchange_cfg.get("testnet", None)
+    if raw_testnet is None:
+        raw_testnet = os.environ.get("BYBIT_TESTNET", None)
+    testnet = True if raw_testnet in (None, "") else _coerce_bool(raw_testnet)
 
-    logger.info("create_exchange", mode="okx", testnet=testnet)
+    logger.info("create_exchange", mode="bybit", testnet=testnet)
 
-    return OkxFuturesAdapter(
+    return BybitFuturesAdapter(
         api_key=api_key,
         api_secret=api_secret,
-        passphrase=passphrase,
         testnet=testnet,
         config=cfg,
     )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _coerce_bool(value: object) -> bool:
-    """Coerce a value to bool, handling string representations."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() in ("true", "1", "yes")
-    return bool(value)

@@ -57,7 +57,17 @@ class HistoricalDataProvider:
         """
         self._db = db_manager
         self._exchange = exchange_adapter
-        self._log = logger.bind(dsn=str(db_manager.dsn))
+        dsn_raw = str(db_manager.dsn)
+        # Mask password in DSN for logging (e.g., postgresql://user:***@host/db)
+        if "@" in dsn_raw:
+            dsn_masked = (
+                dsn_raw.split("@", 1)[0].split("://", 1)[0]
+                + "://***@"
+                + dsn_raw.split("@", 1)[1]
+            )
+        else:
+            dsn_masked = dsn_raw
+        self._log = logger.bind(dsn=dsn_masked)
 
     # ------------------------------------------------------------------
     # Candle data (stub)
@@ -68,6 +78,7 @@ class HistoricalDataProvider:
         symbol: str,
         start: datetime,
         end: datetime,
+        bar: str = "1H",
     ) -> list[Candle]:
         """Return OHLCV candle data for *symbol* over the date range.
 
@@ -88,16 +99,25 @@ class HistoricalDataProvider:
 
         from quad.types.market import Candle
 
-        # Exchange adapter path
-        if self._exchange is not None:
+        # Exchange adapter path.
+        # NOTE: `ExchangeAdapter` has no `get_klines`, so this path has never
+        # had data behind it — the AttributeError was swallowed and the method
+        # silently returned an empty list.  Probe for the method explicitly so
+        # the limitation is reported once, clearly, instead of masquerading as
+        # "no candles in range".
+        get_klines = getattr(self._exchange, "get_klines", None)
+        if self._exchange is not None and get_klines is not None:
             try:
-                raw = await self._exchange.get_klines(symbol, bar, limit=300)
+                raw = await get_klines(symbol, bar, limit=300)
                 candles: list[Candle] = []
                 for row in raw:
                     if not isinstance(row, (list, tuple)) or len(row) < 6:
                         continue
-                    ts_ms = int(row[0])
-                    candle_ts = datetime.fromtimestamp(ts_ms / 1000)
+                    # get_klines returns open time in seconds, but tolerate
+                    # millisecond stamps as well (heuristic by magnitude).
+                    ts_raw = float(row[0])
+                    ts_s = ts_raw / 1000.0 if ts_raw >= 1e12 else ts_raw
+                    candle_ts = datetime.fromtimestamp(ts_s)
                     if start <= candle_ts <= end:
                         candles.append(
                             Candle(
@@ -107,7 +127,7 @@ class HistoricalDataProvider:
                                 low=Decimal(str(row[3])),
                                 close=Decimal(str(row[4])),
                                 volume=Decimal(str(row[5])),
-                                timestamp=ts_ms,
+                                timestamp=int(ts_s),
                             )
                         )
                 self._log.debug(
@@ -125,7 +145,20 @@ class HistoricalDataProvider:
                     error=str(exc),
                 )
 
-        # Fallback: empty list
+        # Fallback: empty list.  Historical candles are not yet wired to the
+        # exchange adapter (no get_klines on ExchangeAdapter) and no
+        # historical store is configured, so callers get an empty series.
+        # This is why `quad backtest` reports "not implemented" rather than
+        # returning a misleading zero-result run.
+        self._log.warning(
+            "historical_candles_unavailable",
+            symbol=symbol,
+            bar=bar,
+            msg=(
+                "No historical data source available: the exchange adapter "
+                "exposes no get_klines() and no historical store is configured."
+            ),
+        )
         return []
 
     # ------------------------------------------------------------------

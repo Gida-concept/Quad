@@ -2,7 +2,7 @@
 
 Provides 3-layer configuration merge:
   1. config/config.yaml (single source of truth)
-  2. Environment variables (QUAD_* and OKX_*)
+  2. Environment variables (QUAD_* and BYBIT_*)
   3. Runtime overrides (via set())
 
 All layers merge with higher-numbered layer being highest priority.
@@ -46,11 +46,15 @@ ENV_VAR_MAP: dict[str, str] = {
     "QUAD_DRY_RUN": "_dry_run",
     "QUAD_DEFAULT_STRATEGY": "trading.default_strategy",
     "QUAD_DSN": "persistence.dsn",
+    # Documented in .env.example / docs/configuration.md as the override for
+    # persistence.dsn.  Without this entry it was silently ignored, and both
+    # api/app.py and the orchestrator read it directly instead — two sources
+    # of truth for the same setting.
+    "DATABASE_URL": "persistence.dsn",
     "QUAD_CONFIG_DIR": "config_dir",
-    "OKX_API_KEY": "exchange.api_key",
-    "OKX_API_SECRET": "exchange.api_secret",
-    "OKX_PASSPHRASE": "exchange.passphrase",
-    "OKX_TESTNET": "exchange.testnet",
+    "BYBIT_API_KEY": "exchange.api_key",
+    "BYBIT_API_SECRET": "exchange.api_secret",
+    "BYBIT_TESTNET": "exchange.testnet",
     "QUAD_AI_ENABLED": "ai.enabled",
     "QUAD_AI_MODEL": "ai.model",
     "QUAD_AI_TIMEOUT": "ai.timeout",
@@ -59,10 +63,7 @@ ENV_VAR_MAP: dict[str, str] = {
     "QUAD_TRADINGVIEW_WEBHOOK_ENABLED": "tradingview_webhook.enabled",
     "QUAD_TRADINGVIEW_WEBHOOK_PORT": "tradingview_webhook.port",
     "QUAD_TRADINGVIEW_WEBHOOK_SECRET": "tradingview_webhook.secret",
-    # MCP server configuration
-    "QUAD_MCP_ENABLED": "mcp.enabled",
-    "QUAD_MCP_PROFILE": "mcp.profile",
-    "QUAD_MCP_MODULES": "mcp.modules",
+    "QUAD_HEALTH_API_KEY": "monitoring.health_server.api_key",
 }
 
 # Default config directory search order
@@ -88,7 +89,7 @@ class ConfigManager:
     lower priority):
 
         1.  config/config.yaml (single source of truth)
-        2.  Environment variables (QUAD_* and OKX_*)
+        2.  Environment variables (QUAD_* and BYBIT_*)
         3.  Runtime overrides (via set())
 
     Args:
@@ -236,11 +237,11 @@ class ConfigManager:
         """Return the current trading mode.
 
         Returns:
-            ``"okx"``, retrieved from the ``_mode`` internal key
+            ``"bybit"``, retrieved from the ``_mode`` internal key
             (set via ``QUAD_MODE`` env var or runtime override).
-            Defaults to ``"okx"``.
+            Defaults to ``"bybit"``.
         """
-        return str(self.get("_mode", "okx"))
+        return str(self.get("_mode", "bybit"))
 
     def get_default_strategy(self) -> str:
         """Return the configured default strategy name.
@@ -376,11 +377,21 @@ class ConfigManager:
         merged = _deep_merge(merged, copy.deepcopy(self._runtime_overrides))
 
         # Apply Pydantic schema defaults to the merged config.
-        # This ensures all subsystem-required keys (exchange.okx,
+        # This ensures all subsystem-required keys (exchange.bybit,
         # monitoring.health_server, market_data.buffer_sizes, etc.) exist
         # with their default values even when the YAML is minimal.
         validated = QuadConfig.model_validate(merged)
-        self._config = validated.model_dump()
+        dumped = validated.model_dump(by_alias=False, exclude_unset=False)
+        # Re-expose the safety switches under the underscore keys the
+        # runtime reads, from the now-validated fields rather than from an
+        # unvalidated pass-through.
+        dumped["_mode"] = validated.mode
+        dumped["_dry_run"] = validated.dry_run
+        # Preserve remaining non-schema keys (e.g. config_dir).
+        for key, value in merged.items():
+            if key not in dumped:
+                dumped[key] = value
+        self._config = dumped
 
     def _fire_callbacks(self, key: str, old_value: Any, new_value: Any) -> None:
         """Invoke all registered ``on_change`` callbacks."""
@@ -476,7 +487,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
     """Scan environment variables and inject them into the config tree.
 
-    Scans for ``QUAD_*`` and ``OKX_*`` environment variables. Well-known
+    Scans for ``QUAD_*`` and ``BYBIT_*`` environment variables. Well-known
     variables (defined in ``ENV_VAR_MAP``) are mapped to their exact config
     keys. Unknown ``QUAD_*`` variables are mapped heuristically by stripping
     the ``QUAD_`` prefix, lowercasing, and splitting on ``_``.
@@ -490,7 +501,7 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
         The same ``config`` dict with env vars applied.
     """
     for env_name, env_value in os.environ.items():
-        if not env_value:
+        if env_value is None:
             continue
 
         config_key: str | None = None
@@ -498,7 +509,7 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
         # Check well-known mapping first
         if env_name in ENV_VAR_MAP:
             config_key = ENV_VAR_MAP[env_name]
-        elif env_name.startswith("QUAD_") or env_name.startswith("OKX_"):
+        elif env_name.startswith("QUAD_") or env_name.startswith("BYBIT_"):
             config_key = _env_to_config_key(env_name)
 
         if config_key is None:
@@ -523,10 +534,11 @@ def _env_to_config_key(env_name: str) -> str:
     Returns:
         Dot-notation config key.
     """
-    # Handle OKX_ prefix (maps to exchange.api_key / api_secret / testnet
-    # via ENV_VAR_MAP above; unknown OKX_* vars fall through heuristically).
-    if env_name.startswith("OKX_"):
-        key = env_name[len("OKX_") :]
+    # Handle BYBIT_ prefix (maps to exchange.api_key / api_secret /
+    # testnet via ENV_VAR_MAP above; unknown BYBIT_* vars fall through
+    # heuristically).
+    if env_name.startswith("BYBIT_"):
+        key = env_name[len("BYBIT_") :]
     elif env_name.startswith("QUAD_"):
         key = env_name[len("QUAD_") :]
     else:

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 # ============================================================================
 # Trading Section
@@ -46,11 +46,11 @@ class TradingConfig(BaseModel):
     )
     underlyings: list[str] = Field(
         default_factory=lambda: [
-            "BTC-USDT-SWAP",
-            "ETH-USDT-SWAP",
-            "SOL-USDT-SWAP",
-            "BNB-USDT-SWAP",
-            "DOGE-USDT-SWAP",
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "DOGEUSDT",
         ],
         description="List of underlying assets the bot monitors",
     )
@@ -97,26 +97,35 @@ class RateLimitConfig(BaseModel):
     )
 
 
-class OkxConfig(BaseModel):
-    """OKX-specific adapter configuration (USDT perpetual / instType=SWAP).
+class BybitConfig(BaseModel):
+    """Bybit-specific adapter configuration (USDT perpetual / category=linear).
 
-    Controls REST base URLs and adapter-tuning parameters.  Auth keys are
-    supplied via the ``OKX_API_KEY`` / ``OKX_API_SECRET`` / ``OKX_PASSPHRASE``
+    Controls REST/WebSocket base URLs and adapter-tuning parameters.  Auth
+    keys are supplied via the ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET``
     environment variables (or the top-level ``exchange.api_key`` /
-    ``exchange.api_secret`` / ``exchange.passphrase`` config).
+    ``exchange.api_secret`` config).
     """
 
     base_url: str = Field(
-        default="https://www.okx.com",
-        description="OKX V5 REST API base URL (live + demo use same domain)",
+        default="https://api.bybit.com",
+        description="Bybit V5 REST API base URL (live)",
+    )
+    testnet_base_url: str = Field(
+        default="https://api-testnet.bybit.com",
+        description="Bybit V5 REST API base URL (testnet)",
     )
     ws_public_url: str = Field(
-        default="wss://ws.okx.com:8443/ws/v5/public",
-        description="OKX V5 public WebSocket base URL (USDT perp)",
+        default="wss://stream.bybit.com/v5/public",
+        description="Bybit V5 public WebSocket base URL (linear/perp)",
     )
     ws_private_url: str = Field(
-        default="wss://ws.okx.com:8443/ws/v5/private",
-        description="OKX V5 private WebSocket base URL (account updates)",
+        default="wss://stream.bybit.com/v5/private",
+        description="Bybit V5 private WebSocket base URL (account updates)",
+    )
+    recv_window: int = Field(
+        default=5000,
+        ge=1000,
+        description="Default receive window for signed requests (ms)",
     )
     exchange_info_ttl_seconds: float = Field(
         default=60.0,
@@ -174,8 +183,8 @@ class ExchangeConfig(BaseModel):
     """Exchange connection and rate limit configuration."""
 
     name: str = Field(
-        default="okx",
-        description="Exchange adapter name",
+        default="bybit",
+        description="Exchange adapter name (bybit only)",
     )
     testnet: bool = Field(
         default=True,
@@ -189,17 +198,13 @@ class ExchangeConfig(BaseModel):
         default=None,
         description="API secret (typically set via env var)",
     )
-    passphrase: str | None = Field(
-        default=None,
-        description="API passphrase (OKX-specific, set via env var or config)",
-    )
     rate_limit: RateLimitConfig = Field(
         default_factory=RateLimitConfig,
         description="Rate limiting configuration",
     )
-    okx: OkxConfig = Field(
-        default_factory=OkxConfig,
-        description="OKX-specific connection parameters",
+    bybit: BybitConfig = Field(
+        default_factory=BybitConfig,
+        description="Bybit-specific connection parameters",
     )
     gateway: OrderGatewayConfig = Field(
         default_factory=OrderGatewayConfig,
@@ -214,7 +219,7 @@ class ExchangeConfig(BaseModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         """Validate exchange name is supported."""
-        allowed = {"okx"}
+        allowed = {"bybit"}
         if value.lower() not in allowed:
             raise ValueError(f"exchange name must be one of {allowed}, got '{value}'")
         return value.lower()
@@ -332,9 +337,7 @@ class PerPositionSLConfig(BaseModel):
     """Per-position stop-loss configuration."""
 
     enabled: bool = Field(default=True, description="Enable per-position stop-loss")
-    type: Literal["fixed", "trailing"] = Field(
-        default="fixed", description="Stop-loss type"
-    )
+    type: Literal["fixed"] = Field(default="fixed", description="Stop-loss type")
     capital_pct: float = Field(
         default=30.0,
         ge=0.0,
@@ -572,17 +575,17 @@ class MarketDataWebSocketConfig(BaseModel):
     """Market data WebSocket connection parameters."""
 
     url: str = Field(
-        default="wss://ws.okx.com:8443/ws/v5/public",
-        description="Market data WebSocket base URL (OKX V5 public)",
+        default="wss://stream.bybit.com/v5/public",
+        description="Market data WebSocket base URL (Bybit V5 public)",
     )
     backoff: MarketDataBackoffConfig = Field(
         default_factory=MarketDataBackoffConfig,
         description="WebSocket reconnection backoff parameters",
     )
     heartbeat_interval_seconds: float = Field(
-        default=30.0,
+        default=20.0,
         ge=5.0,
-        description="WebSocket heartbeat interval in seconds",
+        description="WebSocket heartbeat interval in seconds (Bybit expects ~20s)",
     )
 
 
@@ -819,9 +822,6 @@ class TrendFollowingParams(BaseModel):
     )
     atr_period: int = Field(
         default=14, ge=1, le=50, description="ATR calculation period"
-    )
-    atr_multiplier_stop: float = Field(
-        default=3.0, ge=0.5, le=10.0, description="ATR multiplier for trailing stop"
     )
     atr_default_pct: float = Field(
         default=0.02, ge=0.001, le=0.5, description="Default ATR as fraction of price"
@@ -1140,7 +1140,7 @@ class AiConfig(BaseModel):
         description="Maximum LLM API requests per day",
     )
     pairs: list[str] = Field(
-        default_factory=lambda: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "BNB-USDT-SWAP", "SOL-USDT-SWAP"],
+        default_factory=lambda: ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"],
         description="Trading pairs the AI module monitors",
     )
     timeframes: list[str] = Field(
@@ -1195,11 +1195,21 @@ class TradingViewWebhookConfig(BaseModel):
         default=9090,
         ge=1024,
         le=65535,
-        description="Port for the webhook HTTP server",
+        description=(
+            "INFORMATIONAL ONLY. The webhook is a route on the health server "
+            "(POST /webhook/tradingview), so the port it actually listens on is "
+            "monitoring.health_server.port (env QUAD_HEALTH_PORT). Nothing binds "
+            "this value; it is kept so existing configs validate, and is reported "
+            "in the webhook's startup log for correlation."
+        ),
     )
     secret: str = Field(
         default="",
-        description="Shared secret for webhook HMAC signature verification",
+        description=(
+            "Shared secret for webhook HMAC signature verification. Required "
+            "(>=16 chars) whenever the webhook is enabled — there is no "
+            "unauthenticated mode."
+        ),
     )
 
     @model_validator(mode="after")
@@ -1330,49 +1340,6 @@ class ExecutionConfig(BaseModel):
 
 
 # ============================================================================
-# MCP Section
-# ============================================================================
-
-
-class McpConfig(BaseModel):
-    """OKX MCP (Model Context Protocol) server configuration.
-
-    When enabled, the MCP server replaces direct python-okx SDK calls
-    for market data, TA indicators, order execution, and account queries.
-    The MCP server runs as a subprocess communicating over stdio.
-    """
-
-    enabled: bool = Field(
-        default=True,
-        description="Enable MCP server mode (default: true, replaces python-okx SDK adapter)",
-    )
-    command: str = Field(
-        default="okx-trade-mcp",
-        description="MCP server binary command or path",
-    )
-    modules: str = Field(
-        default="all",
-        description="MCP modules to enable (e.g. 'all', 'market,swap,account')",
-    )
-    profile: str = Field(
-        default="default",
-        description="OKX API profile name for the MCP server",
-    )
-    request_timeout: float = Field(
-        default=30.0,
-        ge=5.0,
-        le=120.0,
-        description="Timeout in seconds for individual MCP tool calls",
-    )
-    startup_timeout: float = Field(
-        default=15.0,
-        ge=5.0,
-        le=60.0,
-        description="Timeout in seconds for MCP server startup handshake",
-    )
-
-
-# ============================================================================
 # Backtesting Section
 # ============================================================================
 
@@ -1465,10 +1432,6 @@ class QuadConfig(BaseModel):
         default_factory=BacktestConfig,
         description="Backtest engine simulation parameters",
     )
-    mcp: McpConfig = Field(
-        default_factory=McpConfig,
-        description="OKX MCP server configuration (replaces python-okx SDK when enabled)",
-    )
     strategy: dict[str, Any] = Field(
         default_factory=lambda: {
             "trend_following": TrendFollowingParams().model_dump(),
@@ -1476,7 +1439,30 @@ class QuadConfig(BaseModel):
         description="Strategy-specific parameters",
     )
 
-    model_config = {"extra": "ignore"}
+    # Top-level safety switches.  These are the two keys the dry-run guard
+    # reads, so they are declared fields rather than unrecognised keys
+    # preserved by an ad-hoc copy loop: as extras they emitted
+    # "config_unknown_key_ignored" on every validation, so a typo in either
+    # safety switch looked like a harmless warning.
+    mode: str = Field(
+        default="bybit",
+        validation_alias=AliasChoices("_mode", "mode"),
+        description="Exchange mode: 'bybit' (testnet or live per exchange.testnet) "
+        "or 'dry_run' (forces testnet)",
+    )
+    dry_run: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("_dry_run", "dry_run"),
+        description="Block all real orders. The execution engine, the adapter "
+        "and the CLI all fail closed while this is true.",
+    )
+    error_sink: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Persistent error_logs writer settings "
+        "(enabled, min_level, batch_size, flush_interval_seconds, max_queue)",
+    )
+
+    model_config = {"extra": "ignore", "populate_by_name": True}
 
 
 # ============================================================================
@@ -1506,6 +1492,7 @@ def validate_config(
     for key in config_dict:
         if key not in known_fields:
             import structlog
+
             _log = structlog.get_logger(__name__)
             _log.warning(
                 "config_unknown_key_ignored",

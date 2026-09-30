@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from quad.exchange.base import ExchangeAdapter
-from quad.exchange.okx import OkxFuturesAdapter
+from quad.exchange.bybit import BybitFuturesAdapter
 from quad.orchestrator.orchestrator import QuadOrchestrator
 from quad.risk.sizing import PositionSizer
 from quad.types.risk import Action
@@ -50,7 +50,9 @@ def _orch(**overrides) -> QuadOrchestrator:
     return orch
 
 
-def _open_position(symbol: str = "BTCUSDT", side: PositionSide = PositionSide.LONG) -> Position:
+def _open_position(
+    symbol: str = "BTCUSDT", side: PositionSide = PositionSide.LONG
+) -> Position:
     return Position(
         symbol=symbol,
         side=side,
@@ -73,9 +75,9 @@ def test_base_adapter_signatures_accept_symbol():
     assert "symbol" in sig.parameters
     sig = inspect.signature(ExchangeAdapter.get_order_status)
     assert "symbol" in sig.parameters
-    sig = inspect.signature(OkxFuturesAdapter.cancel_order)
+    sig = inspect.signature(BybitFuturesAdapter.cancel_order)
     assert "symbol" in sig.parameters
-    sig = inspect.signature(OkxFuturesAdapter.get_order_status)
+    sig = inspect.signature(BybitFuturesAdapter.get_order_status)
     assert "symbol" in sig.parameters
 
 
@@ -83,7 +85,7 @@ def test_base_adapter_signatures_accept_symbol():
 async def test_gateway_passes_symbol_to_get_order_status():
     from quad.execution.gateway import OrderGateway
 
-    exchange = AsyncMock(spec=OkxFuturesAdapter)
+    exchange = AsyncMock(spec=BybitFuturesAdapter)
     exchange.get_order_status = AsyncMock(
         return_value=Order(id=42, symbol="BTCUSDT", status="FILLED")
     )
@@ -100,9 +102,7 @@ async def test_gateway_passes_symbol_to_get_order_status():
             }
         },
     )
-    gateway._active_orders["c1"] = Order(
-        id=42, symbol="BTCUSDT", status="NEW"
-    )
+    gateway._active_orders["c1"] = Order(id=42, symbol="BTCUSDT", status="NEW")
 
     order = await gateway.get_status("c1")
 
@@ -114,7 +114,7 @@ async def test_gateway_passes_symbol_to_get_order_status():
 async def test_gateway_passes_symbol_to_cancel():
     from quad.execution.gateway import OrderGateway
 
-    exchange = AsyncMock(spec=OkxFuturesAdapter)
+    exchange = AsyncMock(spec=BybitFuturesAdapter)
     exchange.cancel_order = AsyncMock(return_value=True)
     gateway = OrderGateway(
         exchange,
@@ -129,9 +129,7 @@ async def test_gateway_passes_symbol_to_cancel():
             }
         },
     )
-    gateway._active_orders["c1"] = Order(
-        id=42, symbol="BTCUSDT", status="NEW"
-    )
+    gateway._active_orders["c1"] = Order(id=42, symbol="BTCUSDT", status="NEW")
 
     result = await gateway.cancel("c1")
 
@@ -143,7 +141,7 @@ async def test_gateway_passes_symbol_to_cancel():
 async def test_reconciler_passes_symbol():
     from quad.execution.reconciler import FillReconciler
 
-    exchange = AsyncMock(spec=OkxFuturesAdapter)
+    exchange = AsyncMock(spec=BybitFuturesAdapter)
     exchange.get_order_status = AsyncMock(
         return_value=Order(id=42, symbol="BTCUSDT", status="FILLED")
     )
@@ -208,8 +206,6 @@ async def test_enter_blocked_when_close_not_flat():
         "reasoning": "test",
         "confidence": 0.9,
     }
-    from quad.ai.validator import canonical_direction, derive_side
-    from quad.types.domain import PositionSide as PS
 
     result = await orch._execute_ai_action(
         decision, StrategyContext(config=orch._config_dict)
@@ -438,7 +434,7 @@ async def test_engine_persists_trade_after_fill():
             "execution": {"default_order_type": "MARKET"},
         }
         engine = ExecutionEngine(
-            exchange_adapter=AsyncMock(spec=OkxFuturesAdapter),
+            exchange_adapter=AsyncMock(spec=BybitFuturesAdapter),
             risk_manager=MagicMock(),
             db_manager=db,
             config=gateway_cfg,
@@ -538,7 +534,7 @@ def test_sizer_preserves_serial_close_quantity():
 
     context = StrategyContext(
         config={},
-        account=Account(id="x", exchange="okx", total_usdt=Decimal("10000")),
+        account=Account(id="x", exchange="bybit", total_usdt=Decimal("10000")),
     )
     close = Action(
         type="EXIT",
@@ -612,7 +608,6 @@ async def test_execute_ai_action_returns_false_on_rejected_status():
 async def test_execute_ai_action_updates_executed_flag_on_fill():
     """Bug 2: on a FILLED order the decision row must be marked executed=1."""
     from quad.types.domain import OrderResult
-    from quad.types.risk import Action
 
     orch = _orch()
     # Wire a mock DB manager with a DecisionRepository that records update() calls.
@@ -630,7 +625,7 @@ async def test_execute_ai_action_updates_executed_flag_on_fill():
 
     import quad.persistence.repositories as repos_mod
 
-    orig_repo = getattr(repos_mod, "DecisionRepository", None)
+    assert hasattr(repos_mod, "DecisionRepository")
     orch._exchange_adapter = AsyncMock()
     orch._exchange_adapter.get_positions = AsyncMock(return_value=[])
     orch._close_all_positions = AsyncMock(return_value=True)
@@ -666,10 +661,6 @@ async def test_execute_ai_action_updates_executed_flag_on_fill():
     }
 
     # Monkeypatch DecisionRepository inside the method's local import.
-    import src.quad.orchestrator.orchestrator as orch_mod_mod
-
-    orig = orch_mod_mod.DecisionRepository if hasattr(orch_mod_mod, "DecisionRepository") else None
-
     # The method does `from quad.persistence.repositories import DecisionRepository`
     # at call time, so patch the module attribute.
     import sys
@@ -792,7 +783,9 @@ async def test_build_exit_pnl_prefers_exchange_order_realized_pnl():
     assert pnl is not None
     assert "50.00" in pnl
     # Must have called the order-level PnL endpoint, not get_user_trades
-    orch._exchange_adapter.get_order_realized_pnl.assert_awaited_once_with(42, "BTCUSDT")
+    orch._exchange_adapter.get_order_realized_pnl.assert_awaited_once_with(
+        42, "BTCUSDT"
+    )
     orch._exchange_adapter.get_mark_price.assert_not_awaited()
 
 

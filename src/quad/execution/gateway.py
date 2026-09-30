@@ -17,6 +17,7 @@ from typing import Any
 
 import structlog
 
+from quad.common.retry import exponential_backoff, retry_async
 from quad.exchange.base import ExchangeAdapter
 from quad.types.domain import Order, OrderRequest, OrderResult
 
@@ -46,6 +47,15 @@ class OrderTimeoutError(Exception):
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+_TERMINAL_STATUSES = frozenset(
+    {"FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"}
+)
+"""Order statuses that end active tracking (both -LL- and -L- spellings)."""
+
+#: First retry delay for a transient order-submission failure, in seconds.
+#: The schedule doubles from here (1s, 2s, 4s, ...) up to a 30s cap.
+_ORDER_RETRY_BASE_S = 1.0
 
 # (now configured via gateway config section)
 
@@ -107,6 +117,14 @@ class OrderGateway:
 
     @property
     def _backoff_base(self) -> float:
+        """Configured base backoff (``gateway.backoff_base_seconds``).
+
+        NOTE: this is currently *not* used by the submit retry schedule, which
+        is fixed at ``_ORDER_RETRY_BASE_S`` (1s/2s/4s..., capped at 30s) to
+        preserve the long-standing, test-pinned timing for live order
+        submission.  Wiring the config through is a deliberate behaviour
+        change, not a refactor, so it has been left for an explicit decision.
+        """
         return float(self._gateway_config["backoff_base_seconds"])
 
     # ------------------------------------------------------------------
@@ -137,7 +155,9 @@ class OrderGateway:
             confirmed state within the timeout window (default 30 s).
         """
         # 1. Idempotency key
-        client_order_id = order_request.client_order_id or str(uuid.uuid4())
+        # Bybit orderLinkId allows up to 36 characters; the hex UUID
+        # (32 chars, no hyphens) is unique and safely compliant.
+        client_order_id = order_request.client_order_id or uuid.uuid4().hex
         request = OrderRequest(
             symbol=order_request.symbol,
             side=order_request.side,
@@ -170,48 +190,69 @@ class OrderGateway:
         )
 
         # 3. Submit with retry on transient failures
-        last_error: Exception | None = None
-        result: OrderResult | None = None
-
-        for attempt in range(1, self._max_retries + 1):
+        async def _submit(attempt: int) -> OrderResult:
             try:
-                result = await self._exchange.place_order(request)
-                last_error = None
-                break
-            except (TimeoutError, ConnectionError) as exc:
-                last_error = exc
-                self._log.warning(
-                    "order_submit_retry",
-                    attempt=attempt,
-                    error=str(exc),
-                    client_order_id=client_order_id,
-                )
-                if attempt < self._max_retries:
-                    await asyncio.sleep(
-                        self._backoff_base ** (attempt - 1)
-                    )  # configurable backoff
+                submitted = await self._exchange.place_order(request)
+            except (TimeoutError, ConnectionError):
+                # Transient -- let retry_async decide whether to try again.
+                raise
             except Exception as exc:
                 # Non-transient error -- reject immediately
                 self._pending_confirmations.pop(client_order_id, None)
-                raise OrderRejectedError(str(exc), request)
+                raise OrderRejectedError(str(exc), request) from exc
+            # ACK received. Only a terminal REST result (FILLED/...) is
+            # itself the confirmation signal. A non-terminal result
+            # (NEW/...) must await WS fill confirmation below, so the
+            # timeout can genuinely fire instead of being pre-satisfied.
+            if submitted.status in _TERMINAL_STATUSES:
+                event.set()
+            return submitted
 
-        if last_error is not None:
-            self._pending_confirmations.pop(client_order_id, None)
-            raise OrderRejectedError(f"All retries exhausted: {last_error}", request)
+        def _log_retry(attempt: int, exc: Exception, delay: float) -> None:
+            self._log.warning(
+                "order_submit_retry",
+                attempt=attempt,
+                error=str(exc),
+                client_order_id=client_order_id,
+                delay_s=round(delay, 2),
+            )
 
-        # 4. Wait for confirmation (event is set immediately on REST success;
-        #    in a WebSocket-based system a separate handler would set it)
-        event.set()
         try:
-            await asyncio.wait_for(event.wait(), timeout=self._confirmation_timeout)
-        except asyncio.TimeoutError:
-            raise OrderTimeoutError(client_order_id, int(self._confirmation_timeout))
-        finally:
+            result = await retry_async(
+                _submit,
+                attempts=self._max_retries,
+                is_retryable=lambda exc: isinstance(
+                    exc, (TimeoutError, ConnectionError)
+                ),
+                # Documented 1s/2s/4s... backoff, capped at 30s.  See
+                # ``_backoff_base`` for why the configured base is not used.
+                delay_for=lambda attempt, _exc: exponential_backoff(
+                    attempt, _ORDER_RETRY_BASE_S, cap=30.0
+                ),
+                on_retry=_log_retry,
+            )
+        except (TimeoutError, ConnectionError) as exc:
+            self._pending_confirmations.pop(client_order_id, None)
+            raise OrderRejectedError(f"All retries exhausted: {exc}", request) from exc
+
+        # 4. Wait for confirmation only when the result is NOT already
+        #    terminal (FILLED/REJECTED/CANCELLED/EXPIRED). A terminal REST
+        #    ACK needs no further WS fill confirmation. Non-terminal
+        #    results (e.g. NEW/PARTIALLY_FILLED) still await WS confirmation
+        #    with a timeout.
+        if result.status not in _TERMINAL_STATUSES:
+            try:
+                await asyncio.wait_for(event.wait(), timeout=self._confirmation_timeout)
+            except asyncio.TimeoutError:
+                raise OrderTimeoutError(
+                    client_order_id, int(self._confirmation_timeout)
+                )
+            finally:
+                self._pending_confirmations.pop(client_order_id, None)
+        else:
             self._pending_confirmations.pop(client_order_id, None)
 
         # 5. Track in active orders
-        if result is None:
-            raise RuntimeError("order submission produced no result")
         order = Order(
             id=result.order_id,
             client_order_id=client_order_id,
@@ -226,6 +267,10 @@ class OrderGateway:
             updated_at=int(time.time() * 1000),
         )
         self._active_orders[client_order_id] = order
+        if order.status in _TERMINAL_STATUSES:
+            # Already terminal (e.g. immediately FILLED): don't leak it in
+            # active tracking forever; resolve to completed right away.
+            self._move_to_completed(client_order_id)
 
         self._log.info(
             "order_submitted",
@@ -300,12 +345,16 @@ class OrderGateway:
             # Freshen from exchange if we have an exchange order ID
             if order.id is not None:
                 try:
-                    ex_order = await self._exchange.get_order_status(
+                    refreshed = await self._exchange.get_order_status(
                         order.id, order.symbol
                     )
-                    order.status = ex_order.status
-                    order.filled_qty = ex_order.filled_qty
-                    order.updated_at = int(time.time() * 1000)
+                    # get_order_status returns None for an unknown id (the
+                    # adapter raises only on transport errors), so reading
+                    # .status off it unguarded raised AttributeError.
+                    if refreshed is not None:
+                        order.status = refreshed.status
+                        order.filled_qty = refreshed.filled_qty
+                        order.updated_at = int(time.time() * 1000)
                 except Exception:  # noqa: S110  Return what we have in memory
                     pass
             return order
@@ -337,9 +386,11 @@ class OrderGateway:
             self._log.warning("refresh_state_failed", error=str(exc))
             return
 
-        # Build lookup by exchange order ID
-        exchange_ids: set[int] = set()
-        exchange_map: dict[int, Order] = {}
+        # Build lookup by exchange order ID.  Ids are `int | str` — Bybit
+        # returns orderLinkId strings — so the containers must be keyed
+        # accordingly (annotating them as int was wrong, not just untidy).
+        exchange_ids: set[int | str] = set()
+        exchange_map: dict[int | str, Order] = {}
         for o in open_orders:
             if o.id is not None:
                 exchange_ids.add(o.id)
@@ -349,8 +400,22 @@ class OrderGateway:
         to_remove: list[str] = []
         for client_id, local_order in self._active_orders.items():
             if local_order.id is None:
+                if local_order.status in _TERMINAL_STATUSES:
+                    # Local-terminal order with no exchange ID: nothing left
+                    # to track; resolve it instead of holding it forever.
+                    to_remove.append(client_id)
                 continue
 
+            if local_order.status in _TERMINAL_STATUSES:
+                # Already terminal locally: evict regardless of exchange view.
+                to_remove.append(client_id)
+                continue
+
+            # Declared Optional because the else-branch below rebinds it to a
+            # ``get_order_status`` result, which is ``None`` when the order is
+            # absent on the exchange.  The declaration is bare so each branch
+            # narrows it to what it actually assigned.
+            ex_order: Order | None
             if local_order.id in exchange_ids:
                 # Still open -- update from exchange
                 ex_order = exchange_map[local_order.id]
@@ -358,15 +423,12 @@ class OrderGateway:
                 local_order.filled_qty = ex_order.filled_qty
                 local_order.price = ex_order.price
                 local_order.updated_at = int(time.time() * 1000)
-            elif local_order.status in ("NEW", "PARTIALLY_FILLED"):
+            else:
                 # No longer in open orders -- query individually
                 try:
                     ex_order = await self._exchange.get_order_status(
                         local_order.id, local_order.symbol
                     )
-                    local_order.status = ex_order.status
-                    local_order.filled_qty = ex_order.filled_qty
-                    local_order.updated_at = int(time.time() * 1000)
                 except Exception as exc:
                     if self._exchange.is_order_not_found(exc):
                         # The exchange no longer knows this order (cancelled
@@ -391,13 +453,22 @@ class OrderGateway:
                         )
                     continue
 
+                if ex_order is None:
+                    self._log.warning(
+                        "refresh_state_order_none",
+                        client_order_id=client_id,
+                        exchange_order_id=local_order.id,
+                    )
+                    local_order.status = "CANCELLED"
+                    to_remove.append(client_id)
+                    continue
+
+                local_order.status = ex_order.status
+                local_order.filled_qty = ex_order.filled_qty
+                local_order.updated_at = int(time.time() * 1000)
+
                 # Terminal status -> move to completed
-                if local_order.status in (
-                    "FILLED",
-                    "CANCELLED",
-                    "REJECTED",
-                    "EXPIRED",
-                ):
+                if local_order.status in _TERMINAL_STATUSES:
                     to_remove.append(client_id)
 
         for client_id in to_remove:
@@ -412,6 +483,22 @@ class OrderGateway:
     def get_active_order_count(self) -> int:
         """Return the number of tracked active (non-terminal) orders."""
         return len(self._active_orders)
+
+    async def get_symbol_filters(self, symbol: str) -> dict[str, Any]:
+        """Retrieve exchange LOT_SIZE / MIN_NOTIONAL filters for a symbol.
+
+        Delegates to the underlying exchange adapter.  Returns an empty
+        dict on failure so callers can degrade gracefully.
+        """
+        try:
+            return await self._exchange.get_symbol_filters(symbol)
+        except Exception as exc:
+            self._log.debug(
+                "get_symbol_filters_failed",
+                symbol=symbol,
+                error=str(exc),
+            )
+            return {}
 
     def get_active_orders(self) -> list[Order]:
         """Return all currently tracked active orders."""

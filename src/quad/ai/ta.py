@@ -462,11 +462,13 @@ def _detect_candlestick_patterns(
         patterns["error"] = "insufficient_data"
         return patterns
 
-    o, h, l, c = opens[-1], highs[-1], lows[-1], closes[-1]
+    # OHLC of the most recent candle.  Named in full rather than o/h/l/c
+    # because `l` is ambiguous (E741) next to a leading-`1` literal.
+    o, h, low, c = opens[-1], highs[-1], lows[-1], closes[-1]
     body = abs(c - o)
     upper_wick = h - max(o, c)
-    lower_wick = min(o, c) - l
-    total_range = h - l
+    lower_wick = min(o, c) - low
+    total_range = h - low
 
     if total_range == 0:
         return {
@@ -708,10 +710,9 @@ def generate_local_signal(
             score -= 1.0
 
     # ADX strength amplifier
-    if adx is not None and adx > 20:
+    if adx is not None and adx > 25:
         adx_amp = min(adx / 50, 1.0)
-        if adx > 25:
-            score *= (1.0 + adx_amp)
+        score *= 1.0 + adx_amp
 
     # RSI signal
     if rsi is not None:
@@ -795,5 +796,83 @@ def generate_local_signal(
     }
 
 
+def generate_scalp_signal(
+    indicators: dict[str, Any],
+    symbol: str,
+) -> dict[str, Any]:
+    """Synthesize a fast mean-reversion scalp signal (1m/5m timeframes).
 
+    Unlike :func:`generate_local_signal` (trend-biased: EMA alignment, ADX),
+    this scores snap-back setups: RSI/stochastic extremes, Bollinger-band
+    tags, amplified by volume spikes. Same output contract
+    (``local_direction`` in LONG/SHORT/NEUTRAL + ``local_strength`` 0..1)
+    so the judge gate, batch prompt, and validator work unchanged.
 
+    Score convention: positive = LONG (oversold bounce), negative = SHORT
+    (overbought fade). |score| maps to strength; below 0.35 -> NEUTRAL so
+    noise never reaches the (paid) AI judge.
+    """
+    rsi = indicators.get("momentum_rsi_14")
+    stoch_k = indicators.get("momentum_stoch_k")
+    stoch_d = indicators.get("momentum_stoch_d")
+    bb_position = indicators.get("volatility_bb_position")
+    vol_spike = bool(indicators.get("volume_spike", False))
+    vol_ratio = indicators.get("volume_sma_20_ratio")
+    atr_pct = indicators.get("volatility_atr_pct")
+    price_current = indicators.get("price_current")
+    price_change_pct = indicators.get("price_change_pct")
+
+    score = 0.0
+
+    # RSI extremes: oversold -> bounce LONG, overbought -> fade SHORT.
+    if rsi is not None:
+        if rsi < 30:
+            score += min((30 - rsi) / 15, 1.0)
+        elif rsi > 70:
+            score -= min((rsi - 70) / 15, 1.0)
+
+    # Stochastic cross at extremes confirms timing.
+    if stoch_k is not None and stoch_d is not None:
+        if stoch_k < 20 and stoch_k > stoch_d:
+            score += 0.5
+        elif stoch_k > 80 and stoch_k < stoch_d:
+            score -= 0.5
+
+    # Bollinger tag = stretched rubber band.
+    if bb_position is not None:
+        if bb_position <= 0.05:
+            score += 0.4
+        elif bb_position >= 0.95:
+            score -= 0.4
+
+    # Volume spike = institutional footprint; amplify, never create.
+    if vol_spike and score != 0.0:
+        score *= 1.3
+
+    # Dead-low volatility: spreads eat the edge; dampen.
+    if atr_pct is not None and atr_pct < 0.05:
+        score *= 0.5
+
+    strength = min(abs(score) / 1.5, 1.0)
+    if strength < 0.35:
+        local_direction = "NEUTRAL"
+    elif score > 0:
+        local_direction = "LONG"
+    else:
+        local_direction = "SHORT"
+
+    return {
+        "symbol": symbol,
+        "price": price_current,
+        "price_change_pct": price_change_pct,
+        "rsi": rsi,
+        "stoch_k": stoch_k,
+        "stoch_d": stoch_d,
+        "bb_position": bb_position,
+        "atr_pct": atr_pct,
+        "volume_ratio": vol_ratio,
+        "volume_spike": vol_spike,
+        "setup": "scalp_reversion",
+        "local_direction": local_direction,
+        "local_strength": round(strength, 3),
+    }

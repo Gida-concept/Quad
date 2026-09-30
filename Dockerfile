@@ -2,7 +2,7 @@
 # Dockerfile — Quad USD-M Futures Trading Bot
 #
 # Multi-stage build for a lightweight Python runtime.
-# Includes OKX MCP server (Node.js) for data/TA/order execution.
+# Bybit V5 is accessed via the pybit SDK (see requirements.txt).
 # Proxy support is handled via environment variables (HTTP_PROXY/HTTPS_PROXY)
 # configured in docker-compose.yml — no VPN or NET_ADMIN capability required.
 # =============================================================================
@@ -29,33 +29,19 @@ FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
-# Install runtime deps: curl for health checks, Node.js for MCP server
+# Install runtime deps: curl for health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
-    gnupg \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-
-# Install OKX MCP server globally
-RUN npm install -g @okx_ai/okx-trade-mcp \
-    && npm cache clean --force
 
 # Copy installed Python packages from builder stage
 COPY --from=builder /root/.local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /root/.local/bin /usr/local/bin
 
-# Verify MCP server is available
-RUN okx-trade-mcp --help > /dev/null 2>&1 || echo "MCP server installed"
-
 # Environment
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    NODE_ENV=production
+    PYTHONDONTWRITEBYTECODE=1
 
 # Copy application source and configuration
 COPY src/ ./src/

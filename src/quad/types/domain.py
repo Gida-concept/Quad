@@ -107,7 +107,7 @@ class Account:
     """Account identifier."""
 
     exchange: str
-    """Exchange name, e.g. 'okx'."""
+    """Exchange name, e.g. 'bybit'."""
 
     balances: dict[str, Balance] = field(default_factory=dict)
     """Mapping of asset symbol to Balance."""
@@ -191,7 +191,7 @@ class Order:
     """Represents an order placed on an exchange."""
 
     id: int | str | None = None
-    """Exchange order ID (OKX uses clOrdId strings). None if not yet assigned."""
+    """Exchange order ID (Bybit uses orderLinkId strings). None if not yet assigned."""
 
     client_order_id: str = ""
     """Client-assigned order identifier."""
@@ -272,13 +272,19 @@ class OrderRequest:
     position_side: str = ""
     price_protect: bool = False
 
+    take_profit_price: Decimal | None = None
+    """Attached take-profit trigger price (Bybit `takeProfit` on create)."""
+
+    stop_loss_price: Decimal | None = None
+    """Attached stop-loss trigger price (Bybit `stopLoss` on create)."""
+
 
 @dataclass
 class OrderResult:
     """Result returned after submitting or querying an order."""
 
     order_id: int | str
-    """Exchange-assigned order ID (OKX uses ordId strings)."""
+    """Exchange-assigned order ID (Bybit uses orderId strings)."""
 
     client_order_id: str = ""
     """Client-assigned order identifier."""
@@ -319,7 +325,7 @@ class Trade:
     """Position this trade belongs to."""
 
     order_id: int | str | None = None
-    """Order this trade originated from (OKX uses ordId strings)."""
+    """Order this trade originated from (Bybit uses orderId strings)."""
 
     symbol: str = ""
     """Trading pair symbol."""

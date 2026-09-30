@@ -50,8 +50,10 @@ def parse_alert(body: str | bytes, content_type: str = "") -> dict[str, Any]:
     Raises
     ------
     ValueError
-        If the body cannot be parsed as JSON.
+        If the body cannot be parsed as JSON, or exceeds 65536 bytes.
     """
+    if len(body) > 65536:
+        raise ValueError("webhook body too large")
     raw = body.decode("utf-8") if isinstance(body, bytes) else body
     result: dict[str, Any] = {"raw": raw}
 

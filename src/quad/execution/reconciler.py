@@ -73,7 +73,7 @@ class FillReconciler:
 
     @property
     def _max_discrepancy_history(self) -> int:
-        return int(self._reconciler_config["max_discrepancy_history"])
+        return int(self._reconciler_config.get("max_discrepancy_history", 100))
 
     @property
     def _stale_order_hours(self) -> int:
@@ -114,14 +114,19 @@ class FillReconciler:
                 continue
 
             try:
-                ex_order = await self._exchange.get_order_status(
-                    order.id, order.symbol
-                )
+                ex_order = await self._exchange.get_order_status(order.id, order.symbol)
             except Exception as exc:
                 self._log.warning(
                     "reconcile_query_failed",
                     exchange_order_id=order.id,
                     error=str(exc),
+                )
+                continue
+
+            if ex_order is None:
+                self._log.warning(
+                    "reconcile_order_none",
+                    exchange_order_id=order.id,
                 )
                 continue
 
@@ -153,6 +158,17 @@ class FillReconciler:
                 ):
                     disc = self._record_discrepancy(
                         "MISSED_REJECTION",
+                        order,
+                        ex_order.status,
+                        now_ms,
+                    )
+                    discrepancies.append(disc)
+                elif ex_order.status in ("CANCELLED", "CANCELED") and order.status in (
+                    "NEW",
+                    "PARTIALLY_FILLED",
+                ):
+                    disc = self._record_discrepancy(
+                        "MISSED_CANCELLATION",
                         order,
                         ex_order.status,
                         now_ms,
@@ -234,7 +250,7 @@ class FillReconciler:
         """Detect fills that exist on the exchange but are missing locally.
 
         Uses a composite deduplication key (order_id, timestamp, quantity,
-        price) instead of trade.id, because some exchanges (e.g. OKX) return
+        price) instead of trade.id, because Bybit returns
         id=0 for all fills, making id-based dedup broken.
 
         Parameters
@@ -257,6 +273,8 @@ class FillReconciler:
                 int(t.timestamp),
                 str(t.quantity),
                 str(t.price),
+                str(t.side),
+                str(t.symbol),
             )
 
         local_keys: set[tuple] = {_dedup_key(t) for t in local_trades}

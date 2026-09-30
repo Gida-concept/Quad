@@ -11,6 +11,9 @@ and correlation checks.
 
 from __future__ import annotations
 
+import json
+import os
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -126,9 +129,7 @@ class GatePipeline:
         # Fallback: raw quantity (safe underestimate, prevents false passes)
         return abs(action.quantity)
 
-    def _resolve_mark_price(
-        self, symbol: str, context: StrategyContext
-    ) -> Decimal:
+    def _resolve_mark_price(self, symbol: str, context: StrategyContext) -> Decimal:
         """Look up the current mark price for *symbol* from context data."""
         # 1. Try futures contracts map (most current)
         contracts = context.futures_contracts or {}
@@ -211,8 +212,27 @@ class GatePipeline:
         if gate_name not in ALL_GATES:
             msg = f"Unknown gate: {gate_name}. Valid gates: {ALL_GATES}"
             raise ValueError(msg)
+        old_state = self._enabled[gate_name]
         self._enabled[gate_name] = enabled
-        self._log.info("gate_toggled", gate=gate_name, enabled=enabled)
+        self._log.warning(
+            "risk_gate_toggled",
+            gate=gate_name,
+            old_state=old_state,
+            new_state=enabled,
+        )
+        try:
+            audit_path = os.path.join("data", "risk_gate_changes.jsonl")
+            os.makedirs(os.path.dirname(audit_path) or ".", exist_ok=True)
+            record = {
+                "ts": time.time(),
+                "gate": gate_name,
+                "old_state": old_state,
+                "new_state": enabled,
+            }
+            with open(audit_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Internal: individual gate implementations
@@ -259,6 +279,12 @@ class GatePipeline:
         max_risk_pct = Decimal(str(self._cfg["max_portfolio_risk_pct"]))
         portfolio_value = context.account.total_usdt if context.account else Decimal(0)
         if portfolio_value <= Decimal(0):
+            if _is_entry(action.type):
+                return RiskResult(
+                    passed=False,
+                    gate=PORTFOLIO_RISK_GATE,
+                    reason="No portfolio value — cannot open positions with zero balance",
+                )
             return RiskResult(
                 passed=True,
                 gate=PORTFOLIO_RISK_GATE,
@@ -438,9 +464,9 @@ class GatePipeline:
         fr_entry = context.funding_rates.get(action.symbol)
         if fr_entry is None:
             return RiskResult(
-                passed=True,
+                passed=False,
                 gate=FUNDING_RATE_COST_GATE,
-                reason=f"No funding rate data for {action.symbol}",
+                reason=f"Missing funding rate data for {action.symbol}",
             )
 
         funding_rate = abs(Decimal(str(fr_entry.funding_rate)))
@@ -632,7 +658,9 @@ class GatePipeline:
         # Add proposed position for entry actions
         if _is_entry(action.type) and action.quantity > Decimal(0) and action.symbol:
             quote = action.symbol[-4:] if len(action.symbol) >= 4 else action.symbol
-            notional_by_quote[quote] = notional_by_quote.get(quote, Decimal(0)) + self._proposed_notional(action, context)
+            notional_by_quote[quote] = notional_by_quote.get(
+                quote, Decimal(0)
+            ) + self._proposed_notional(action, context)
 
         threshold_value = threshold_pct / Decimal(100) * portfolio_value
         violations: list[dict[str, Any]] = []

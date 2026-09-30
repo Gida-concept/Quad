@@ -1,5 +1,5 @@
-# Quad — Minimal Configuration for BTCUSDT USDT-Perpetual Bot (OKX)
-_mode: "okx"
+# Quad — Minimal Configuration for BTCUSDT USDT-Perpetual Bot (Bybit linear)
+_mode: "bybit"
 _dry_run: true
 
 trading:
@@ -9,16 +9,16 @@ trading:
   default_strategy: "trend_following"
   ai_cycle_interval: 3600
   underlyings:
-    - "BTC-USDT-SWAP"
-    - "ETH-USDT-SWAP"
-    - "SOL-USDT-SWAP"
-    - "BNB-USDT-SWAP"
-  leverage: 50
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "SOLUSDT"
+    - "BNBUSDT"
+  leverage: 10
   margin_mode: "isolated"
   position_mode: "one_way"
 
 exchange:
-  name: "okx"
+  name: "bybit"
   testnet: true
 
 risk:
@@ -55,10 +55,10 @@ ai:
   enabled: true
   model: "groq/compound-mini"
   pairs:
-    - "BTC-USDT-SWAP"
-    - "ETH-USDT-SWAP"
-    - "SOL-USDT-SWAP"
-    - "BNB-USDT-SWAP"
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "SOLUSDT"
+    - "BNBUSDT"
   timeframes:
     - "1h"
   candle_count: 150
@@ -103,5 +103,6 @@ retrain:
   enabled: true
   interval_days: 7
 
-# OKX API configuration
-# Set exchange.api_key, exchange.api_secret, exchange.passphrase via env vars or config.
+# Bybit API configuration (USDT perpetual / category=linear)
+# Set exchange.api_key / exchange.api_secret via BYBIT_API_KEY / BYBIT_API_SECRET.
+# Testnet: https://api-testnet.bybit.com (default). Live only with testnet:false + _dry_run:false.

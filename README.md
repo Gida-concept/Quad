@@ -1,6 +1,6 @@
 # Quad
 
-_USDT Perpetual Futures Trading Bot for OKX_
+_USDT Perpetual Futures Trading Bot for Bybit_
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
@@ -12,12 +12,12 @@ _USDT Perpetual Futures Trading Bot for OKX_
 
 ## Executive Summary
 
-Quad is a production-grade, open-source USDT perpetual futures trading bot purpose-built for OKX (USDT-M perpetual / instType=SWAP). It is a **single-process Python 3.10+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, futures strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
+Quad is a production-grade, open-source USDT perpetual futures trading bot purpose-built for Bybit (USDT perpetual / category=linear). It is a **single-process Python 3.10+ asyncio application** that provides a complete trading system: exchange connectivity, market data streaming, futures strategy execution, risk management, backtesting, and both Telegram and CLI interfaces.
 
-Unlike the previous Quadrant project (Node.js/Python dual-runtime, Binance Futures), Quad is:
+Quad is **Python-only** — one language, one process, one deployment:
 
 - **Python-only** -- One language, one process, one deployment
-- **Futures-native** -- Built from the ground up for USD-M perpetual and delivery futures
+- **Futures-native** -- Built from the ground up for USDT perpetual futures
 - **Telegram-first** -- Primary user interface via Telegram bot (python-telegram-bot v20+), with CLI for secondary debugging
 - **Plugin-based** -- Strategies are pluggable via setuptools entry points
 - **Optional AI** -- Groq/LLaMA integration for market analysis and decision support. Deterministic fallback when AI is disabled or unavailable.
@@ -69,8 +69,8 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐
 │   RISK MANAGER   │  │    STRATEGY      │  │  EXCHANGE ADAPTER    │
 │                  │  │    PLUGIN        │  │                      │
-│  9 Pre-Trade     │  │                  │  │ OKX USDT Perp      │
-│   Gates          │  │  Trend Following │  │  (instType=SWAP)   │
+│  9 Pre-Trade     │  │                  │  │ Bybit USDT Perp    │
+│   Gates          │  │  Trend Following │  │  (category=linear) │
 │  7 Circuit       │  │                  │  │  REST + WebSocket   │
 │   Breakers       │  │                  │  │                     │
 │  Position Sizing │  │                  │  │  Testnet / Live     │
@@ -79,7 +79,7 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        PERSISTENCE (SQLite)                             │
-│    accounts, positions, orders, trades, decisions, contracts, stats   │
+│  20 tables — see docs/architecture.md for the full schema map          │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -92,8 +92,8 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 
 ## Key Features
 
-- **Futures-Native** -- Built for OKX USDT perpetual futures with one-way and hedge position modes, isolated or cross margin, and full leverage control
-- **Telegram Commands** -- 18+ user commands (/start, /status, /help, /balance, /positions, /orders, /funding_rate, /book, /strategies, /execute, /risk, /kill, /cancel, /settings, /set, /analyze, /ai_strategy, /ai_status, /ai_decision)
+- **Futures-Native** -- Built for Bybit USDT perpetual futures with one-way and hedge position modes, isolated or cross margin, and full leverage control
+- **Telegram Commands** -- 25 command handlers (see [Telegram Commands](#telegram-commands)): `/start`, `/status`, `/help`, `/balance`, `/positions`, `/orders`, `/funding_rate`, `/book`, `/strategies`, `/execute`, `/risk`, `/kill`, `/cancel`, `/settings`, `/set`, `/leverage`, `/position_mode`, `/liquidation_warnings`, `/market_regime`, `/analyze`, `/ai_strategy`, `/ai_status`, `/ai_decision`, `/exchange`
 - **1 Built-in Strategy** -- Trend following with leverage-aware sizing and configurable position limits
 - **Plugin Architecture** -- Write custom strategies as Python classes with setuptools entry point registration
 - **9-Gate Risk Pipeline** -- Every trade validated against max positions, portfolio risk, daily loss, drawdown, liquidation risk, funding rate cost, leverage limit, position concentration, and correlation
@@ -101,10 +101,10 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 - **Leverage-Adjusted Position Sizing** -- Position sizing adapted for futures with min position size checks, leverage-aware notional, and margin utilization tracking
 - **Backtesting Engine** -- Test strategies against historical data before risking capital
 - **Telegram + CLI Interface** -- Primary control via Telegram bot (python-telegram-bot v20+), with Typer CLI for secondary debugging
-- **SQLite Persistence** -- 16-table schema with aiosqlite for zero-config operation
+- **SQLite Persistence** -- 20-table schema with aiosqlite for zero-config operation, plus optional Postgres via asyncpg
 - **Docker Deployable** -- Single-container deployment with health checks and Prometheus metrics
 - **Hot-Reload Configuration** -- Risk and strategy parameters update without restart
-- **Structured Logging** -- JSON-formatted logs for easy parsing and analysis
+- **Structured Logging** -- JSON-formatted logs, with per-cycle correlation IDs and persistent `error_logs` storage
 
 ---
 
@@ -115,12 +115,11 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 | Runtime | Python 3.10+ asyncio | Single-process event-driven architecture |
 | Telegram Bot | python-telegram-bot v20+ | Primary user interface via Telegram |
 | CLI Framework | Typer | Secondary command-line interface for debugging |
-| Exchange API | OKX MCP Server (okx-trade-mcp) | Market data, account, order execution via MCP protocol |
+| Exchange API | Bybit V5 via pybit SDK (`BybitFuturesAdapter`, category=linear) | Market data, account, order execution |
 | Persistence | SQLite + aiosqlite | Single file, zero config |
 | Configuration | PyYAML + python-dotenv | Layered config with hot-reload |
 | Logging | structlog | Structured JSON logging |
-| Exchange Fallback | python-okx SDK | Used when MCP server is disabled |
-| Containerization | Docker | Single-container deployment |
+| Containerization | Docker | Single-container deployment (Python-only, no Node.js) |
 | Monitoring | Built-in HTTP server | Health checks, Prometheus metrics |
 
 ---
@@ -134,20 +133,21 @@ Quad is designed for personal use by individual traders who want a self-hosted, 
 # Clone and install
 git clone https://github.com/your-org/quad.git
 cd quad
-pip install -e .
+pip install -e ".[dev]"
 
 # Configure
 cp .env.example .env
-# Edit .env with your OKX API keys (optional for dry-run)
+# Edit .env with your Bybit API keys (BYBIT_API_KEY / BYBIT_API_SECRET)
 # Set TELEGRAM_BOT_TOKEN from @BotFather (required for Telegram interface)
-cp config/config.yaml config/config.local.yaml
-# Edit config.local.yaml with your preferences
 
-# Run in dry-run mode (safest first step)
+# Run in dry-run mode against Bybit testnet (safest first step)
 quad start --dry-run
+# ...or equivalently:
+python -m quad
 
-# Check status
+# Check status of a running instance
 quad status
+quad health
 
 # View available strategies
 quad strategies
@@ -155,6 +155,12 @@ quad strategies
 # Full command reference
 quad --help
 ```
+
+> **Live trading is a deliberate, multi-step opt-in.** Setting
+> `exchange.testnet: false` alone is not enough: `quad start --live`
+> additionally refuses to run while `_dry_run: true`, and the exchange
+> adapter, the execution engine and the orchestrator each block orders
+> independently. See [docs/go-live-plan.md](docs/go-live-plan.md).
 
 ---
 
@@ -164,31 +170,42 @@ Quad's primary user interface is a Telegram bot. All bot operations are availabl
 
 ### Commands
 
-| Command | Description |
-|---|---|
-| `/start` | Welcome message with available commands |
-| `/status` | Show bot health, position summary, PnL, risk status |
-| `/positions` | List all open positions with P&L |
-| `/orders` | Show open or pending orders |
-| `/balance` | Account balances, total USDT value |
-| `/funding_rate` | Current funding rates across tracked symbols |
-| `/book <symbol>` | Show order book depth for a symbol |
-| `/strategies` | List available strategies |
-| `/execute` | Interactive multi-step strategy execution flow |
-| `/risk` | Show risk status and circuit breaker state |
-| `/kill` | Emergency kill switch (requires confirmation) |
-| `/cancel <id>` | Cancel an order by its ID |
-| `/settings` | Current configuration overview |
-| `/set <key> <value>` | Set a configuration value at runtime |
-| `/leverage` | Set or view leverage for a symbol |
-| `/position_mode` | Toggle between ONE_WAY and HEDGE position mode |
-| `/liquidation_warnings` | Show liquidation risk warnings for open positions |
-| `/market_regime` | Show detected market regime (trending, ranging, volatile) |
-| `/analyze` | AI analysis of current market conditions |
-| `/ai_strategy` | AI strategy recommendation |
-| `/ai_status` | AI trading system status and metrics |
-| `/ai_decision` | AI-driven trading decision (ENTER/EXIT/HOLD) |
-| `/help` | Show available commands |
+| Command | Description | Access |
+|---|---|---|
+| `/start` | Welcome message, or link a chat with `/start <pairing-code>` | public |
+| `/status` | Show bot health, position summary, PnL, risk status | bound |
+| `/positions` | List all open positions with P&L | bound |
+| `/orders` | Show open or pending orders | bound |
+| `/balance` | Account balances, total USDT value | bound |
+| `/funding_rate` | Current funding rates across tracked symbols | bound |
+| `/book <symbol>` | Show order book depth for a symbol | bound |
+| `/strategies` | List available strategies | bound |
+| `/execute` | Interactive multi-step strategy execution flow | **operator only** |
+| `/risk` | Show risk status and circuit breaker state | bound |
+| `/kill` | Emergency kill switch: halts entries, cancels open orders | **operator only** |
+| `/cancel <id>` | Cancel an order by its ID | bound |
+| `/settings` | Current configuration overview | bound |
+| `/set <key> <value>` | Set a configuration value at runtime | bound (subset: **operator only**) |
+| `/leverage [symbol] [value]` | View or set leverage for a symbol | view: bound; set: **operator only** |
+| `/position_mode [mode]` | View or set ONE_WAY / HEDGE position mode | view: bound; set: **operator only** |
+| `/liquidation_warnings` | Show liquidation risk warnings for open positions | bound |
+| `/market_regime` | Show detected market regime (trending, ranging, volatile) | bound |
+| `/analyze` | AI analysis of current market conditions | bound |
+| `/ai_strategy` | AI strategy recommendation | bound |
+| `/ai_status` | AI trading system status and metrics | bound |
+| `/ai_decision` | AI-driven trading decision (ENTER/EXIT/HOLD) | bound |
+| `/exchange` | Exchange connection status | bound |
+| `/help` | Show available commands | public |
+
+"bound" means the chat is linked to a tenant via a pairing code.
+"**operator only**" additionally requires the deployment owner's chat
+(`TELEGRAM_NOTIFICATION_CHAT_ID`, or any chat when running single-tenant
+without a database) — these commands act on the operator's own exchange
+account, so a control-plane customer's chat is refused.
+
+> `/kill` halts new entries and **cancels open orders on the exchange**,
+> reporting exactly how many were cancelled and how many could not be. It
+> deliberately does **not** close open positions.
 
 ### Setup
 
@@ -207,6 +224,7 @@ Quad's primary user interface is a Telegram bot. All bot operations are availabl
 | [Interface Commands](docs/interface-commands.md) | Full command reference for Telegram bot (primary) and Typer CLI (secondary) |
 | [Configuration](docs/configuration.md) | YAML config files, env vars, hierarchy, hot-reload |
 | [Deployment](docs/deployment.md) | Docker and direct deployment, backup, security |
+| [Go-Live Plan](docs/go-live-plan.md) | Checklist and gates for enabling live trading |
 | [Risk Management](docs/risk-management.md) | Pre-trade gates, circuit breakers, position sizing |
 | [Strategy Development](docs/strategy-development.md) | Writing custom strategy plugins |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
@@ -224,32 +242,38 @@ quad/
 ├── README.md                 # This file
 ├── pyproject.toml            # Python project config
 ├── setup.py                  # Package installation
-├── requirements.txt          # Python dependencies
+├── requirements.txt          # Pinned Python dependencies
 │
 ├── config/                   # Configuration files
-│   └── config.yaml        # Default configuration
+│   └── config.yaml           # Single source of truth
 │
 ├── data/                     # Runtime data directory
-│   ├── logs/                 # Log files
-│   └── backups/              # Database backups
+│   ├── quad.db               # SQLite database (default)
+│   └── workers/              # Per-tenant worker configs (multi-tenant mode)
 │
 ├── src/quad/                 # Source code
 │   ├── __init__.py
-│   ├── main.py               # Application entry point (Typer + Telegram)
+│   ├── __main__.py           # Entry point (python -m quad, quad-run)
+│   ├── supervisor.py         # Multi-tenant per-tenant process manager
+│   ├── worker.py             # Per-tenant worker config builder
+│   ├── api/                  # quad-api: FastAPI control plane (multi-tenant)
 │   ├── cli/                  # Typer CLI commands (secondary interface)
-│   ├── telegram/             # Telegram bot interface (primary interface)
-│   ├── config/               # Configuration manager
-│   ├── engine/               # Orchestrator, state machine
-│   ├── exchange/             # Exchange adapters (OKX USDT perpetual via MCP or python-okx)
+│   ├── bot/                  # Telegram bot interface (primary interface)
+│   ├── config/               # Configuration manager + pydantic schema
+│   ├── orchestrator/         # Orchestrator, lifecycle, AI rotation
+│   ├── exchange/             # Exchange adapters (Bybit USDT perpetual via pybit)
 │   ├── strategy/             # Strategy base class + built-in strategies
 │   ├── risk/                 # Risk manager, gates, circuit breakers
-│   ├── execution/            # Order gateway, TWAP
-│   ├── market_data/          # WebSocket streaming, data cache
-│   ├── mcp/                  # OKX MCP server client (primary exchange interface)
-│   ├── persistence/          # SQLite database, repositories, models
-│   ├── monitoring/           # Health server, metrics
+│   ├── execution/            # Order gateway, reconciler, TWAP
+│   ├── market_data/          # WebSocket streaming, buffers, caches
+│   ├── persistence/          # SQLite/Postgres models, repositories, migrations
+│   ├── monitoring/           # Health server, metrics, error sink, correlation ids
+│   ├── security/             # Fernet credential encryption
+│   ├── tradingview/          # Webhook parser + signal conversion
 │   ├── backtesting/          # Backtest engine
 │   └── types/                # Shared type definitions
+│
+├── tests/                    # Pytest suite (no network / no live keys needed)
 │
 └── docs/                     # Documentation
     ├── architecture.md
@@ -257,6 +281,7 @@ quad/
     ├── interface-commands.md
     ├── configuration.md
     ├── deployment.md
+    ├── go-live-plan.md
     ├── risk-management.md
     ├── strategy-development.md
     ├── troubleshooting.md
@@ -284,22 +309,28 @@ __main__.py  -->  QuadOrchestrator()  -->  orchestrator.run_forever()
 
    | Order | Subsystem | What happens |
    |-------|-----------|-------------|
-   | 1 | ConfigManager | Loads `config.yaml`, overlays `config.local.yaml`, overlays env vars. Resolves `${VAR}` substitutions. |
-   | 2 | DatabaseManager | Connects to SQLite, runs DDL and migrations. |
-   | 3 | ExchangeAdapter | Created via factory (`okx` based on mode). Connects and authenticates. |
-   | 4 | MarketDataEngine | Starts WebSocket subscriptions, initialises price buffers, funding rate cache, order book cache, and mark price cache. |
-   | 5 | RiskManager | Initialises 9 pre-trade gates, 7 circuit breakers, leverage-adjusted position sizer. |
-   | 6 | ExecutionEngine | Starts order gateway (UUID idempotency), background reconciliation loop. |
-   | 7 | Strategies | Loads all auto-registered strategies (1 built-in: trend_following) via `__init_subclass__`. |
-   | 8 | QuadBot (Telegram) | Initialises PTB v20+ Application, registers 18+ command handlers, 5 recurring jobs. Starts polling. |
-   | 9 | HealthServer | Starts aiohttp HTTP server on port 9090 (configurable) with `/health`, `/readiness`, `/liveness`, `/metrics`. |
-   | 10 | MetricsCollector | Creates in-memory metrics registry (gauges, counters, histograms). |
-   | 11 | Groq AI Client | Lazy initialisation -- only created if `GROQ_API_KEY` is set. Wraps `groq.AsyncGroq`. |
-   | 12 | TradingView Webhook | Registers `POST /webhook/tradingview` route on HealthServer (if `tradingview_webhook.enabled: true`). |
+   | 1 | ConfigManager | Loads `config/config.yaml`, overlays env vars (`QUAD_*`, `BYBIT_*`, `DATABASE_URL`) and runtime `set()` overrides. Resolves `${VAR}` substitutions. |
+   | 2 | HealthServer | Starts aiohttp HTTP server (port 9090 by default, `QUAD_HEALTH_PORT`) with `/health`, `/readiness`, `/liveness`, `/metrics` (+ `/ready`, `/live` aliases). Started early so liveness probes answer even while later steps are slow. |
+   | 3 | DatabaseManager | Connects to SQLite (or Postgres via `DATABASE_URL`), runs DDL and migrations, then attaches the `error_logs` writer. |
+   | 4 | ExchangeAdapter | Created via factory (`bybit` mode; an unknown mode is a hard error). Connects to Bybit — testnet unless `exchange.testnet: false`. Sets leverage/margin/position mode per symbol and **verifies** the exchange agrees; a mismatch aborts startup in live mode. |
+   | 5 | MarketDataEngine | Starts WebSocket subscriptions, initialises price buffers, funding rate cache, order book cache, and mark price cache. |
+   | 6 | RiskManager | Initialises 9 pre-trade gates, 7 circuit breakers, leverage-adjusted position sizer. |
+   | 7 | ExecutionEngine | Starts order gateway (UUID idempotency), background reconciliation loop. Flattens positions left open by a previous run. |
+   | 8 | Strategies | Loads all auto-registered strategies (1 built-in: trend_following) via `__init_subclass__`. |
+   | 9 | Groq AI Client | Lazy initialisation -- only created if `GROQ_API_KEY` is set. Wraps `groq.AsyncGroq`. |
+   | 10 | Optimizer | Created only when Groq, the DB and `retrain.enabled` are all present. |
+   | 11 | QuadBot (Telegram) | Initialises PTB v20+ Application, registers 25 command handlers + the `/execute` conversation flow, recurring jobs. Starts polling. Non-fatal if the token is missing. |
+   | 12 | MetricsCollector | Creates the in-memory metrics registry and attaches it to the already-running health server. |
+   | 13 | TradingView Webhook | Registers `POST /webhook/tradingview` on the running HealthServer (if `tradingview_webhook.enabled: true`), then **verifies the route is actually mounted** — if not, the webhook reports itself disabled rather than silently 404-ing. |
 
-5. **`run_forever()`** creates a background task for the main trading cycle, then waits for a stop signal.
+   > The health server starts *before* the TradingView webhook, which is why
+   > route registration goes through a catch-all dispatcher
+   > (`HealthServer.add_route`): aiohttp freezes its router at application
+   > startup, so a route added afterwards would otherwise never exist.
 
-Shutdown is the **reverse order**, with each subsystem given individual try/except protection so a failure in one does not prevent the others from stopping.
+5. **`run_forever()`** creates a background task for the main trading cycle, then waits for a stop signal. Each cycle binds a **correlation id** (`cycle-<hex>`) that is attached to every log line it emits; TradingView webhook requests get their own (`tv-<hex>`), so concurrent activity stays separable in the log stream.
+
+Shutdown is the **reverse order**, with each subsystem given individual try/except protection so a failure in one does not prevent the others from stopping. The `error_logs` writer is flushed *before* the database disconnects.
 
 ### Trading Loop Cycle
 
@@ -378,7 +409,7 @@ Telegram User --- /command --- Telegram Servers
 ### Data Flow: WebSocket to SQLite
 
 ```
-OKX V5 API
+Bybit V5 API (https://api-testnet.bybit.com by default)
         |
    WebSocket Streams
    (tickers, mark prices, funding rates, order book, user data)
@@ -413,17 +444,22 @@ OKX V5 API
         |
         v
   ExecutionEngine.execute()
-   +-- OrderGateway.submit() --- OKX V5 REST API
+   +-- OrderGateway.submit() --- Bybit V5 REST API (category=linear)
    +-- Background reconciliation loop (60s)
    +-- FillReconciler (detects missed fills, stale orders)
         |
         v
   DatabaseManager / Repositories
-   +-- 16 tables: accounts, positions, orders, trades, decisions,
-   |              futures_contracts, sessions, performance_snapshots,
-   |              circuit_breaker_events, config_changes, error_logs,
-   |              funding_payments, liquidation_events, funding_rate_records
-   +-- SQLite (aiosqlite)
+   +-- 20 tables, schema version 10 (SCHEMA_VERSION in persistence/models.py):
+   |     trading   (6): accounts, positions, orders, trades, decisions,
+   |                    funding_payments
+   |     ops      (8): sessions, performance_snapshots, circuit_breaker_events,
+   |                    config_changes, error_logs, funding_rate_records,
+   |                    liquidation_events, strategy_state
+   |     self-opt (2): optimization_runs, optimization_recommendations
+   |     tenancy  (5): tenants, exchange_credentials, tenant_config,
+   |                    telegram_bindings, pairing_codes
+   +-- SQLite (aiosqlite) by default; Postgres via DATABASE_URL (asyncpg)
    +-- Automatic backups (hourly, max 24)
    +-- Automatic snapshots (60s)
 ```
@@ -456,7 +492,18 @@ Integration points:
 - Telegram commands `/analyze` and `/ai_strategy` -- on-demand market analysis and strategy recommendation
 - `describe_action()` -- called when the bot enters/exits a trade to generate a natural-language explanation of the reasoning
 - `analyze_chart_data()` -- analyses OHLCV price data (e.g., from TradingView alerts) for support/resistance, trends, patterns
+- `ai/validator.py` -- every model response passes through
+  `normalize_decision()` before it can reach the risk pipeline. This is the
+  guard against a direction/side inversion in the model's output: the
+  direction is re-derived from the symbol's own market data, implausible
+  quantities are rejected, and `min_confidence_to_trade` gates the rest.
+  A malformed or unparseable response becomes HOLD, never a trade.
 ```
+
+**Operational caveat:** the AI is a single point of control. A Groq outage,
+a sustained 429 wall, or a prompt regression leaves the portfolio flat or
+stale rather than trading badly. The key pool rotates and a fallback model
+exists, but both are the same provider. Monitor `/ai_status`.
 
 ### TradingView Webhook Flow
 
@@ -483,10 +530,24 @@ TradingView Alert (Pine Script strategy)
 ```
 
 The webhook receiver:
-- Validates an optional shared secret (config `tradingview_webhook.secret`)
+- **Requires** a shared secret (`tradingview_webhook.secret`, >= 16 chars, or
+  `QUAD_TRADINGVIEW_WEBHOOK_SECRET`). There is no unauthenticated mode: if the
+  secret is missing the schema rejects the config and the orchestrator
+  refuses to arm the webhook (fail-closed).
+- Accepts two credential methods: an HMAC-SHA256 `X-Webhook-Signature`
+  header (preferred) or a `secret` field in the JSON payload.
 - Accepts standard TradingView JSON alert formats (`{{ticker}}`, `{{strategy.order.action}}`, etc.)
-- Routes approved signals through the full risk pipeline before execution
-- Logs all received alerts with payload previews for debugging
+- Enforces a 5-minute dedupe window and rejects alerts older than 60 seconds
+- Routes approved signals through the same serialised `_trade_lock` path and
+  full risk pipeline as AI decisions
+- Logs all received alerts with payload previews, each with its own
+  `tv-<hex>` correlation id
+- Verifies at startup that the route is actually mounted; if it is not, the
+  webhook reports itself disabled rather than silently 404-ing
+
+Note: the webhook is a **route on the health server**, so it listens on
+`monitoring.health_server.port` (default 9090), not on
+`tradingview_webhook.port` — that field is informational only.
 
 ---
 
@@ -496,7 +557,7 @@ The webhook receiver:
 2. **Pluggable architecture** -- Exchange adapters and strategy plugins enable extensibility without core changes.
 3. **Deterministic strategies** -- Futures trading uses defined logic, not ML models. Strategies are code, not black boxes.
 4. **Backtesting-first** -- Every strategy can be backtested against historical data before going live.
-5. **Self-hosted and simple** -- SQLite file-backed database, single Python process, no external database server required.
+5. **Self-hosted and simple** -- SQLite file-backed database, single Python process, no external database server required for dev (Postgres on Hetzner for production).
 
 ---
 

@@ -31,6 +31,19 @@ app = typer.Typer(
 )
 
 
+@app.callback()
+def _main_callback() -> None:
+    """Prepare the process before any command runs.
+
+    Fixes the Windows console codepage up front: cp1252 cannot encode the
+    status glyphs these commands print (``❌``, ``→``, ``🚨``), which raised
+    ``UnicodeEncodeError`` and aborted the command.
+    """
+    from quad.__main__ import configure_console_encoding
+
+    configure_console_encoding()
+
+
 # ============================================================================
 # Helpers
 # ============================================================================
@@ -98,6 +111,53 @@ def _format_pnl(pnl: Decimal) -> str:
     return f"{sign}${float(pnl):,.2f}"
 
 
+_SECRET_KEY_HINTS = ("secret", "password", "passwd", "token", "api_key", "private_key")
+
+
+def _redact_value(key: str, value: Any) -> Any:
+    """Redact credential-like config values before display."""
+    if isinstance(value, str) and any(h in key.lower() for h in _SECRET_KEY_HINTS):
+        return "***REDACTED***" if value else value
+    return value
+
+
+def _mask_dsn(dsn: str) -> str:
+    """Mask the password segment of a DSN (``scheme://user:pass@host``)."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(dsn)
+        if parts.password:
+            netloc = parts.hostname or ""
+            if parts.username:
+                netloc = f"{parts.username}:***@{netloc}"
+            if parts.port:
+                netloc = f"{netloc}:{parts.port}"
+            return urlunsplit(
+                (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+            )
+    except Exception:
+        pass
+    return dsn
+
+
+def _start_foreground(config_path: str) -> None:
+    """Configure logging and run the orchestrator until interrupted."""
+    from quad.__main__ import _configure_logging
+
+    _configure_logging()
+    from quad.orchestrator import QuadOrchestrator
+
+    orchestrator = QuadOrchestrator(config_path=config_path)
+    try:
+        import asyncio
+
+        asyncio.run(orchestrator.run_forever())
+    except KeyboardInterrupt:
+        # run_forever() already performed the graceful shutdown.
+        pass
+
+
 # ============================================================================
 # CLI Commands
 # ============================================================================
@@ -140,12 +200,39 @@ def balance(
         "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
-    """Show account balance."""
+    """Show the last persisted account snapshot.
+
+    Reads the local database rather than the exchange, so it reflects the
+    last completed trading cycle — it cannot show a balance that changed
+    after the last write.  For live balances use the Telegram ``/balance``
+    command (or Bybit directly).
+    """
+    from quad.persistence.repositories import AccountRepository
+
     config = _load_config(config_path)
-    print(f"Account balance (from config mode: {config['_mode']})")
-    print()
-    print("  Use the Telegram bot `/balance` command for live data,")
-    print("  or connect the exchange adapter for REST queries.")
+    rows = _db_rows(config, AccountRepository, 5)
+    if not rows:
+        print("No account snapshot recorded yet.")
+        print("  The account row is written by the trading cycle; run the bot first.")
+        print("  Live balances: Telegram /balance, or query Bybit directly.")
+        raise typer.Exit(code=1)
+    for r in rows:
+        print("Account snapshot")
+        print("=" * 50)
+        for field in (
+            "id",
+            "exchange",
+            "total_usdt",
+            "available_balance",
+            "total_wallet_balance",
+            "timestamp",
+        ):
+            value = getattr(r, field, None)
+            if value not in (None, ""):
+                print(f"  {field.replace('_', ' ').title():24s} {value}")
+        print("=" * 50)
+        break
+    print("  (snapshot from the last completed cycle — not a live balance)")
 
 
 @app.command()
@@ -154,13 +241,35 @@ def positions(
         "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
-    """List open positions (from database if available)."""
-    _ = _load_config(config_path)
-    print("Open Futures Positions")
-    print()
-    print("  Use the Telegram bot `/positions` command for live data.")
-    print("  CLI position queries require a running exchange adapter.")
-    print("  Columns: Symbol, Side (LONG/SHORT), Size, Entry, Mark, Liq.Px, PnL, Lev")
+    """List positions as last persisted by the trading cycle.
+
+    Not a live exchange query: the CLI does not open an exchange session.
+    For live positions use Telegram ``/positions``.
+    """
+    from quad.persistence.repositories import PositionRepository
+
+    config = _load_config(config_path)
+    rows = _db_rows(config, PositionRepository, 20)
+    if not rows:
+        print("No positions recorded in the database.")
+        print("  Live positions: Telegram /positions, or Bybit directly.")
+        return
+    table = [
+        [
+            str(getattr(r, "symbol", "")),
+            str(getattr(r, "side", "") or getattr(r, "position_side", "")),
+            str(getattr(r, "quantity", "") or getattr(r, "size", "")),
+            str(getattr(r, "entry_price", "")),
+            str(getattr(r, "unrealized_pnl", "") or getattr(r, "pnl", "")),
+        ]
+        for r in rows
+    ]
+    _print_table(
+        ["SYMBOL", "SIDE", "SIZE", "ENTRY", "PNL"],
+        table,
+        min_col_widths=[10, 6, 10, 12, 10],
+    )
+    print("\n  (from the database, not a live exchange query)")
 
 
 @app.command()
@@ -169,12 +278,34 @@ def orders(
         "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
-    """List open orders (from database if available)."""
-    _ = _load_config(config_path)
-    print("Open Orders")
-    print()
-    print("  Use the Telegram bot `/orders` command for live data.")
-    print("  CLI order queries require a running execution engine.")
+    """List orders as last persisted by the trading cycle.
+
+    Not a live exchange query.  For live orders use Telegram ``/orders``.
+    """
+    from quad.persistence.repositories import OrderRepository
+
+    config = _load_config(config_path)
+    rows = _db_rows(config, OrderRepository, 20)
+    if not rows:
+        print("No orders recorded in the database.")
+        print("  Live orders: Telegram /orders, or Bybit directly.")
+        return
+    table = [
+        [
+            str(getattr(r, "timestamp", "")),
+            str(getattr(r, "symbol", "")),
+            str(getattr(r, "side", "")),
+            str(getattr(r, "quantity", "")),
+            str(getattr(r, "status", "")),
+        ]
+        for r in rows
+    ]
+    _print_table(
+        ["TIMESTAMP", "SYMBOL", "SIDE", "QTY", "STATUS"],
+        table,
+        min_col_widths=[13, 10, 6, 8, 10],
+    )
+    print("\n  (from the database, not a live exchange query)")
 
 
 @app.command()
@@ -250,14 +381,26 @@ def evaluate(
 def execute(
     strategy_name: str = typer.Argument(..., help="Strategy name to execute"),
     dry_run: bool = typer.Option(
-        True, "--dry-run", "-n", help="Dry run (no real orders)"
+        True,
+        "--dry-run/--live",
+        "-n",
+        help="Dry run (default) or --live to permit real orders",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Confirm live execution (required with --live)"
     ),
     config_path: str = typer.Option(
         "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
-    """Execute strategy signals (with --no-dry-run for live)."""
-    _ = _load_config(config_path)
+    """Execute strategy signals (--live for real orders)."""
+    if not dry_run and not yes:
+        print("❌ Live execution requires explicit confirmation.")
+        print("  Re-run with `--yes` to place real orders, e.g.:")
+        print(f"  quad execute {strategy_name} --live --yes")
+        raise typer.Exit(code=1)
+
+    config = _load_config(config_path)
 
     from quad.strategy.base import StrategyRegistry
 
@@ -266,14 +409,25 @@ def execute(
         print(f"  Available strategies: {', '.join(StrategyRegistry.list())}")
         raise typer.Exit(code=1)
 
+    if not dry_run:
+        testnet = bool(config.get("exchange", {}).get("testnet", True))
+        if testnet:
+            print("❌ --live refused: exchange.testnet is still true.")
+            print("   Set `exchange.testnet: false` (or BYBIT_TESTNET=false) first.")
+            raise typer.Exit(code=1)
+
     print(f"Executing strategy: {strategy_name}")
     print(f"  Dry run: {dry_run}")
     print()
-    print("Full execution requires a running orchestrator.")
     if dry_run:
         print("[DRY RUN] No orders will be placed.")
     else:
         print("[LIVE] Orders will be placed on the exchange.")
+        print()
+        print("  This command only validates the request. Strategy execution")
+        print("  runs in the trading process — use `quad start`, or the")
+        print("  Telegram /execute flow.")
+    return
 
 
 @app.command()
@@ -325,32 +479,82 @@ def config_view(
         if isinstance(data, dict):
             print(f"{pad}{prefix}:")
             for key, value in data.items():
-                _print_section(key, value, indent + 1)
+                _print_section(key, _redact_value(key, value), indent + 1)
         elif isinstance(data, list):
             print(f"{pad}{prefix}: {data}")
         else:
-            print(f"{pad}{prefix}: {data}")
+            print(f"{pad}{prefix}: {_redact_value(prefix, data)}")
 
     for key, value in config.items():
         _print_section(key, value)
 
 
-@app.command(name="db-info")
+@app.command()
 def db_info(
     config_path: str = typer.Option(
         "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
-    """Show database statistics."""
+    """Show database statistics (row counts per table)."""
     config = _load_config(config_path)
-    dsn = config["persistence"]["dsn"]
+    dsn = _mask_dsn(str(config.get("persistence", {}).get("dsn", "(not configured)")))
 
     print("Database Info")
     print("=" * 50)
     print(f"  DSN: {dsn}")
-    print()
-    print("  Use the Telegram bot or execute the bot in live mode")
-    print("  to populate and query database statistics.")
+
+    from pathlib import Path
+
+    # SQLite can be inspected without a driver; Postgres cannot.
+    path = Path(dsn)
+    if not dsn.startswith(("postgres://", "postgresql://")):
+        if not path.exists():
+            print(f"  File: {path} (not created yet — has the bot ever run?)")
+            return
+        print(f"  File: {path} ({path.stat().st_size / 1024:.1f} KiB)")
+
+    try:
+        rows = _table_counts(config)
+    except Exception as exc:
+        print(f"  Could not read row counts: {exc}")
+        return
+    if rows:
+        _print_table(["TABLE", "ROWS"], [[t, str(n)] for t, n in rows])
+    else:
+        print("  (no tables found)")
+
+
+def _table_counts(config: dict[str, Any]) -> list[tuple[str, int]]:
+    """Return ``(table, row_count)`` for every model table."""
+    import asyncio
+
+    from quad.persistence import create_database
+    from quad.persistence.models import ALL_MODELS
+
+    async def _run() -> list[tuple[str, int]]:
+        dsn = str(config.get("persistence", {}).get("dsn", "data/quad.db"))
+        db = create_database(dsn)
+        try:
+            await db.connect()
+            out: list[tuple[str, int]] = []
+            for model in ALL_MODELS:
+                table = getattr(model, "__tablename__", None)
+                if not table:
+                    continue
+                try:
+                    async with db.pool.acquire() as conn:
+                        row = await conn.fetchrow(f"SELECT COUNT(*) AS n FROM {table}")
+                    out.append((table, int(row["n"]) if row else 0))
+                except Exception:
+                    out.append((table, -1))
+            return out
+        finally:
+            try:
+                await db.disconnect()
+            except Exception:
+                pass
+
+    return asyncio.run(_run())
 
 
 @app.command()
@@ -359,16 +563,261 @@ def run(
         "config/config.yaml", "--config", "-c", help="Path to config YAML"
     ),
 ) -> None:
-    """Run the bot (start all subsystems)."""
-    _ = _load_config(config_path)
-    print("Starting Quad bot...")
+    """Run the bot in the foreground (all subsystems, trading loop).
+
+    This is the real launcher.  For a one-line alias see ``quad start``.
+    """
+    _start_foreground(config_path)
+
+
+@app.command()
+def start(
+    config_path: str = typer.Option(
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--live",
+        "-n",
+        help="Dry run (default) or --live to permit real orders",
+    ),
+) -> None:
+    """Start the trading bot in the foreground.
+
+    Runs the full orchestrator (config -> database -> Bybit -> market data ->
+    risk -> execution -> Telegram -> health server) and blocks until
+    SIGINT/SIGTERM.  ``--dry-run`` is the default and the safe first step;
+    ``--live`` removes the guard and permits real orders, so it also
+    requires ``_dry_run: false`` and ``exchange.testnet: false`` in config.
+    """
+    if not dry_run:
+        config = _load_config(config_path)
+        testnet = bool(config.get("exchange", {}).get("testnet", True))
+        dry_flag = config.get("_dry_run", True)
+        if testnet:
+            print("❌ --live refused: exchange.testnet is still true.")
+            print("   Set `exchange.testnet: false` (or BYBIT_TESTNET=false) first.")
+            raise typer.Exit(code=1)
+        if dry_flag:
+            print(
+                "❌ --live refused: `_dry_run` is still true. The engine blocks "
+                "every order while it is set."
+            )
+            print("   Set `_dry_run: false` (or QUAD_DRY_RUN=false) first.")
+            raise typer.Exit(code=1)
+        print("🚨 LIVE MODE: real orders will be placed on Bybit.")
+    _start_foreground(config_path)
+
+
+@app.command()
+def stop() -> None:
+    """Explain how to stop the bot.
+
+    The bot runs in the foreground, so it stops on SIGINT (Ctrl+C) or
+    SIGTERM, which triggers the orchestrator's reverse-order graceful
+    shutdown.  In Docker, use ``docker compose stop quad`` (or
+    ``docker stop``), which sends SIGTERM.
+    """
+    print("Quad runs in the foreground and stops gracefully on SIGINT/SIGTERM.")
     print()
-    print("Full bot execution requires asyncio.run() and all subsystems.")
-    print("Use the Python API directly:")
+    print("  Foreground:  press Ctrl+C")
+    print("  Docker:      docker compose stop quad")
     print()
-    print("  from quad.bot import QuadBot")
-    print("  bot = QuadBot(config)")
-    print("  await bot.start()")
+    print("A remote kill switch is available from Telegram: /kill")
+    print("  (halts new entries and cancels open orders; open positions remain).")
+
+
+@app.command()
+def strategies() -> None:
+    """List strategies available in the registry."""
+    from quad.strategy.base import StrategyRegistry
+
+    names = StrategyRegistry.list()
+    if not names:
+        print("No strategies are registered.")
+        return
+    print("Registered Strategies")
+    print("=" * 60)
+    for name in names:
+        cls = StrategyRegistry.get(name)
+        if cls is None:
+            continue
+        print(f"\n{name}")
+        print(f"  {cls.get_description()}")
+        for p in cls.get_params_spec():
+            default = p.default if p.default is not None else "(required)"
+            print(f"    - {p.name} ({p.type}, default: {default}): {p.description}")
+    print("=" * 60)
+
+
+@app.command()
+def health(
+    config_path: str = typer.Option(
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
+    ),
+    timeout: float = typer.Option(3.0, "--timeout", help="HTTP timeout in seconds"),
+) -> None:
+    """Query the running bot's health endpoint."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    config = _load_config(config_path)
+    port = int(config.get("monitoring", {}).get("health_server", {}).get("port", 9090))
+    bind = str(
+        config.get("monitoring", {})
+        .get("health_server", {})
+        .get("bind_address", "127.0.0.1")
+    )
+    if bind in ("0.0.0.0", "::"):
+        bind = "127.0.0.1"
+
+    url = f"http://{bind}:{port}/health"
+    api_key = str(
+        config.get("monitoring", {}).get("health_server", {}).get("api_key", "")
+    )
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("X-API-Key", api_key)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.URLError as exc:
+        print(f"❌ No bot reachable at {url} ({exc.reason}).")
+        print("   The bot may not be running, or the health server is disabled.")
+        raise typer.Exit(code=1) from exc
+
+    print(f"Health ({url})")
+    print("=" * 50)
+    print(f"  status:   {payload.get('status')}")
+    print(f"  uptime:   {payload.get('uptime')}s")
+    print(f"  version:  {payload.get('version')}")
+    for name, ok in (payload.get("components") or {}).items():
+        print(f"  {'OK  ' if ok else 'FAIL'} {name}")
+    degraded = payload.get("degraded") or []
+    if degraded:
+        print(f"  degraded: {', '.join(degraded)}")
+        raise typer.Exit(code=1)
+
+
+def _db_rows(config: dict[str, Any], repo_cls: Any, limit: int) -> list[Any]:
+    """Read the most recent rows from a repository (best effort)."""
+
+    async def _run() -> list[Any]:
+        from quad.persistence import create_database
+        from quad.persistence.repositories import make_repo
+
+        dsn = str(config.get("persistence", {}).get("dsn", "data/quad.db"))
+        db = create_database(dsn)
+        try:
+            await db.connect()
+            await db.initialize()
+            repo = make_repo(repo_cls, db, config)
+            return await repo.get_recent(limit=limit)
+        finally:
+            try:
+                await db.disconnect()
+            except Exception:
+                pass
+
+    import asyncio
+
+    try:
+        return asyncio.run(_run())
+    except FileNotFoundError:
+        print("❌ Database file not found. Has the bot ever run?")
+        raise typer.Exit(code=1) from None
+    except Exception as exc:
+        print(f"❌ Could not read the database: {exc}")
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def trades(
+    limit: int = typer.Option(20, "--limit", "-n", help="Number of rows"),
+    config_path: str = typer.Option(
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
+    ),
+) -> None:
+    """Show recent trades from the local database."""
+    from quad.persistence.repositories import TradeRepository
+
+    config = _load_config(config_path)
+    rows = _db_rows(config, TradeRepository, limit)
+    if not rows:
+        print("No trades recorded yet.")
+        return
+    table = [
+        [
+            str(getattr(r, "timestamp", "")),
+            str(getattr(r, "symbol", "")),
+            str(getattr(r, "side", "")),
+            str(getattr(r, "quantity", "")),
+            str(getattr(r, "price", "")),
+            str(getattr(r, "pnl", "")),
+        ]
+        for r in rows
+    ]
+    _print_table(
+        ["TIMESTAMP", "SYMBOL", "SIDE", "QTY", "PRICE", "PNL"],
+        table,
+        min_col_widths=[13, 10, 6, 8, 12, 8],
+    )
+
+
+@app.command()
+def decisions(
+    limit: int = typer.Option(20, "--limit", "-n", help="Number of rows"),
+    config_path: str = typer.Option(
+        "config/config.yaml", "--config", "-c", help="Path to config YAML"
+    ),
+) -> None:
+    """Show recent AI/strategy decisions from the local database."""
+    from quad.persistence.repositories import DecisionRepository
+
+    config = _load_config(config_path)
+    rows = _db_rows(config, DecisionRepository, limit)
+    if not rows:
+        print("No decisions recorded yet.")
+        return
+    table = [
+        [
+            str(getattr(r, "timestamp", "")),
+            str(getattr(r, "symbol", "") or getattr(r, "contract", "")),
+            str(getattr(r, "action", "")),
+            str(getattr(r, "outcome", "")),
+            str(getattr(r, "confidence", "")),
+        ]
+        for r in rows
+    ]
+    _print_table(
+        ["TIMESTAMP", "SYMBOL", "ACTION", "OUTCOME", "CONF"],
+        table,
+        min_col_widths=[13, 10, 8, 10, 6],
+    )
+
+
+@app.command()
+def logs(
+    path: str = typer.Option("logs/quad.log", "--path", "-p", help="Log file"),
+    lines: int = typer.Option(50, "--lines", "-n", help="How many lines"),
+) -> None:
+    """Print the tail of the bot's log file."""
+    p = Path(path)
+    if not p.exists():
+        print(f"No log file at {p}.")
+        print(
+            "Logs go to stdout (captured by the container runtime in Docker), "
+            "not to a file, unless QUAD_LOG_FILE is configured."
+        )
+        raise typer.Exit(code=1)
+    content = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    tail = content[-lines:] if lines > 0 else content
+    if not tail:
+        print(f"{p} is empty.")
+        return
+    for line in tail:
+        print(line)
 
 
 def main() -> None:

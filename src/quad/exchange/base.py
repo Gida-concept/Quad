@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping, MutableMapping
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import TypeVar
 
 import structlog
 
@@ -28,12 +29,16 @@ from quad.types.market import FundingRate
 
 log = structlog.get_logger(__name__)
 
+#: Type variable for the shared TTL cache helpers below.
+V = TypeVar("V")
+
 
 # ---------------------------------------------------------------------------
 # Shared exchange error hierarchy
 # ---------------------------------------------------------------------------
 # Both adapters raise these so higher layers (gateway, orchestrator) can catch
 # exchange failures by type regardless of which exchange produced them.
+
 
 class ExchangeError(Exception):
     """Base exception for exchange errors."""
@@ -53,6 +58,42 @@ class ExchangeRateLimitError(ExchangeError):
 
 class ExchangeBannedError(ExchangeError):
     """Raised on 418 IP ban."""
+
+
+# ---------------------------------------------------------------------------
+# Shared TTL cache helpers
+# ---------------------------------------------------------------------------
+# Every filter cache in this module -- and the Bybit adapter's override --
+# stored ``(monotonic_timestamp, value)`` pairs and re-implemented the same
+# freshness test.  The rule (monotonic clock, half-open ``[0, ttl)`` window)
+# is defined here once so the copies cannot drift apart.
+#
+# These operate on a plain ``dict`` rather than a bespoke cache class on
+# purpose: adapters and tests seed ``_exchange_info_cache`` directly with
+# ``cache[symbol] = (now, value)``, so the mapping stays the contract.
+
+CacheEntry = tuple[float, V]
+
+
+def _ttl_fresh(cache: Mapping[str, CacheEntry[V]], key: str, ttl: float) -> V | None:
+    """Return *key*'s cached value if it is still fresh, else ``None``.
+
+    An expired entry is reported as a miss (and left in place, so a concurrent
+    reader still sees a consistent value) rather than deleted, keeping this
+    free of any locking concern.
+    """
+    entry = cache.get(key)
+    if entry is None:
+        return None
+    stored_at, value = entry
+    if (time.monotonic() - stored_at) >= ttl:
+        return None
+    return value
+
+
+def _ttl_store(cache: MutableMapping[str, CacheEntry[V]], key: str, value: V) -> None:
+    """Record *value* for *key*, stamped with the current monotonic time."""
+    cache[key] = (time.monotonic(), value)
 
 
 class ExchangeOrderError(ExchangeError):
@@ -115,7 +156,7 @@ class ExchangeAdapter(ABC):
         (testnet vs live).  Subclasses should override this to return
         the appropriate endpoint.
         """
-        return "wss://ws.okx.com:8443/ws/v5/public"
+        return "wss://stream.bybit.com/v5/public"
 
     @property
     def private_ws_url(self) -> str:
@@ -125,7 +166,7 @@ class ExchangeAdapter(ABC):
         (testnet vs live).  Subclasses should override this to return
         the appropriate endpoint.
         """
-        return "wss://ws.okx.com:8443/ws/v5/private"
+        return "wss://stream.bybit.com/v5/private"
 
     # ------------------------------------------------------------------
     # REST — Account & Positions
@@ -200,7 +241,9 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
-    async def get_order_status(self, order_id: int | str, symbol: str = "") -> Order:
+    async def get_order_status(
+        self, order_id: int | str, symbol: str = ""
+    ) -> Order | None:
         """Get the current status of an order from the exchange.
 
         Args:
@@ -209,7 +252,9 @@ class ExchangeAdapter(ABC):
                 for ``GET /v5/order/realtime``.
 
         Returns:
-            An ``Order`` dataclass with the latest status.
+            An ``Order`` dataclass with the latest status, or ``None``
+            when the order is absent on the exchange (never a fabricated
+            empty ``Order``).
         """
         ...
 
@@ -282,7 +327,9 @@ class ExchangeAdapter(ABC):
         ...
 
     @abstractmethod
-    async def set_margin_mode(self, symbol: str, margin_type: str) -> dict:
+    async def set_margin_mode(
+        self, symbol: str, margin_type: str, leverage: int = 1
+    ) -> dict:
         """Set margin mode (isolated/cross) for a symbol."""
         ...
 
@@ -361,22 +408,39 @@ class ExchangeAdapter(ABC):
         cache = self._price_filter_cache
         ttl = float(getattr(self, "_exchange_info_ttl", 60))
 
-        now = time.monotonic()
-        cached = cache.get(symbol)
-        if cached is not None and (now - cached[0]) < ttl:
-            return cached[1]
+        tick = _ttl_fresh(cache, symbol, ttl)
+        if tick is not None:
+            return tick
 
         info = await self.get_exchange_info()
         tick = Decimal(0)
-        for s in info.get("symbols", []):
+        # Spot-style layout: {"symbols": [{symbol, filters: [{filterType, tickSize}]}]}.
+        for s in info.get("symbols", []) or []:
             if s.get("symbol") != symbol:
                 continue
-            for f in s.get("filters", []):
+            for f in s.get("filters", []) or []:
                 if f.get("filterType") == "PRICE_FILTER":
                     tick = Decimal(str(f.get("tickSize", "0")))
             break
+        else:
+            # Bybit V5 layout: {"result": {"list": [{symbol, priceFilter:
+            # {tickSize}}]}} (or a bare {"list": [...]}, as returned by the
+            # Bybit adapter's get_exchange_info which unwraps the envelope).
+            entries: list = []
+            if isinstance(info.get("list"), list):
+                entries = info["list"]
+            elif isinstance(info.get("result"), dict) and isinstance(
+                info["result"].get("list"), list
+            ):
+                entries = info["result"]["list"]
+            for s in entries:
+                if not isinstance(s, dict) or s.get("symbol") != symbol:
+                    continue
+                pf = s.get("priceFilter") or {}
+                tick = Decimal(str(pf.get("tickSize", "0") or "0"))
+                break
 
-        cache[symbol] = (now, tick)
+        _ttl_store(cache, symbol, tick)
         return tick
 
     async def normalize_price(
@@ -388,9 +452,9 @@ class ExchangeAdapter(ABC):
 
         The exchange may reject a STOP_MARKET / TAKE_PROFIT_MARKET ``triggerPrice``
         (and any limit ``price``) whose decimal precision exceeds the
-        symbol's tick with error -1111 ("Precision is over the maximum
-        defined for this asset").  Rounds to the nearest tick; returns the
-        price unchanged when no tick size is available.
+        symbol's tick ("precision exceeds the maximum defined for this
+        asset").  Rounds to the nearest tick; returns the price unchanged
+        when no tick size is available.
         """
         if price is None:
             return None
@@ -414,9 +478,9 @@ class ExchangeAdapter(ABC):
 
         Raises ``RuntimeError`` with a clear, exchange-error-mapped message
         when the quantity is below ``minQty`` (exchange rejects with a
-        "precision over the maximum" error) or when the implied notional is below ``minNotional`` (exchange
-        rejects with "notional is too small")
-        ``-4164``) — the exchange would reject such an order anyway, so we
+        "precision over the maximum" error) or when the implied notional is
+        below ``minNotional`` (exchange rejects with "notional is too
+        small") — the exchange would reject such an order anyway, so we
         fail loudly before it is ever sent.
 
         Filter data is cached per symbol for a short TTL
@@ -458,14 +522,14 @@ class ExchangeAdapter(ABC):
                 # above is already correct.
                 pass
 
-        # Below minQty -> the exchange would reject with -1113/-1111.
+        # Below minQty -> the exchange would reject the order.
         if qty < min_qty:
             raise RuntimeError(
                 f"quantity {qty} below minQty {min_qty} for {symbol} "
                 f"(exchange would reject; quantity below minimum)"
             )
 
-        # Below minNotional -> the exchange would reject with -4164.
+        # Below minNotional -> the exchange would reject the order.
         if min_notional > Decimal(0):
             px = price
             if px is None:
@@ -507,10 +571,9 @@ class ExchangeAdapter(ABC):
         cache = self._exchange_info_cache
         ttl = float(getattr(self, "_exchange_info_ttl", 60))
 
-        now = time.monotonic()
-        cached = cache.get(symbol)
-        if cached is not None and (now - cached[0]) < ttl:
-            return cached[1]
+        cached = _ttl_fresh(cache, symbol, ttl)
+        if cached is not None:
+            return cached
 
         info = await self.get_exchange_info()
         step = min_qty = min_notional = Decimal(0)
@@ -534,7 +597,7 @@ class ExchangeAdapter(ABC):
             )
 
         result = (step, min_qty, min_notional)
-        cache[symbol] = (now, result)
+        _ttl_store(cache, symbol, result)
         return result
 
     @abstractmethod

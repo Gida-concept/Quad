@@ -48,6 +48,7 @@ from groq import (
 )
 
 from quad.ai.validator import canonical_direction
+from quad.common.retry import exponential_backoff
 
 # ---------------------------------------------------------------------------
 # Logger
@@ -82,18 +83,23 @@ object, so this is handled. (``openai/gpt-oss-20b``/``-120b`` are not used:
 they return output in a separate ``reasoning`` field and empty ``content``,
 which would fail JSON parsing; ``groq/compound`` returns 413 on this prompt.)"""
 
-_DEFAULT_MAX_TOKENS_PER_DAY = 100_000
-"""Daily token budget for the default model (groq/compound-mini).
+_SMART_MODEL_DEFAULT = "qwen/qwen3-32b"
+"""Smart-tier judge model: used for paid-tier tenants and for breaking ties
+when the cheap judge disagrees with a strong local signal. Same-key model
+with JSON-extractable output (thinking-prefix safe via safe_parse).
+Overridable per deploy with ai.groq.smart_model."""
 
-The Groq free tier is quota-bound by TOKENS per day.  ``groq/compound-mini``
-(served behind ``llama-3.3-70b-versatile`` in 2026-08) reports a hard 429
-wall of ``Limit 100000`` tokens/day — NOT the 500K/day budget of the retired
-llama-3.1-8b-instant free tier.  The local throttle is deliberately set to
-match that real quota so ``is_available()`` trips *before* the API starts
-burning HTTP 429s instead of hammering the wall every cycle.  With a
-~6-10K-token per-request estimate that allows roughly 10-16 requests/day;
-the rotation therefore pauses (``ai_rate_limit_hit_stopping_scan``) for the
-rest of the UTC day and resumes after the 24h window slides past the spend."""
+_DEFAULT_MAX_TOKENS_PER_DAY = 100_000
+"""Daily token budget backstop for the default model.
+
+Free-tier reality (verified 2026-03, Groq docs): limits are per
+ORGANIZATION per model — groq/compound-mini allows 30 RPM / 250 RPD /
+70K TPM (no daily token cap published). The binding constraint for a
+multi-tenant service is REQUESTS per day per key, shared across ALL
+tenants on that key: 250 RPD / ~8 calls/day/trend-tenant ≈ 30 trend
+tenants per key; the GROQ_API_KEYS pool multiplies capacity.
+Scalp judging belongs on a 1,000-RPD model (qwen3-32b / gpt-oss-20b),
+never on compound-mini."""
 
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.3
@@ -112,9 +118,7 @@ retry loop still applies.
 _TOKEN_CHARS_PER_TOKEN = 4
 """Chars-per-token heuristic for dependency-light token estimation."""
 
-_RETRY_AFTER_TEXT_RE = re.compile(
-    r"try again in\s+([0-9a-zA-Z.]+)", re.IGNORECASE
-)
+_RETRY_AFTER_TEXT_RE = re.compile(r"try again in\s+([0-9a-zA-Z.]+)", re.IGNORECASE)
 """Captures the duration token after ``try again in`` in Groq 429 bodies.
 
 The per-minute (TPM) and per-day token quotas both report the
@@ -274,10 +278,16 @@ class GroqClient:
         config: dict[str, Any] | None = None,
     ) -> None:
         self._config = config or {}
-        self._ai_config = self._config["ai"]
-        self._groq_config = self._ai_config["groq"]
+        self._ai_config = self._config.get("ai", {})
+        self._groq_config = self._ai_config.get("groq", {})
 
-        self._api_key = api_key or os.environ.get("GROQ_API_KEY", "")
+        pool_raw = os.environ.get("GROQ_API_KEYS", "") or ""
+        pool = [k.strip() for k in pool_raw.split(",") if k.strip()]
+        single = api_key or os.environ.get("GROQ_API_KEY", "")
+        if single:
+            pool = [single] + [k for k in pool if k != single]
+        self._api_keys: list[str] = pool
+        self._api_key = self._api_keys[0] if self._api_keys else ""
         if not self._api_key:
             logger.warning("groq_api_key_missing")
 
@@ -285,20 +295,29 @@ class GroqClient:
         # Fallback model for graceful degradation when the primary is
         # rate-limited or token-budget exhausted.  Configurable via
         # ``ai.groq.fallback_model``; falls back to the module constant.
-        self._fallback_model = self._groq_config.get(
-            "fallback_model", _FALLBACK_MODEL
-        )
+        self._fallback_model = self._groq_config.get("fallback_model", _FALLBACK_MODEL)
         self._timeout = timeout or self._groq_config.get("timeout_seconds")
         self._max_retries = max_retries or self._groq_config.get("max_retries")
 
-        # Rate limiter / backoff configuration
-        rate_limiter_cfg = self._groq_config["rate_limiter"]
+        # Rate limiter / backoff configuration.  Fail-soft: a partial config
+        # (minimal deploy, tests) must not raise KeyError at construction.
+        rate_limiter_cfg = self._groq_config.get("rate_limiter") or {}
+        # Sliding-window length.  The schema defaults this to 86400, but a
+        # partial/minimal config omits it — `_prune_timestamps()` then did
+        # `now - None` and raised TypeError on every stats/availability call.
+        self._rate_limit_window_s = float(
+            rate_limiter_cfg.get("window_seconds") or 86400
+        )
         # Fall back to a sensible default when the key is absent so that
         # comparisons in is_available / _check_rate_limit never see None.
         self._max_requests_per_day = (
             max_requests_per_day or rate_limiter_cfg.get("max_requests_per_day") or 1000
         )
-        self._rate_limit_window_s = rate_limiter_cfg.get("window_seconds")
+        # Local caps are opt-in (``enforce: true``): the default path leaves
+        # quota enforcement to Groq 429s so a coarse local estimate can never
+        # veto a healthy primary.  When enabled, the token-bucket + daily cap
+        # below actively refuse before the API burns a 429.
+        self._rate_enforced = bool(rate_limiter_cfg.get("enforce", False))
         self._warning_level_1 = rate_limiter_cfg.get("warning_level_1")
         self._warning_level_2 = rate_limiter_cfg.get("warning_level_2")
         self._warning_level_3 = rate_limiter_cfg.get("warning_level_3")
@@ -310,6 +329,7 @@ class GroqClient:
         # the nested config key is absent (tests / minimal configs).
         token_budget_cfg = self._groq_config.get("token_budget", {}) or {}
         self._token_budget_enabled = bool(token_budget_cfg.get("enabled", True))
+        self._budget_enforced = bool(token_budget_cfg.get("enforce", False))
         self._max_tokens_per_day = int(
             token_budget_cfg.get("max_tokens_per_day") or _DEFAULT_MAX_TOKENS_PER_DAY
         )
@@ -347,6 +367,82 @@ class GroqClient:
         self._total_tokens_estimated: int = 0
         self._token_warning_sent: int = 0  # tracks highest token warning level
 
+        # Strong references to in-flight client-close tasks so they are not
+        # garbage-collected before the HTTP pool is released.
+        self._close_tasks: set[asyncio.Task] = set()
+
+    def _rotate_key(self) -> bool:
+        """Drop the exhausted key and rebuild the client on the next one.
+
+        Returns True when another key exists (caller should retry the same
+        model), False when the pool is spent (caller falls back to the
+        fallback model path as before).
+        """
+        if len(self._api_keys) <= 1:
+            return False
+        # Drop the exhausted key and advance to the next one in the pool.
+        self._api_keys.pop(0)
+        self._api_key = self._api_keys[0]
+        old_client = getattr(self, "_client", None)
+        self._client = AsyncGroq(
+            api_key=self._api_key,
+            timeout=self._timeout,
+            max_retries=0,
+        )
+        # Close the old client's HTTP connection pool.  This must use the
+        # RUNNING loop (asyncio.get_event_loop() is deprecated outside a
+        # coroutine and raises on 3.12+ when no loop is set) and must keep a
+        # strong reference to the task so it is not garbage-collected
+        # mid-flight — the previous fire-and-forget ensure_future() leaked
+        # the pool on every rotation.
+        if old_client is not None:
+            self._schedule_client_close(old_client)
+        self._log.warning("groq_key_rotated", pool_remaining=len(self._api_keys))
+        return True
+
+    def _schedule_client_close(self, old_client: Any) -> None:
+        """Close *old_client*'s HTTP pool on the running loop.
+
+        Fire-and-forget by design (rotation must not block on I/O), but the
+        task is retained in ``_close_tasks`` so it cannot be collected before
+        completion, and failures are logged rather than swallowed.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (sync caller / tests): nothing to schedule on.
+            # The client is dropped with the object, so log and move on
+            # instead of touching the deprecated get_event_loop().
+            self._log.debug("groq_client_close_skipped_no_loop")
+            return
+
+        close = getattr(old_client, "close", None)
+        if close is None:
+            return
+
+        async def _close() -> None:
+            try:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:  # pragma: no cover - best effort cleanup
+                self._log.warning("groq_client_close_failed", error=str(exc))
+
+        task = loop.create_task(_close())
+        self._close_tasks.add(task)
+        task.add_done_callback(self._close_tasks.discard)
+
+    def model_for_tier(self, tier: str) -> str:
+        """Resolve the judge model for an AI cost tier.
+
+        cheap (default) -> primary model; smart (paid tier,
+        disagreement escalation) -> smart model. Unknown tiers fall back
+        to the primary — never fail a cycle on a typo.
+        """
+        if (tier or "cheap").lower() == "smart":
+            return self._groq_config.get("smart_model", _SMART_MODEL_DEFAULT)
+        return self._model
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -382,18 +478,24 @@ class GroqClient:
     def is_available(self, now: float | None = None) -> bool:
         """Check if the client is available for trading decisions.
 
-        Availability is determined solely by the presence of an API key.
-        The daily request and token-budget caps were removed: local quota
-        arithmetic no longer gates AI.  Real quota exhaustion is surfaced by
-        the Groq API's own 429s and handled by the retry/backoff/fallback
-        path instead of a local ``is_available()`` veto.
+        Availability is determined by the presence of an API key.  When
+        local caps are opted in (``token_budget.enforce: true``), an
+        exhausted daily token budget also reports unavailable.
 
         Parameters
         ----------
         now:
-            Kept for signature compatibility; unused.
+            Reference timestamp for the rolling window; defaults to now.
         """
-        return bool(self._api_key)
+        if not self._api_key:
+            return False
+        if self._budget_enforced and self._token_budget_enabled:
+            try:
+                if self.tokens_used_in_window(now) >= self._max_tokens_per_day:
+                    return False
+            except Exception:
+                return False
+        return True
 
     # ------------------------------------------------------------------
     # Token budget (daily token-quota throttle)
@@ -450,27 +552,27 @@ class GroqClient:
         estimate: int,
         now: float | None = None,
     ) -> None:
-        """Daily token-budget throttle.
+        """Daily token-bucket throttle (opt-in via ``token_budget.enforce``).
 
-        No-op: the daily token-budget cap was removed.  Kept for call-site
-        compatibility; real quota limits surface as API 429s and are handled
-        by the retry/backoff/fallback path rather than a local veto.
+        No-op unless enforcement is enabled; then raises ``RuntimeError``
+        when ``used + estimate`` would exceed ``max_tokens_per_day``.  The
+        ``_chat`` retry loop routes that refusal to the fallback model.
 
         Parameters
         ----------
         estimate:
-            Kept for signature compatibility; unused.
+            Estimated tokens for the pending request.
         now:
-            Kept for signature compatibility; unused.
-
-        Raises
-        ------
-        RuntimeError
-            Previously raised when ``used + estimate`` would exceed
-            ``max_tokens_per_day``; the daily token-budget cap was removed,
-            so this no longer raises.
+            Reference timestamp for the rolling window; defaults to now.
         """
-        return
+        if not self._budget_enforced or not self._token_budget_enabled:
+            return
+        used = self.tokens_used_in_window(now)
+        if used + max(0, int(estimate or 0)) > self._max_tokens_per_day:
+            raise RuntimeError(
+                f"token budget exhausted: {used} + {estimate} > "
+                f"{self._max_tokens_per_day} tokens/day"
+            )
 
     # ------------------------------------------------------------------
     # Rate limiter
@@ -520,13 +622,20 @@ class GroqClient:
             self._request_timestamps.popleft()
 
     async def _check_rate_limit(self) -> None:
-        """Request-rate throttle.
+        """Request-rate throttle (opt-in via ``rate_limiter.enforce``).
 
-        No-op: the daily request cap was removed.  Kept for call-site
-        compatibility; real quota limits surface as API 429s and are handled
-        by the retry/backoff/fallback path rather than a local veto.
+        No-op unless enforcement is enabled; then raises ``RuntimeError``
+        when the rolling window already holds ``max_requests_per_day``
+        requests.
         """
-        return
+        if not self._rate_enforced:
+            return
+        self._prune_timestamps()
+        if len(self._request_timestamps) >= self._max_requests_per_day:
+            raise RuntimeError(
+                f"rate limit exceeded: {len(self._request_timestamps)} >= "
+                f"{self._max_requests_per_day} requests/day"
+            )
 
     # ------------------------------------------------------------------
     # Chat completion
@@ -675,7 +784,7 @@ class GroqClient:
 
             except RateLimitError as exc:
                 self._total_retries += 1
-                self._last_rate_limit = asyncio.get_event_loop().time()
+                self._last_rate_limit = time.time()
                 # Groq 429s carry the server-computed wait (``retry_after``),
                 # e.g. a TPM refusal with "Please try again in 21.84s."  Prefer
                 # it over the exponential backoff so the retry lands after the
@@ -683,7 +792,7 @@ class GroqClient:
                 # below the true TPM quota, so a fixed backoff would resend too
                 # early and burn every retry.
                 retry_after = self._extract_retry_after(exc)
-                base_wait = self._base_backoff * (2 ** (attempt - 1))
+                base_wait = exponential_backoff(attempt, self._base_backoff)
                 wait = (
                     max(retry_after, base_wait)
                     if retry_after is not None
@@ -705,6 +814,20 @@ class GroqClient:
                 # "try again in 43m52.608s"): retrying the SAME primary after
                 # minutes-per-attempt is pointless within this cycle, so route
                 # to the fallback model immediately instead of sleeping.
+                if (
+                    retry_after is not None
+                    and retry_after >= _FALLBACK_LONG_WAIT_S
+                    and self._rotate_key()
+                ):
+                    return await self._chat(
+                        active_model=active_model,
+                        msgs=msgs,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        json_mode=json_mode,
+                        estimated_total_tokens=estimated_total_tokens,
+                        allow_fallback=allow_fallback,
+                    )
                 if (
                     retry_after is not None
                     and retry_after >= _FALLBACK_LONG_WAIT_S
@@ -768,7 +891,7 @@ class GroqClient:
 
             except APIConnectionError as exc:
                 self._total_retries += 1
-                wait = self._base_backoff * (2 ** (attempt - 1))
+                wait = exponential_backoff(attempt, self._base_backoff)
 
                 self._log.warning(
                     "groq_connection_error",
@@ -822,6 +945,7 @@ class GroqClient:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Request a structured trading decision from the LLM.
 
@@ -870,10 +994,72 @@ class GroqClient:
             user=user_prompt,
             temperature=effective_temperature,
             max_tokens=effective_max_tokens,
+            model=model,
             json_mode=True,
         )
 
         return self._parse_trading_decision(raw)
+
+    async def decide_batch(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        symbols: list[str],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        model: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """One judge call for many symbols (scalping cost control).
+
+        Returns one decision dict per requested symbol, in order. Symbols
+        the model omits or mangles become safe HOLDs — a batch response
+        must never silently drop a symbol the worker is managing.
+        """
+        effective_temperature = (
+            temperature
+            if temperature is not None
+            else self._groq_config.get("decide_trades_temperature")
+        )
+        effective_max_tokens = (
+            max_tokens
+            if max_tokens is not None
+            else self._groq_config.get("decide_trades_max_tokens")
+        )
+        raw = await self.chat(
+            system=system_prompt,
+            user=user_prompt,
+            temperature=effective_temperature,
+            max_tokens=effective_max_tokens,
+            model=model,
+            json_mode=True,
+        )
+        try:
+            text = safe_parse_ai_response(raw)
+            payload = json.loads(text)
+            items = payload.get("decisions", []) if isinstance(payload, dict) else []
+        except (ValueError, AttributeError) as exc:
+            self._log.warning("groq_batch_unparseable", error=str(exc)[:200])
+            items = []
+        by_symbol: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if isinstance(item, dict) and item.get("symbol") in symbols:
+                by_symbol.setdefault(str(item["symbol"]), item)
+        out: list[dict[str, Any]] = []
+        for sym in symbols:
+            d = by_symbol.get(sym)
+            if not isinstance(d, dict):
+                d = {
+                    "symbol": sym,
+                    "action": "HOLD",
+                    "direction": "NEUTRAL",
+                    "confidence": 0.0,
+                    "quantity": None,
+                    "reasoning": "batch judge omitted symbol; safe HOLD",
+                }
+            d.setdefault("contract", sym)
+            out.append(d)
+        return out
 
     def _parse_trading_decision(self, raw: str) -> dict[str, Any]:
         """Parse the LLM response into a structured trading decision dict.

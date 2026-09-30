@@ -59,9 +59,7 @@ def _short_position(symbol: str = "BTCUSDT") -> Position:
     )
 
 
-def _bracket_order(
-    order_type: str, stop_price: str, symbol: str = "BTCUSDT"
-) -> Order:
+def _bracket_order(order_type: str, stop_price: str, symbol: str = "BTCUSDT") -> Order:
     return Order(
         symbol=symbol,
         order_type=order_type,
@@ -113,8 +111,7 @@ async def test_startup_flattens_previous_positions_when_enabled():
 
     orch._close_all_positions.assert_awaited_once()
     assert any(
-        "startup_flattening_previous_positions"
-        in str(call.args[0])
+        "startup_flattening_previous_positions" in str(call.args[0])
         for call in orch._log.info.call_args_list
     )
 
@@ -225,8 +222,6 @@ async def test_max_hold_does_not_close_fresh_position():
     assert "BTCUSDT" in orch._rotation_hold_since
 
 
-
-
 # ---------------------------------------------------------------------------
 # 4. Price-bracket guard (mark price clearly beyond TP/SL trigger)
 # ---------------------------------------------------------------------------
@@ -262,7 +257,10 @@ async def test_price_beyond_sl_forces_close_long():
     orch = _ready_orch(_make_orchestrator())
     orch._exchange_adapter.get_mark_price = AsyncMock(return_value=Decimal("59000"))
     pos = _open_position()  # LONG
-    orders = [_bracket_order("STOP_MARKET", "60000"), _bracket_order("TAKE_PROFIT_MARKET", "70000")]
+    orders = [
+        _bracket_order("STOP_MARKET", "60000"),
+        _bracket_order("TAKE_PROFIT_MARKET", "70000"),
+    ]
 
     result = await _run_case_a(orch, [pos], orders)
 
@@ -280,7 +278,10 @@ async def test_price_beyond_tp_forces_close_long():
     orch = _ready_orch(_make_orchestrator())
     orch._exchange_adapter.get_mark_price = AsyncMock(return_value=Decimal("71000"))
     pos = _open_position()  # LONG
-    orders = [_bracket_order("STOP_MARKET", "60000"), _bracket_order("TAKE_PROFIT_MARKET", "70000")]
+    orders = [
+        _bracket_order("STOP_MARKET", "60000"),
+        _bracket_order("TAKE_PROFIT_MARKET", "70000"),
+    ]
 
     result = await _run_case_a(orch, [pos], orders)
 
@@ -294,7 +295,10 @@ async def test_price_beyond_sl_forces_close_short():
     orch = _ready_orch(_make_orchestrator())
     orch._exchange_adapter.get_mark_price = AsyncMock(return_value=Decimal("71000"))
     pos = _short_position()  # SHORT: SL above entry
-    orders = [_bracket_order("STOP_MARKET", "70000"), _bracket_order("TAKE_PROFIT_MARKET", "60000")]
+    orders = [
+        _bracket_order("STOP_MARKET", "70000"),
+        _bracket_order("TAKE_PROFIT_MARKET", "60000"),
+    ]
 
     result = await _run_case_a(orch, [pos], orders)
 
@@ -308,7 +312,10 @@ async def test_price_inside_bracket_no_close():
     orch = _ready_orch(_make_orchestrator())
     orch._exchange_adapter.get_mark_price = AsyncMock(return_value=Decimal("65000"))
     pos = _open_position()  # LONG
-    orders = [_bracket_order("STOP_MARKET", "60000"), _bracket_order("TAKE_PROFIT_MARKET", "70000")]
+    orders = [
+        _bracket_order("STOP_MARKET", "60000"),
+        _bracket_order("TAKE_PROFIT_MARKET", "70000"),
+    ]
 
     result = await _run_case_a(orch, [pos], orders)
 
@@ -371,6 +378,8 @@ async def test_price_bracket_check_mark_unavailable_no_close():
     assert result is True
     orch._close_all_positions.assert_not_awaited()
     orch._scan_pair.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_max_hold_disabled_by_zero():
     orch = _make_orchestrator(max_hold_seconds=0.0)
@@ -555,7 +564,10 @@ async def test_legacy_hold_mode_keeps_position_when_flag_off():
     from quad.types.strategy import StrategyContext
 
     pos = _open_position()
-    orders = [_bracket_order("STOP_MARKET", "60000"), _bracket_order("TAKE_PROFIT_MARKET", "70000")]
+    orders = [
+        _bracket_order("STOP_MARKET", "60000"),
+        _bracket_order("TAKE_PROFIT_MARKET", "70000"),
+    ]
 
     result = await orch._run_ai_rotation(
         account=None,

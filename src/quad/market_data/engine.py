@@ -27,7 +27,6 @@ from quad.market_data.websocket import (
     CHANNEL_BOOKS5,
     CHANNEL_CANDLE,
     CHANNEL_LIQUIDATION_ORDERS,
-    CHANNEL_MARK_PRICE,
     CHANNEL_TICKERS,
     WebSocketManager,
 )
@@ -51,9 +50,9 @@ class MarketDataEngine:
         engine = MarketDataEngine(exchange_adapter, config, db_manager)
         await engine.start()
 
-        funding = await engine.get_funding_rate("BTC-USDT-SWAP")
-        book = await engine.get_order_book("BTC-USDT-SWAP")
-        mark = await engine.get_mark_price("BTC-USDT-SWAP")
+        funding = await engine.get_funding_rate("BTCUSDT")
+        book = await engine.get_order_book("BTCUSDT")
+        mark = await engine.get_mark_price("BTCUSDT")
 
         status = engine.status()
         await engine.stop()
@@ -71,7 +70,7 @@ class MarketDataEngine:
         ----------
         exchange_adapter:
             The exchange adapter used for live data fetching.  Must be
-            compatible with OKX USDT perpetual (e.g. ``OkxFuturesAdapter``).
+            compatible with Bybit USDT perpetual (``BybitFuturesAdapter``).
         config:
             Optional configuration dict.  Sub-keys under ``market_data``:
 
@@ -108,6 +107,15 @@ class MarketDataEngine:
         self._ticker_cache: dict[str, dict] = {}
         """Maps symbol -> 24h mini ticker data dict."""
 
+        # Per-cache receive timestamps (monotonic seconds) backing max_age /
+        # staleness checks on the cached getters below.
+        self._cache_ts: dict[str, dict[str, float]] = {
+            "order_book": {},
+            "funding_rate": {},
+            "mark_price": {},
+            "ticker": {},
+        }
+
         # Symbols to subscribe to (from config)
         self._symbols: list[str] = []
 
@@ -125,11 +133,10 @@ class MarketDataEngine:
 
         Creates and starts the WebSocket manager, price buffer, and
         historical data provider (if a database manager was provided).
-        Subscribes to OKX V5 futures market data channels:
+        Subscribes to Bybit V5 linear market data topics:
 
-        * ``tickers`` — 24h ticker for all symbols
-        * ``mark-price`` — mark price + funding rate updates
-        * ``books5`` — top 5 order book levels (best bid/ask)
+        * ``tickers.{symbol}`` — 24h ticker incl. mark price + funding rate
+        * ``orderbook.25.{symbol}`` — top-25 bids/asks
         """
         if self._running:
             self._log.warning("already_running")
@@ -164,22 +171,17 @@ class MarketDataEngine:
         self._ws_manager._ws_url = self._exchange.public_ws_url
         await self._ws_manager.start()
 
-        # Subscribe to OKX V5 futures market data channels
+        # Subscribe to Bybit V5 linear market data topics
+        ok = True
         try:
-            # Subscribe to tickers for all configured symbols
+            # tickers.{symbol} carries last/mark/funding in one feed, so a
+            # single subscription per symbol serves both the 24h-ticker and
+            # the mark-price/funding caches (one combined handler).
             for symbol in self._symbols:
                 await self._ws_manager.subscribe(
                     CHANNEL_TICKERS,
                     symbol,
-                    self._handle_ticker,
-                )
-
-            # Subscribe to mark-price for all configured symbols
-            for symbol in self._symbols:
-                await self._ws_manager.subscribe(
-                    CHANNEL_MARK_PRICE,
-                    symbol,
-                    self._handle_mark_price_update,
+                    self._handle_ticker_and_mark,
                 )
 
             # Subscribe to books5 for all configured symbols
@@ -195,7 +197,12 @@ class MarketDataEngine:
                 symbols=self._symbols,
             )
         except Exception:
+            ok = False
             self._log.exception("futures_stream_subscription_failed")
+
+        if not ok:
+            self._log.critical("market_data_subscriptions_failed")
+            raise RuntimeError("market_data_subscriptions_failed")
 
         self._running = True
         self._log.info("market_data_engine_started")
@@ -243,7 +250,7 @@ class MarketDataEngine:
         Parameters
         ----------
         symbols:
-            List of futures symbols (e.g. ``["BTC-USDT-SWAP", "ETH-USDT-SWAP"]``).
+            List of futures symbols (e.g. ``["BTCUSDT", "ETHUSDT"]``).
         handler:
             Async callback invoked with each decoded JSON message.
 
@@ -286,8 +293,9 @@ class MarketDataEngine:
         symbols:
             List of futures symbols.
         interval:
-            Kline interval (default ``"1m"``).  OKX V5 uses formats like
-            ``"1m"``, ``"5m"``, ``"1H"``, ``"1D"``.
+            Kline interval (default ``"1m"``).  Bybit V5 uses ``"1"``,
+            ``"5"``, ``"15"``, ``"60"``, ``"D"``, ``"W"`` (mapped from the
+            ``candle{interval}`` channel name).
         handler:
             Async callback invoked with each decoded JSON message.
 
@@ -304,7 +312,7 @@ class MarketDataEngine:
 
         sub_id = ""
         for sym in symbols:
-            # OKX V5 candle channel format: "candle1m", "candle5m", "candle1H", etc.
+            # Logical candle channel; the WS manager maps it to Bybit kline topics.
             channel = f"{CHANNEL_CANDLE}{interval}"
             sub_id = await self._ws_manager.subscribe(
                 channel,
@@ -323,32 +331,78 @@ class MarketDataEngine:
     async def subscribe_liquidations(
         self,
         handler: Callable[[dict], Awaitable[None]],
+        symbols: list[str] | None = None,
     ) -> str:
         """Subscribe to liquidation order events via WebSocket.
+
+        Bybit only serves ``liquidation.{symbol}`` per-symbol topics (no
+        wildcard ``liquidation.*``), so one subscription is opened per
+        symbol.
 
         Parameters
         ----------
         handler:
             Async callback invoked with each decoded JSON message.
+        symbols:
+            Symbols to subscribe (defaults to the engine's configured
+            symbols, or ``["BTCUSDT"]`` when none are configured).
 
         Returns
         -------
         str
-            A subscription ID.
+            A subscription ID (from the last symbol subscribed).
         """
         if self._ws_manager is None:
             raise RuntimeError("MarketDataEngine not started. Call start() first.")
-        return await self._ws_manager.subscribe(
-            CHANNEL_LIQUIDATION_ORDERS,
-            "*",  # Subscribe to all instruments
-            handler,
-        )
+        targets = symbols or self._symbols or ["BTCUSDT"]
+        sub_id = ""
+        for sym in targets:
+            sub_id = await self._ws_manager.subscribe(
+                CHANNEL_LIQUIDATION_ORDERS,
+                sym,
+                handler,
+            )
+        return sub_id
 
     # ------------------------------------------------------------------
     # Futures market data accessors
     # ------------------------------------------------------------------
 
-    async def get_funding_rate(self, symbol: str) -> FundingRate | None:
+    def _touch(self, cache: str, symbol: str) -> None:
+        """Record receipt time for a cache entry (staleness bookkeeping)."""
+        self._cache_ts.setdefault(cache, {})[symbol] = time.monotonic()
+
+    def is_stale(self, cache: str, symbol: str, max_age: float) -> bool:
+        """Whether a cache entry is missing or older than ``max_age`` seconds.
+
+        Parameters
+        ----------
+        cache:
+            One of ``"order_book"``, ``"funding_rate"``, ``"mark_price"``,
+            ``"ticker"``.
+        symbol:
+            The futures symbol.
+        max_age:
+            Maximum acceptable age in seconds.
+
+        Returns
+        -------
+        bool
+            ``True`` when no timestamp is recorded or the entry is older
+            than ``max_age``.
+        """
+        ts = self._cache_ts.get(cache, {}).get(symbol)
+        if ts is None:
+            return True
+        return (time.monotonic() - ts) > max_age
+
+    def _fresh(self, cache: str, symbol: str, max_age: float | None) -> bool:
+        """Whether the cache entry passes an optional ``max_age`` gate."""
+        return max_age is None or not self.is_stale(cache, symbol, max_age)
+
+    async def get_funding_rate(
+        self, symbol: str, max_age: float | None = None
+    ) -> FundingRate | None:
         """Return the latest funding rate for *symbol* from the cache.
 
         The funding rate cache is updated in real-time via the
@@ -357,16 +411,26 @@ class MarketDataEngine:
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
+            The futures symbol (e.g. ``"BTCUSDT"``).
+        max_age:
+            Optional maximum entry age in seconds; when given and the
+            cached entry is older (or missing), ``None`` is returned so
+            callers never act on stale data.  Use :meth:`is_stale` with
+            ``cache="funding_rate"`` to distinguish missing vs stale.
 
         Returns
         -------
         FundingRate | None
-            ``None`` if no funding rate data has been received yet.
+            ``None`` if no funding rate data has been received yet (or the
+            entry is older than ``max_age``).
         """
+        if not self._fresh("funding_rate", symbol, max_age):
+            return None
         return self._funding_rate_cache.get(symbol)
 
-    async def get_order_book(self, symbol: str) -> dict | None:
+    async def get_order_book(
+        self, symbol: str, max_age: float | None = None
+    ) -> dict | None:
         """Return the latest order book snapshot for *symbol* from the cache.
 
         The order book cache is updated in real-time via the
@@ -375,17 +439,27 @@ class MarketDataEngine:
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
+            The futures symbol (e.g. ``"BTCUSDT"``).
+        max_age:
+            Optional maximum entry age in seconds; when given and the
+            cached entry is older (or missing), ``None`` is returned so
+            callers never act on stale data.  Use :meth:`is_stale` with
+            ``cache="order_book"`` to distinguish missing vs stale.
 
         Returns
         -------
         dict | None
             A dict with keys ``bids``, ``asks``, and ``timestamp``,
-            or ``None`` if no data has been received yet.
+            or ``None`` if no data has been received yet (or the entry is
+            older than ``max_age``).
         """
+        if not self._fresh("order_book", symbol, max_age):
+            return None
         return self._order_book_cache.get(symbol)
 
-    async def get_mark_price(self, symbol: str) -> Decimal | None:
+    async def get_mark_price(
+        self, symbol: str, max_age: float | None = None
+    ) -> Decimal | None:
         """Return the latest mark price for *symbol* from the cache.
 
         The mark price cache is updated in real-time via the
@@ -394,16 +468,26 @@ class MarketDataEngine:
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
+            The futures symbol (e.g. ``"BTCUSDT"``).
+        max_age:
+            Optional maximum entry age in seconds; when given and the
+            cached entry is older (or missing), ``None`` is returned so
+            callers never act on stale data.  Use :meth:`is_stale` with
+            ``cache="mark_price"`` to distinguish missing vs stale.
 
         Returns
         -------
         Decimal | None
-            ``None`` if no mark price data has been received yet.
+            ``None`` if no mark price data has been received yet (or the
+            entry is older than ``max_age``).
         """
+        if not self._fresh("mark_price", symbol, max_age):
+            return None
         return self._mark_price_cache.get(symbol)
 
-    async def get_ticker(self, symbol: str) -> dict | None:
+    async def get_ticker(
+        self, symbol: str, max_age: float | None = None
+    ) -> dict | None:
         """Return the latest 24h ticker for *symbol* from the cache.
 
         The ticker cache is updated in real-time via the
@@ -412,7 +496,12 @@ class MarketDataEngine:
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
+            The futures symbol (e.g. ``"BTCUSDT"``).
+        max_age:
+            Optional maximum entry age in seconds; when given and the
+            cached entry is older (or missing), ``None`` is returned so
+            callers never act on stale data.  Use :meth:`is_stale` with
+            ``cache="ticker"`` to distinguish missing vs stale.
 
         Returns
         -------
@@ -420,8 +509,11 @@ class MarketDataEngine:
             A dict with keys ``symbol``, ``last``, ``bid``, ``ask``,
             ``open24h``, ``high24h``, ``low24h``, ``vol24h``,
             ``volCcy24h``, and ``timestamp``,
-            or ``None`` if no data has been received yet.
+            or ``None`` if no data has been received yet (or the entry is
+            older than ``max_age``).
         """
+        if not self._fresh("ticker", symbol, max_age):
+            return None
         return self._ticker_cache.get(symbol)
 
     # ------------------------------------------------------------------
@@ -437,7 +529,7 @@ class MarketDataEngine:
         Parameters
         ----------
         symbol:
-            The futures symbol (e.g. ``"BTC-USDT-SWAP"``).
+            The futures symbol (e.g. ``"BTCUSDT"``).
         """
         if self._buffer is None:
             return None
@@ -493,33 +585,32 @@ class MarketDataEngine:
         return await self._historical.get_candles(symbol, start, end)
 
     # ------------------------------------------------------------------
-    # WebSocket message handlers (OKX V5 field names)
+    # WebSocket message handlers (Bybit V5 field names)
     # ------------------------------------------------------------------
 
     async def _handle_mark_price_update(self, message: dict) -> None:
         """Process ``mark-price`` WebSocket messages.
 
-        OKX V5 mark-price fields:
-        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
-        - ``instType``: Instrument type (e.g. "SWAP")
-        - ``markPx``: Mark price
+        Shares the Bybit ``tickers.{symbol}`` feed; Bybit fields:
+        - ``symbol``: Contract symbol (e.g. "BTCUSDT")
+        - ``markPrice``: Mark price
+        - ``indexPrice``: Index price
         - ``fundingRate``: Estimated funding rate
         - ``nextFundingTime``: Next funding time (ms timestamp)
-        - ``ts``: Timestamp (ms)
         """
         from quad.types.market import FundingRate
 
         data_list: list[dict] = message.get("data", [])
 
         for item in data_list:
-            symbol: str = item.get("instId", "")
+            symbol: str = item.get("symbol", "")
             if not symbol:
                 continue
 
-            mark_price = Decimal(str(item.get("markPx", "0")))
+            mark_price = Decimal(str(item.get("markPrice", "0")))
+            index_price = Decimal(str(item.get("indexPrice", "0") or "0"))
             funding_rate_val = Decimal(str(item.get("fundingRate", "0")))
-            next_funding_time: int = int(item.get("nextFundingTime", 0))
-            timestamp: int = int(item.get("ts", 0))
+            next_funding_time: int = int(item.get("nextFundingTime", 0) or 0)
 
             self._mark_price_cache[symbol] = mark_price
             self._funding_rate_cache[symbol] = FundingRate(
@@ -527,73 +618,103 @@ class MarketDataEngine:
                 funding_rate=funding_rate_val,
                 next_funding_time=next_funding_time,
                 mark_price=mark_price,
-                index_price=mark_price,  # OKX doesn't provide index price in this channel
+                index_price=index_price or mark_price,
             )
+            self._touch("mark_price", symbol)
+            self._touch("funding_rate", symbol)
+
+    async def _handle_ticker_and_mark(self, message: dict) -> None:
+        """Combined handler for the single ``tickers.{symbol}`` feed.
+
+        One subscription per symbol serves both the 24h-ticker cache (plus
+        price buffer) and the mark-price/funding caches — no duplicate
+        topic subscriptions.
+        """
+        await self._handle_ticker(message)
+        await self._handle_mark_price_update(message)
 
     async def _handle_ticker(self, message: dict) -> None:
         """Process ``tickers`` WebSocket messages.
 
-        OKX V5 tickers fields:
-        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
-        - ``instType``: Instrument type (e.g. "SWAP")
-        - ``last``: Last traded price
-        - ``lastSz``: Last traded size
-        - ``askPx``: Best ask price
-        - ``askSz``: Best ask size
-        - ``bidPx``: Best bid price
-        - ``bidSz``: Best bid size
-        - ``open24h``: Opening price (24h)
-        - ``high24h``: Highest price (24h)
-        - ``low24h``: Lowest price (24h)
-        - ``vol24h``: Trading volume (24h, in contracts)
-        - ``volCcy24h``: Trading volume (24h, in currency)
-        - ``ts``: Timestamp (ms)
+        Bybit V5 tickers fields:
+        - ``symbol``: Contract symbol (e.g. "BTCUSDT")
+        - ``lastPrice``: Last traded price
+        - ``bid1Price`` / ``ask1Price``: Best bid/ask
+        - ``highPrice24h`` / ``lowPrice24h``: 24h range
+        - ``volume24h`` / ``turnover24h``: 24h volume / turnover
         """
         data_list: list[dict] = message.get("data", [])
+        timestamp = int(message.get("ts", 0) or 0)
 
         for item in data_list:
-            symbol: str = item.get("instId", "")
+            symbol: str = item.get("symbol", "")
             if not symbol:
                 continue
 
             self._ticker_cache[symbol] = {
                 "symbol": symbol,
-                "last": item.get("last", "0"),
-                "bid": item.get("bidPx", "0"),
-                "ask": item.get("askPx", "0"),
-                "open24h": item.get("open24h", "0"),
-                "high24h": item.get("high24h", "0"),
-                "low24h": item.get("low24h", "0"),
-                "vol24h": item.get("vol24h", "0"),
-                "volCcy24h": item.get("volCcy24h", "0"),
-                "timestamp": int(item.get("ts", 0)),
+                "last": item.get("lastPrice", "0"),
+                "bid": item.get("bid1Price", "0"),
+                "ask": item.get("ask1Price", "0"),
+                "open24h": item.get("prevPrice24h", "0"),
+                "high24h": item.get("highPrice24h", "0"),
+                "low24h": item.get("lowPrice24h", "0"),
+                "vol24h": item.get("volume24h", "0"),
+                "volCcy24h": item.get("turnover24h", "0"),
+                "timestamp": timestamp,
             }
+            self._touch("ticker", symbol)
 
             # Feed last price into the price buffer
             if self._buffer is not None:
-                last_price = Decimal(str(item.get("last", "0")))
+                last_price = Decimal(str(item.get("lastPrice", "0")))
                 if last_price > Decimal(0):
                     await self._buffer.append(symbol, last_price)
+
+    @staticmethod
+    def _book_is_stale(item: dict, prev: dict) -> bool:
+        """Whether an orderbook update is older than the cached snapshot.
+
+        Bybit ``orderbook.25`` deltas carry ``seq`` and ``u`` (updateId);
+        out-of-order delivery must not overwrite newer state.
+        """
+        try:
+            seq, pseq = item.get("seq"), prev.get("seq")
+            if seq is not None and pseq is not None and int(seq) < int(pseq):
+                return True
+            upd, pupd = item.get("u", item.get("updateId")), prev.get("update_id")
+            if upd is not None and pupd is not None and int(upd) <= int(pupd):
+                # Same-or-older updateId with no newer seq: stale/duplicate.
+                if seq is None or pseq is None or int(seq) <= int(pseq):
+                    return True
+        except (TypeError, ValueError):
+            return False
+        return False
 
     async def _handle_book_ticker(self, message: dict) -> None:
         """Process ``books5`` WebSocket messages.
 
-        OKX V5 books5 fields:
-        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
-        - ``bids``: Array of [price, size, count] for top 5 bid levels
-        - ``asks``: Array of [price, size, count] for top 5 ask levels
-        - ``ts``: Timestamp (ms)
+        Bybit V5 ``orderbook.25`` fields:
+        - ``s``: Contract symbol (e.g. "BTCUSDT")
+        - ``b``: Bids as [price, size] (snapshot or delta rows)
+        - ``a``: Asks as [price, size]
+        - ``u``/``updateId`` + ``seq``: versioning — stale updates are ignored.
         """
         data_list: list[dict] = message.get("data", [])
+        timestamp = int(message.get("ts", 0) or 0)
 
         for item in data_list:
-            symbol: str = item.get("instId", "")
+            symbol: str = item.get("s", item.get("symbol", ""))
             if not symbol:
                 continue
 
-            # Parse bids and asks (each is an array of [price, size, count])
-            raw_bids = item.get("bids", [])
-            raw_asks = item.get("asks", [])
+            prev = self._order_book_cache.get(symbol, {})
+            if prev and self._book_is_stale(item, prev):
+                continue
+
+            # Parse bids and asks (each is an array of [price, size])
+            raw_bids = item.get("b", item.get("bids", []))
+            raw_asks = item.get("a", item.get("asks", []))
 
             bids = [
                 (Decimal(str(bid[0])), Decimal(str(bid[1])))
@@ -609,60 +730,60 @@ class MarketDataEngine:
             self._order_book_cache[symbol] = {
                 "bids": bids,
                 "asks": asks,
-                "timestamp": int(item.get("ts", 0)),
+                "timestamp": timestamp,
+                "seq": item.get("seq"),
+                "update_id": item.get("u", item.get("updateId")),
             }
+            self._touch("order_book", symbol)
 
     async def _handle_kline_update(self, message: dict) -> None:
         """Process candle (kline) WebSocket messages.
 
-        OKX V5 candle fields:
-        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
-        - ``ts``: Opening time (ms)
-        - ``o``: Open price
-        - ``h``: High price
-        - ``l``: Low price
-        - ``c``: Close price
-        - ``vol``: Volume (in contracts)
-        - ``volCcy``: Volume (in currency)
-        - ``confirm``: 0 = incomplete, 1 = complete candle
+        Bybit V5 kline fields:
+        - ``symbol`` is carried in the topic (relayed via ``arg.symbol``)
+        - ``start``: Candle open time (ms)
+        - ``open`` / ``high`` / ``low`` / ``close``: Prices
+        - ``volume``: Base-asset volume
+        - ``confirm``: Whether the candle is closed
         """
         data_list: list[dict] = message.get("data", [])
+        arg = message.get("arg", {}) if isinstance(message.get("arg"), dict) else {}
+        topic_symbol = str(arg.get("symbol", ""))
 
         for item in data_list:
-            symbol: str = item.get("instId", "")
+            symbol: str = item.get("symbol", topic_symbol)
             if not symbol:
                 continue
 
-            close_price = item.get("c", "0")
+            # Skip unconfirmed (still-forming) candles — only closed
+            # candles (confirm=true, or no confirm flag) feed the buffer.
+            if item.get("confirm") is False:
+                continue
+
+            close_price = item.get("close", "0")
             if self._buffer is not None and close_price:
                 await self._buffer.append(symbol, Decimal(str(close_price)))
 
     async def _handle_liquidation_order(self, message: dict) -> None:
         """Process liquidation-orders WebSocket messages.
 
-        OKX V5 liquidation-orders fields:
-        - ``instId``: Instrument ID (e.g. "BTC-USDT-SWAP")
-        - ``instType``: Instrument type (e.g. "SWAP")
-        - ``ts``: Timestamp (ms)
-        - ``underlying``: Underlying asset
-        - ``bankruptPx``: Bankruptcy price
-        - ``bankruptSz``: Bankruptcy size
-        - ``side``: Side (buy/sell)
-        - ``ok``: 0 = failed, 1 = success
-        - ``ccy``: Currency
-        - ``marginMode``: Margin mode (isolated/cross)
+        Bybit V5 ``liquidation.{symbol}`` fields:
+        - ``s``: Contract symbol (e.g. "BTCUSDT")
+        - ``S``: Side ("Buy"/"Sell")
+        - ``v``: Liquidated size
+        - ``p``: Bankruptcy/execution price
+        - ``t``: Timestamp (ms)
         """
         data_list: list[dict] = message.get("data", [])
 
         for item in data_list:
-            symbol: str = item.get("instId", "")
+            symbol: str = item.get("s", item.get("symbol", ""))
             self._log.debug(
                 "liquidation_event",
                 symbol=symbol,
-                side=item.get("side", ""),
-                size=item.get("bankruptSz", ""),
-                price=item.get("bankruptPx", ""),
-                ok=item.get("ok", 0),
+                side=item.get("S", item.get("side", "")),
+                size=item.get("v", item.get("size", "")),
+                price=item.get("p", item.get("price", "")),
             )
 
     # ------------------------------------------------------------------
@@ -695,11 +816,11 @@ class MarketDataEngine:
         }
         if self._buffer is not None:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    pass
-            except RuntimeError:
-                pass
+                # Use the buffer's public accessor.  Reading _buffers
+                # directly bypassed the class API and duplicated its logic.
+                buffer_status = self._buffer.snapshot_counts()
+            except Exception as exc:
+                self._log.debug("buffer_status_unavailable", error=str(exc))
 
         uptime = (
             time.monotonic() - self._start_time if self._start_time is not None else 0.0

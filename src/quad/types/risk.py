@@ -159,7 +159,7 @@ class Action:
             elif self.type in ("set_stop_loss", "set_take_profit"):
                 self.side = "SELL"
         if self.type == "set_stop_loss":
-            # Market-on-trigger stop: Binance requires only a stopPrice (the
+            # Market-on-trigger stop: only a stopPrice is needed (the
             # legacy STOP_LOSS type is limit-if-triggered and would be
             # rejected without a `price`).
             self.order_type = "STOP_MARKET"

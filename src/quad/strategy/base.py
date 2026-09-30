@@ -380,7 +380,7 @@ class StrategyBase(ABC):
     ) -> float:
         """Calculate projected funding cost for holding a position.
 
-        Binance funds every 8 hours. A positive funding rate means longs pay shorts.
+        Bybit funds every 8 hours. A positive funding rate means longs pay shorts.
 
         Args:
             position_size_usd: Position notional value in USD.

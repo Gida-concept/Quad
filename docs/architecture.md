@@ -11,7 +11,8 @@ The **Telegram bot** is the primary user-facing layer, providing real-time tradi
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │               TELEGRAM INTERFACE (python-telegram-bot)         │
-│     (/start /status /positions /pnl /risk /strategies /help)  │
+│  /start /help /status /balance /positions /orders /risk        │
+│  /strategies /execute /kill /analyze /ai_* /exchange           │
 │                     PRIMARY USER INTERFACE                      │
 └────────────────────────┬─────────────────────────────────────┘
                          │
@@ -36,9 +37,9 @@ The **Telegram bot** is the primary user-facing layer, providing real-time tradi
 ┌────────────────┐ ┌────────────┐ ┌────────────────┐
 │ MARKET DATA   │ │ EXCHANGE   │ │ EXECUTION      │
 │ MODULE        │ │ ADAPTER    │ │ ENGINE          │
-│ (WebSocket    │ │ (MCP or   │ │ (order gateway, │
+│ (WebSocket    │ │ (pybit     │ │ (order gateway, │
 │  manager,     │ │  SDK)      │ │  TWAP splitter, │
-│  data store,  │ │ OKX        │ │  slippage est., │
+│  data store,  │ │ Bybit      │ │  slippage est., │
 │  normalizer)  │ │ USDT       │ │  post-trade     │
 └────────────────┘ │ Perpetual  │ │  analysis)      │
                    │ adapter    │ └────────────────┘
@@ -59,7 +60,7 @@ The **Telegram bot** is the primary user-facing layer, providing real-time tradi
                          │
 ┌────────────────────────▼─────────────────────────────────────┐
 │                  PERSISTENCE LAYER (SQLite)                         │
-│  (16 tables, repository pattern, migrations, snapshot/recovery     │
+│  (20 tables, schema v10, repository pattern, migrations)          │
 └────────────────────────┬─────────────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────────────┐
@@ -70,28 +71,161 @@ The **Telegram bot** is the primary user-facing layer, providing real-time tradi
 
 ---
 
+## Startup Order
+
+`QuadOrchestrator.start()` (`src/quad/orchestrator/orchestrator.py`) wires the
+subsystems in a fixed dependency order. If any step raises, everything already
+initialised is shut down in reverse order and the exception propagates.
+
+| # | Step | Notes |
+|---|---|---|
+| 1 | `ConfigManager` | 3-layer merge: `config.yaml` → `QUAD_*` / `BYBIT_*` env vars → runtime `set()` overrides. Resolves `_mode` and the cycle interval. |
+| 2 | `HealthServer` | Started **second, on purpose**. It has no dependency beyond config, so `/liveness` and `/health` stay reachable while database and exchange init are slow or failing. |
+| 3 | `DatabaseManager` | `connect()` → `initialize()` → `migrate()`. |
+| 3b | `ErrorLogSink` | Attached immediately after the database, because it needs a live connection. |
+| 4 | `ExchangeAdapter` | `create_exchange()` + `connect()`. Bybit V5, `category="linear"`. |
+| 4b | Futures account setup | Leverage, margin mode, and position mode per configured symbol, then a **read-back verification** against `get_positions()`. A leverage mismatch or per-symbol failure aborts startup in live mode rather than trading on numbers the exchange never accepted. |
+| 5 | `MarketDataEngine` | WebSocket subscriptions + REST fallback. |
+| 6 | `RiskManager` | Gates and circuit breakers constructed from the validated config. |
+| 7 | `ExecutionEngine` | Requires the risk manager. |
+| 7b | Orphan-position flatten | Any position left open by a previous run is closed so a fresh cycle starts flat. Failure is logged, not fatal. |
+| 8 | Strategies | `create_default_strategies()` — instantiates every registered strategy that is `enabled` in config. |
+| 9 | Groq AI client | Skipped when there is no API key or `ai.enabled` is false. |
+| 10 | Optimizer | Requires the Groq client, the database, and `retrain.enabled`. |
+| 11 | Telegram bot | Failure is non-fatal: the orchestrator continues without the Telegram interface. |
+| 12 | `MetricsCollector` | **Attached to the already-running health server** via `set_metrics_collector()`; it does not start a server of its own. |
+| 13 | TradingView webhook | Registered on the health server, then verified (see below). |
+
+### TradingView Webhook Route Registration
+
+`POST /webhook/tradingview` is mounted on the health server, not on a separate
+HTTP server. aiohttp freezes its `UrlDispatcher` when the application starts
+(`Application.pre_freeze()` → `router.freeze()`) and offers no way to unfreeze
+it, so a route added to a live router raises
+`RuntimeError: Cannot register a resource into frozen router`.
+
+`HealthServer.start()` therefore pre-registers a **catch-all dispatcher** for
+`GET/POST/PUT/PATCH/DELETE` on `/{tail:.*}`
+(`src/quad/monitoring/health.py`). `HealthServer.add_route()` only mutates the
+`_dynamic_routes` dict that the dispatcher consults, so registration order no
+longer matters. The fixed health routes are registered first and aiohttp
+resolves in registration order, so they always win over the catch-all.
+
+After registering, the orchestrator calls
+`has_route("POST", "/webhook/tradingview")` as a startup self-test. If the
+route is not mounted it logs `tradingview_webhook_route_missing` at `critical`
+and **disables the webhook**, so status output never reports an "armed" state
+for automation that would 404. An enabled webhook with no secret is likewise
+fail-closed and disabled outright.
+
+---
+
+## Persistence Schema
+
+`src/quad/persistence/models.py` defines `SCHEMA_VERSION = 10` and registers
+**20 models** in `ALL_MODELS`. There is no `contracts` table and no `stats`
+table. (`funding_rate_records` DDL exists only inside a migration and is not in
+`ALL_MODELS`, so a fresh install does not create it.)
+
+### Trading
+
+| Table | Purpose |
+|---|---|
+| `accounts` | Exchange balance snapshot per tenant. |
+| `positions` | Open and closed positions, including the futures fields (leverage, margin_type, position_side, liquidation_price, margins, funding_paid). |
+| `orders` | Every order with its full lifecycle, including working_type, position_side, price_protect, avg_fill_price. |
+| `trades` | Individual fills with fees and realised P&L. |
+| `decisions` | Every strategy/AI decision plus the outcome-reconciliation columns (predicted_direction, confidence, gate_result, entry/exit price, realized_pnl, outcome). |
+| `funding_payments` | Funding settlements; positive = paid, negative = received. |
+| `liquidation_events` | Liquidations and forced closes. |
+| `strategy_state` | Per-strategy enable flag, params, and status. Unique on `(strategy_name, tenant_id)`. |
+
+### Operations
+
+| Table | Purpose |
+|---|---|
+| `sessions` | Trading session records (start/end, mode, state, P&L, trade count). |
+| `performance_snapshots` | Periodic portfolio value, drawdown, position count, and daily P&L. |
+| `circuit_breaker_events` | Breaker trigger events with severity tier and resolution time. |
+| `config_changes` | Audit log of configuration changes (old value, new value, source). |
+| `error_logs` | Persisted application error events — see below. |
+
+### Self-Optimisation
+
+| Table | Purpose |
+|---|---|
+| `optimization_runs` | One execution of the self-optimisation cycle. |
+| `optimization_recommendations` | Individual recommendations produced by a run. |
+
+### Tenancy
+
+| Table | Purpose |
+|---|---|
+| `tenants` | One human user / Bybit account. Carries `token_version` for JWT revocation. |
+| `exchange_credentials` | Fernet-encrypted Bybit keys, never plaintext. |
+| `tenant_config` | Per-tenant market, capital %, leverage, TP/SL, strategy, AI tier, and budget. |
+| `telegram_bindings` | `chat_id` ↔ tenant binding. |
+| `pairing_codes` | Single-use codes that link an extra chat to a tenant. |
+
+Every per-user table carries a `tenant_id` column. The models are created from
+`ALL_MODELS`; migrations then bring an existing database up to
+`SCHEMA_VERSION`.
+
+### Error Log Writer
+
+`error_logs` previously had a schema, a model, and read-only repository
+readers, but **no writer** — every failure went to stdout and was lost as soon
+as logs rotated. `src/quad/monitoring/error_sink.py` closes the loop:
+`ErrorLogSink` is a structlog processor, so it observes every log event without
+any call site having to remember to report an error. Events at `ERROR` and
+above are queued in memory and written by a background flusher, keeping the hot
+logging path free of database round-trips. The orchestrator installs it into
+the live structlog processor chain right after the database is connected and
+flushes it during shutdown while the connection is still open.
+
+---
+
+## Correlation IDs
+
+A single trading cycle fans out over several pairs while the TradingView
+webhook can fire concurrently and the Telegram job queue runs independently —
+all writing into one log stream. `src/quad/monitoring/correlation.py` binds a
+`correlation_id` in a `ContextVar`, so concurrent asyncio tasks each see their
+own value and a scope exit restores exactly what was bound before.
+
+| Scope | Format | Source |
+|---|---|---|
+| Trading cycle | `cycle-<16 hex>` | `new_correlation_id("cycle")` in `_main_cycle_loop` |
+| TradingView webhook request | `tv-<16 hex>` | `new_correlation_id("tv")` in the webhook handler |
+
+`structlog_context_processor` injects the ambient id into every event; an id
+already bound on the event (via `logger.bind(...)`) wins, so an explicitly
+scoped component can override it.
+
+---
+
 ## Trading Cycle Data Flow
 
 Each trading cycle executes the following sequence:
 
 ### Step 1: Market Data Ingestion
 
-The Market Data module maintains persistent WebSocket connections to the OKX V5 API for real-time data:
+The Market Data module maintains persistent WebSocket connections to the Bybit V5 API for real-time data:
 - **Ticker Stream:** Real-time 24hr ticker data for all traded symbols
 - **Mark Price Stream:** Real-time mark prices and funding rates for all symbols
 - **Order Book Stream:** Real-time best bid/ask for all symbols
 - **Liquidation Stream:** Real-time liquidation order events
 - **User Data Stream:** Account balance updates, order status, position changes
 
-A REST fallback polls the OKX V5 API periodically if any WebSocket stream disconnects. All incoming data is validated for sequence numbers and timestamp freshness before being passed to the Data Store.
+A REST fallback polls the Bybit V5 API periodically if any WebSocket stream disconnects. All incoming data is validated for sequence numbers and timestamp freshness before being passed to the Data Store.
 
 ### Step 2: Strategy Evaluation
 
-The Orchestrator calls the active strategy's `analyze()` method, passing the current market context. The strategy:
+The Orchestrator calls the active strategy's `evaluate(context)` coroutine, passing the current `StrategyContext`. The strategy:
 1. Examines current market data (funding rates, order book depth, mark prices, 24h ticker)
 2. Evaluates existing positions for management actions (close, adjust, reduce)
 3. Identifies new opportunities based on its logic
-4. Returns a list of suggested actions (open_long, open_short, close_long, close_short, hold, adjust_stop, reduce_position) with parameters
+4. Returns a `list[Action]` — `ENTER`, `EXIT`, `HOLD`, `set_stop_loss`, `set_take_profit`, `adjust_stop`, `reduce_position`, plus the legacy aliases `open_long` / `open_short` / `close_long` / `close_short` that the execution engine still accepts
 
 ### Step 3: Risk Management Validation
 
@@ -114,7 +248,7 @@ For approved actions, the Execution Engine:
 1. Constructs the appropriate order(s) via the Exchange Adapter (MARKET, LIMIT, STOP, TAKE_PROFIT, STOP_MARKET, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET)
 2. Sets futures-specific order parameters (position_side, working_type, reduce_only, price_protect, closePosition)
 3. Applies rate limiting and TWAP splitting for large orders
-4. Submits to OKX V5 API (USDT perpetual) via the adapter
+4. Submits to Bybit V5 API (USDT perpetual, category=linear) via the adapter
 5. Sets or verifies leverage and margin type for the symbol
 6. Tracks fill status and updates local position state
 7. Logs the order to the database
@@ -130,16 +264,16 @@ The Orchestrator tracks all open positions:
 
 ### Step 6: Persistence
 
-Every step is recorded to SQLite via aiosqlite:
-- **Orders Table:** Every order submitted with full lifecycle (including futures-specific fields: working_type, position_side, price_protect, avg_fill_price)
-- **Trades Table:** Filled trades with complete details
-- **Positions Table:** Open and closed positions (including leverage, margin_type, position_side, liquidation_price, initial_margin, maintenance_margin, funding_paid)
-- **Decisions Table:** Every strategy decision
-- **Risk Events Table:** All risk check results
-- **System Events Table:** App-level events, errors, state changes
-- **Funding Table:** Funding rate payments and cumulative costs
-- **Liquidation Table:** Liquidation events and forced orders
-- **Funding Rate Records Table:** Historical funding rate snapshots
+Recorded to SQLite (20 tables, schema v10 — see [Persistence Schema](#persistence-schema)):
+- **`orders`:** Every order submitted with full lifecycle (including futures-specific fields: working_type, position_side, price_protect, avg_fill_price)
+- **`trades`:** Filled trades with complete details
+- **`positions`:** Open and closed positions (including leverage, margin_type, position_side, liquidation_price, initial_margin, maintenance_margin, funding_paid)
+- **`decisions`:** Every strategy/AI decision, with the direction, confidence, gate result, and resolved outcome
+- **`circuit_breaker_events`:** Breaker trigger events with severity tier. There is no dedicated risk-check table — individual gate results live on the decision record and in the log stream.
+- **`error_logs`:** App-level ERROR+ events, written by the `ErrorLogSink` structlog processor
+- **`funding_payments`:** Funding rate payments and cumulative costs
+- **`liquidation_events`:** Liquidation events and forced orders
+- **`performance_snapshots`:** Periodic portfolio value, drawdown, position count, daily P&L
 
 ### Step 7: Reporting
 
@@ -158,32 +292,32 @@ The Orchestrator periodically:
 | Aspect | Detail |
 |---|---|
 | **Decision** | Build Quad entirely in Python 3.10+ with asyncio, running as a single process |
-| **Rationale** | Options trading requires deterministic strategy execution with access to mathematical libraries (pandas, numpy, scipy). Python's asyncio provides excellent I/O performance for WebSocket streams and API calls. A single process eliminates serialization overhead, simplifies deployment, and avoids the operational complexity of multi-service architectures. |
+| **Rationale** | Futures trading requires deterministic strategy execution with access to mathematical libraries (pandas, numpy, scipy). Python's asyncio provides excellent I/O performance for WebSocket streams and API calls. A single process eliminates serialization overhead, simplifies deployment, and avoids the operational complexity of multi-service architectures. |
 | **Trade-offs** | No language-level parallelism for CPU-heavy tasks. GIL limits concurrent computation. Backtesting and live trading cannot run simultaneously in the same process. |
 
 ### AD-2: Pluggable Exchange Adapters
 
 | Aspect | Detail |
 |---|---|
-| **Decision** | Abstract the exchange interface behind an `ExchangeAdapter` ABC, enabling swap-in adapters for different exchanges |
+| **Decision** | Abstract the exchange interface behind an `ExchangeAdapter` ABC, enabling plug-in adapters for different exchanges |
 | **Rationale** | Decouples trading logic from exchange-specific API details. Enables testnet (simulated fills using real market data) and dry-run mode without changing core engine code. Future exchange support requires only a new adapter class. |
 | **Trade-offs** | Interface design must accommodate all exchange capabilities without being overly generic. Some exchange-specific features may not map cleanly to the abstraction. Additional abstraction layer adds development overhead. |
 
-### AD-2b: OKX MCP Server Integration (Optional)
+### AD-2b: Bybit-Only Exchange Target (No MCP Server)
 
 | Aspect | Detail |
 |---|---|
-| **Decision** | Optional MCP (Model Context Protocol) server backend that replaces the python-okx SDK for data fetching, TA indicators, and order execution |
-| **Rationale** | The OKX MCP server (`@okx_ai/okx-trade-mcp`) provides 228 built-in TA indicators, smart money signals, news sentiment, and advanced order types (TWAP, iceberg, chase) without maintaining custom code. When enabled, the `McpExchangeAdapter` routes all calls through the MCP server subprocess via JSON-RPC 2.0 over stdio. |
-| **Trade-offs** | Adds a Node.js dependency. MCP server subprocess adds memory overhead (~50MB). Not suitable for high-frequency trading due to subprocess IPC latency. Feature flag (`config.mcp.enabled`) allows instant rollback to python-okx SDK. |
+| **Decision** | Bybit V5 USDT perpetual (`category="linear"`) via the official `pybit` SDK is the only exchange backend. There is no MCP (Model Context Protocol) server, no Node.js dependency, and no SDK fallback layer. |
+| **Rationale** | A single exchange backend removes the operational cost of an MCP subprocess (extra memory, IPC latency, Node.js toolchain) and eliminates mode-confusion bugs. Perpetual selection is hard-coded as `CATEGORY="linear"` in `BybitFuturesAdapter`, so there is no futures-vs-perpetual toggle to misconfigure. |
+| **Trade-offs** | Single exchange dependency creates counterparty risk. Bybit API changes may require adapter updates. |
 
 ### AD-3: Plugin-Based Strategy Framework
 
 | Aspect | Detail |
 |---|---|
-| **Decision** | Strategies are Python classes loaded dynamically via a plugin registry, discovered through setuptools entry points or a strategies directory |
-| **Rationale** | Users can write, share, and install strategies without modifying core code. The registry pattern enables third-party strategy packages. Built-in strategies serve as reference implementations and documentation. |
-| **Trade-offs** | Plugin API must remain stable, limiting core refactoring flexibility. Version compatibility between plugins and core must be managed. Malicious plugins could compromise the bot. |
+| **Decision** | Strategies are Python classes registered purely by subclassing `StrategyBase`. `StrategyBase.__init_subclass__` calls `get_name()` and inserts the class into `StrategyBase.registry`, which `StrategyRegistry` reads. `pyproject.toml` declares an **empty** `[project.entry-points."quad.strategies"]` group, but nothing in the code reads entry points (no `importlib.metadata` usage) — it is a reserved hook, not a wired mechanism today. |
+| **Rationale** | Users can write and share strategies without modifying core code. Registration by subclassing needs no discovery scan at startup, so a plugin cannot be silently skipped because its metadata is malformed. Built-in strategies serve as reference implementations and documentation. |
+| **Trade-offs** | A strategy only registers if its module is imported before `create_default_strategies()` runs; a third-party package that is never imported will not appear. Plugin API must remain stable, limiting core refactoring flexibility. Malicious plugins could compromise the bot. |
 
 ### AD-4: SQLite with aiosqlite
 
@@ -201,12 +335,12 @@ The Orchestrator periodically:
 | **Rationale** | Telegram provides push notifications, real-time status updates, and command execution from any device without SSH access. All monitoring (positions, P&L, risk status) and control (start, stop, config) are available via Telegram commands. The CLI remains available for advanced debugging, backtesting, and local operations. |
 | **Trade-offs** | Requires internet access to Telegram API. Polling mode adds minimal latency. CLI-only users must set up SSH or tmux. Chat ID whitelist adds an authentication step. |
 
-### AD-6: OKX V5 USDT Perpetual API Integration
+### AD-6: Bybit V5 USDT Perpetual API Integration
 
 | Aspect | Detail |
 |---|---|
-| **Decision** | Target OKX V5 USDT perpetual futures (instType=SWAP) as the exchange, using both REST and WebSocket APIs via the official `python-okx` SDK |
-| **Rationale** | OKX offers a unified V5 API for USDT perpetuals, a well-documented demo trading environment, and competitive futures liquidity. Their API supports isolated/cross margin and long/short position modes, making it ideal for automated trading. |
+| **Decision** | Target Bybit V5 USDT perpetual futures (category=linear) as the exchange, using both REST and WebSocket APIs via the official `pybit` SDK |
+| **Rationale** | Bybit offers a unified V5 API for USDT perpetuals, a well-documented testnet environment (https://api-testnet.bybit.com, the default), and competitive futures liquidity. Their API supports isolated/cross margin and one-way/hedge position modes, making it ideal for automated trading. |
 | **Trade-offs** | Single exchange dependency creates counterparty risk. Funding rate costs must be managed actively. API changes or deprecations may require adapter updates. |
 
 ### AD-7: WebSocket Primary with REST Fallback
@@ -293,20 +427,19 @@ quad/
 │   ├── exchange/             # Exchange adapters
 │   │   ├── __init__.py
 │   │   ├── base.py           # ExchangeAdapter ABC + shared error hierarchy
-│   │   ├── okx.py            # OKX V5 USDT perpetual adapter (python-okx SDK)
-│   │   └── factory.py        # create_exchange factory function
+│   │   ├── bybit.py          # Bybit V5 USDT perpetual adapter (pybit SDK, category=linear)
+│   │   └── factory.py        # create_exchange factory function (bybit-only, testnet default)
 │   ├── market_data/          # Market data engine
 │   │   ├── __init__.py
 │   │   ├── engine.py         # MarketDataEngine: subscriptions, dispatch
-│   │   ├── buffers.py        # Ring buffers for price ticks
-│   │   ├── cache.py          # FundingRateCache, OrderBookCache, MarkPriceCache
+│   │   ├── buffers.py        # PriceBuffer, FundingRateRingBuffer
 │   │   ├── historical.py     # Historical data access
 │   │   └── websocket.py      # WebSocket connection manager
 │   ├── strategy/             # Strategy framework
 │   │   ├── __init__.py
-│   │   ├── base.py           # Strategy ABC and StrategyRegistry
+│   │   ├── base.py           # StrategyBase ABC, ParamSpec, StrategyRegistry
 │   │   ├── factory.py        # Strategy factory functions
-│   │   └── trend_following.py  # Trend following strategy
+│   │   └── trend_following.py  # Trend following strategy (the 1 built-in)
 │   ├── risk/                 # Risk management system
 │   │   ├── __init__.py
 │   │   ├── manager.py        # RiskManager: gates, breakers, sizing
@@ -323,20 +456,29 @@ quad/
 │   ├── persistence/          # SQLite persistence layer
 │   │   ├── __init__.py
 │   │   ├── database.py       # DatabaseManager: connection, migration, backup
-│   │   ├── models.py         # 16 table definitions
+│   │   ├── models.py         # 20 table definitions (SCHEMA_VERSION = 10)
+│   │   ├── pg.py             # PostgreSQL backend for quad-api
 │   │   └── repositories.py   # Repository classes for all models
-│   ├── monitoring/           # Health check and metrics
+│   ├── monitoring/           # Health check, metrics, correlation, error sink
 │   │   ├── __init__.py
-│   │   ├── health.py         # HealthServer: HTTP endpoints
-│   │   └── metrics.py        # MetricsCollector: Prometheus metrics
+│   │   ├── health.py         # HealthServer: HTTP endpoints + catch-all dispatcher
+│   │   ├── metrics.py        # MetricsCollector: Prometheus metrics
+│   │   ├── correlation.py    # ContextVar correlation IDs (cycle-<hex>, tv-<hex>)
+│   │   └── error_sink.py     # ErrorLogSink: structlog processor -> error_logs
 │   ├── ai/                   # AI trading assistant
 │   │   ├── __init__.py
 │   │   ├── prompt.py         # Prompt builder for AI decisions
 │   │   ├── groq.py           # Groq LLM client
 │   │   ├── context.py        # Market context collection
 │   │   ├── ta.py             # Technical indicators
+│   │   ├── analysis.py       # Market analysis helpers
+│   │   ├── validator.py      # Decision plausibility validator
+│   │   ├── metrics.py        # AI prediction-quality metrics
 │   │   ├── optimizer.py      # Self-optimization engine
 │   │   └── strategist.py     # AI strategist
+│   ├── security/             # Credential handling
+│   │   ├── __init__.py
+│   │   └── secrets.py        # Fernet encryption for exchange credentials
 │   ├── tradingview/          # TradingView webhook integration
 │   │   ├── __init__.py
 │   │   ├── parser.py         # Alert parser
@@ -347,9 +489,12 @@ quad/
 │   │   └── models.py         # Backtest models
 │   ├── bot/                  # Telegram bot interface
 │   │   ├── __init__.py
-│   │   ├── bot.py            # TelegramBot: PTB initialization
+│   │   ├── bot.py            # QuadBot: PTB initialization + handler registration
 │   │   ├── commands.py       # Command handlers
 │   │   └── jobs.py           # Scheduled jobs
+│   ├── orchestrator/         # Top-level application coordinator
+│   │   ├── __init__.py
+│   │   └── orchestrator.py   # QuadOrchestrator: start/stop ordering, main cycle
 │   └── types/                # Shared type definitions
 │       ├── __init__.py
 │       ├── market.py         # FundingRate, MarkPrice types

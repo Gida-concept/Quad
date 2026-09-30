@@ -141,6 +141,18 @@ class BacktestEngine:
 
         trade_id_counter = 0
         open_positions: dict[str, dict[str, Any]] = {}
+        # Futures cash model: posting a position locks margin (notional /
+        # leverage), not the full notional.  Defaults to 10x when the config
+        # carries no explicit leverage.
+        try:
+            leverage = Decimal(str(self._config.get("leverage", 10) or 10))
+        except Exception:
+            leverage = Decimal(10)
+        if leverage <= 0:
+            leverage = Decimal(10)
+        # Day -> ENTER count for the max_trades_per_day cap.  EXITs are always
+        # processed so a capped day can never strand an open position.
+        enters_per_day: dict[Any, int] = {}
 
         current = start
         step_count = 0
@@ -182,6 +194,12 @@ class BacktestEngine:
                     continue
 
                 if action.type == "ENTER":
+                    day = current.date()
+                    if (
+                        self._max_trades_per_day > 0
+                        and enters_per_day.get(day, 0) >= self._max_trades_per_day
+                    ):
+                        continue
                     trade_id_counter += 1
                     trade = self._simulate_fill(
                         action=action,
@@ -191,29 +209,34 @@ class BacktestEngine:
                     )
                     if trade is not None:
                         simulated_trades.append(trade)
-                        open_positions[trade.symbol] = {
+                        enters_per_day[day] = enters_per_day.get(day, 0) + 1
+                        open_positions[action.contract or trade.symbol] = {
                             "entry_price": trade.price,
                             "quantity": trade.quantity,
                             "side": trade.side,
                             "entry_timestamp": ts_ms,
+                            "current_price": trade.price,
                         }
-                        cash -= trade.price * trade.quantity + trade.fee
-                        if trade.pnl > 0:
-                            gross_wins += trade.pnl
-                            gross_losses += Decimal(0)
-                        else:
-                            gross_losses += abs(trade.pnl)
-                            gross_wins += Decimal(0)
+                        cash -= trade.price * trade.quantity / leverage + trade.fee
 
                 elif action.type == "EXIT":
-                    pos = open_positions.pop(action.contract or "", None)
+                    pos = open_positions.pop(
+                        action.contract or action.symbol or "", None
+                    )
                     if pos is not None:
                         trade_id_counter += 1
                         exit_price = action.price or Decimal(0)
                         entry_price = pos["entry_price"]
                         quantity = pos["quantity"]
-                        pnl = (exit_price - entry_price) * quantity
-                        commission = entry_price * quantity * self._commission_pct
+                        is_long = str(pos.get("side", "BUY")).strip().upper() in (
+                            "BUY",
+                            "LONG",
+                        )
+                        diff = exit_price - entry_price
+                        if not is_long:
+                            diff = -diff
+                        pnl = diff * quantity
+                        commission = exit_price * quantity * self._commission_pct
 
                         trade = Trade(
                             id=trade_id_counter,
@@ -226,12 +249,21 @@ class BacktestEngine:
                             timestamp=ts_ms,
                         )
                         simulated_trades.append(trade)
-                        cash += exit_price * quantity - commission
+                        cash += entry_price * quantity / leverage + pnl - commission
 
                         if pnl > 0:
                             gross_wins += pnl
                         else:
                             gross_losses += abs(pnl)
+
+            # Update current prices on open positions from action prices.
+            # Strategy actions carry the current market price for their
+            # contract; propagate that to any open position on the same
+            # symbol so the equity curve reflects mark-to-market value.
+            for action in actions:
+                sym = action.contract or action.symbol
+                if sym and sym in open_positions and action.price is not None:
+                    open_positions[sym]["current_price"] = action.price
 
             # Update equity curve
             positions_value = self._compute_positions_value(
@@ -260,9 +292,12 @@ class BacktestEngine:
             current += timedelta(hours=interval_hours)
 
         # Calculate performance metrics
-        total_trades = len(simulated_trades)
-        winning_trades = [t for t in simulated_trades if t.pnl > 0]
-        losing_trades = [t for t in simulated_trades if t.pnl <= 0]
+        # Only closed round-trips (EXITs) count as trades: ENTER fills carry
+        # pnl=0 and must not pollute the win/loss stats.
+        round_trips = [t for t in simulated_trades if t.pnl != 0]
+        total_trades = len(round_trips)
+        winning_trades = [t for t in round_trips if t.pnl > 0]
+        losing_trades = [t for t in round_trips if t.pnl < 0]
 
         win_count = len(winning_trades)
         loss_count = len(losing_trades)
@@ -429,7 +464,7 @@ class BacktestEngine:
         total = Decimal(0)
 
         for pos in open_positions.values():
-            current_price = pos.get("entry_price", Decimal(0))
+            current_price = pos.get("current_price", pos.get("entry_price", Decimal(0)))
 
             total += current_price * pos.get("quantity", Decimal(0))
 

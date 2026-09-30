@@ -9,11 +9,13 @@ rate spikes, and volatility.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -108,6 +110,8 @@ class CircuitBreakerManager:
 
         # Initialise breakers
         self._breakers: dict[str, _CircuitBreaker] = self._init_breakers()
+        # Restore persisted breaker state (best-effort).
+        self._load_state()
 
     # ------------------------------------------------------------------
     # Public API
@@ -139,10 +143,12 @@ class CircuitBreakerManager:
 
             self._check_daily_loss(daily_pnl)
             self._check_drawdown(drawdown_pct, portfolio_value)
+            self._check_consecutive_losses()
             self._check_kill_switch()
             self._check_liquidation_cascade(context)
             self._check_funding_rate_spike(context)
             self._check_volatility(context)
+            self._save_state()
 
             return {
                 name: self._breaker_status_dict(b) for name, b in self._breakers.items()
@@ -181,6 +187,7 @@ class CircuitBreakerManager:
             self._check_liquidation_cascade(context)
             self._check_funding_rate_spike(context)
             self._check_volatility(context)
+            self._save_state()
 
     def trigger(self, breaker_name: str, reason: str) -> None:
         """Force-trigger a specific circuit breaker.
@@ -206,6 +213,7 @@ class CircuitBreakerManager:
             reason=reason,
             tier=breaker.tier,
         )
+        self._save_state()
 
     async def reset(self, breaker_name: str) -> bool:
         """Attempt to auto-reset a circuit breaker.
@@ -232,6 +240,7 @@ class CircuitBreakerManager:
                 breaker.active = False
                 breaker.reason = ""
                 self._log.info("breaker_reset", name=breaker_name)
+                self._save_state()
                 return True
             return True
 
@@ -263,6 +272,7 @@ class CircuitBreakerManager:
             breaker.triggered_at = None
             breaker.reason = ""
             self._log.info("kill_switch_reset")
+            self._save_state()
             return True
         return False
 
@@ -487,6 +497,12 @@ class CircuitBreakerManager:
         breaker = self._breakers[VOLATILITY_BREAKER]
         vol_cfg = self._cb_cfg["volatility"]
         atr_threshold = float(str(vol_cfg["volatility_breaker_atr_pct"]))
+        if atr_threshold <= 0 or atr_threshold > 50:
+            self._log.warning(
+                "volatility_breaker_bad_threshold",
+                threshold_pct=atr_threshold,
+            )
+            atr_threshold = 5.0
 
         # Use futures contract data for price change / volatility
         high_volatility_symbols: list[str] = []
@@ -498,7 +514,7 @@ class CircuitBreakerManager:
 
             if mark > 0 and abs(change) > 0:
                 change_pct = abs(change / mark) * 100
-                if change_pct > atr_threshold * 100:
+                if change_pct > atr_threshold:
                     high_volatility_symbols.append(sym)
 
         if high_volatility_symbols and not breaker.active:
@@ -507,12 +523,12 @@ class CircuitBreakerManager:
             breaker.reason = (
                 f"High volatility detected for symbols: "
                 f"{sorted(high_volatility_symbols)} "
-                f"(ATR % threshold: {atr_threshold * 100:.1f}%)"
+                f"(ATR % threshold: {atr_threshold:.1f}%)"
             )
             self._log.warning(
                 "volatility_breaker_triggered",
                 symbols=sorted(high_volatility_symbols),
-                threshold_pct=atr_threshold * 100,
+                threshold_pct=atr_threshold,
             )
         elif breaker.active:
             # Auto-reset: check if volatility subsided
@@ -554,6 +570,67 @@ class CircuitBreakerManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @property
+    def _state_file(self) -> Path:
+        return Path(self._cb_cfg.get("state_file", "data/circuit_breakers.json"))
+
+    def _save_state(self) -> None:
+        """Persist breaker state to disk (best-effort)."""
+        try:
+            payload = {
+                name: {
+                    "active": b.active,
+                    "triggered_at": b.triggered_at,
+                    "reason": b.reason,
+                    "consecutive_losses": b.consecutive_losses,
+                    "peak_value": str(b.peak_value),
+                    "last_utc_day": b.last_utc_day,
+                }
+                for name, b in self._breakers.items()
+            }
+            path = self._state_file
+            if path.parent and str(path.parent) not in ("", "."):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+        except Exception:
+            self._log.warning("breaker_state_save_failed")
+
+    def _load_state(self) -> None:
+        """Restore breaker state from disk (best-effort)."""
+        try:
+            path = self._state_file
+            if not path.exists():
+                return
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            if not isinstance(payload, dict):
+                return
+            for name, saved in payload.items():
+                breaker = self._breakers.get(name)
+                if breaker is None or not isinstance(saved, dict):
+                    continue
+                try:
+                    breaker.active = bool(saved.get("active", breaker.active))
+                    triggered = saved.get("triggered_at", breaker.triggered_at)
+                    breaker.triggered_at = (
+                        float(triggered) if triggered is not None else None
+                    )
+                    breaker.reason = str(saved.get("reason", breaker.reason))
+                    breaker.consecutive_losses = int(
+                        saved.get("consecutive_losses", breaker.consecutive_losses)
+                    )
+                    breaker.peak_value = Decimal(
+                        str(saved.get("peak_value", str(breaker.peak_value)))
+                    )
+                    breaker.last_utc_day = int(
+                        saved.get("last_utc_day", breaker.last_utc_day)
+                    )
+                except (ValueError, TypeError, ArithmeticError):
+                    continue
+        except Exception:
+            self._log.warning("breaker_state_load_failed")
 
     def _init_breakers(self) -> dict[str, _CircuitBreaker]:
         """Create initial circuit breaker instances from config."""

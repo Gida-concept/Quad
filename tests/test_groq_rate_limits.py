@@ -95,9 +95,7 @@ def test_extract_retry_after_nested_error_dict():
     # Some responses wrap the message under body["error"]["message"].
     exc = _FakeRateLimitError(
         body={
-            "error": {
-                "message": "Rate limit reached. Please try again in 11m19.104s."
-            }
+            "error": {"message": "Rate limit reached. Please try again in 11m19.104s."}
         }
     )
     assert _extract_retry_after(exc) == pytest.approx(679.104)
@@ -248,9 +246,7 @@ def test_primary_long_wait_429_falls_back_to_model():
 
     c._client.chat.completions.create = fake_create
 
-    out = asyncio.run(
-        c.chat(system="s", user="u", temperature=0.3, max_tokens=64)
-    )
+    out = asyncio.run(c.chat(system="s", user="u", temperature=0.3, max_tokens=64))
     assert out == '{"action":"ENTER"}'
     # primary attempted first, then the request completed on the fallback
     assert called[0] == c._model

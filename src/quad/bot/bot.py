@@ -82,7 +82,7 @@ class QuadBot:
     ) -> None:
         self._log = logger.bind()
         self._config = config
-        self._telegram_config = config["telegram"]
+        self._telegram_config = config.get("telegram", {})
 
         # Store component references for command handlers
         self._orchestrator = orchestrator
@@ -94,7 +94,7 @@ class QuadBot:
         self._optimizer = optimizer
 
         # Bot token and notification config
-        self._bot_token: str = self._telegram_config["bot_token"]
+        self._bot_token: str = self._telegram_config.get("bot_token", "")
         self._notification_chat_id: int | None = self._telegram_config.get(
             "notification_chat_id"
         )
@@ -147,7 +147,10 @@ class QuadBot:
         )
 
         # Build the application
-        request = HTTPXRequest(connect_timeout=10, read_timeout=30)
+        request = HTTPXRequest(
+            connect_timeout=self._telegram_config.get("connect_timeout", 10),
+            read_timeout=self._telegram_config.get("read_timeout", 30),
+        )
         app_builder: ApplicationBuilder = (
             Application.builder()
             .token(self._bot_token)
@@ -315,6 +318,22 @@ class QuadBot:
                         f"Please wait {remaining}s before using /{cmd} again.",
                     )
                 return
+            # Multi-tenant gate: /start and /help are public; everything else
+            # requires a chat bound to a tenant (operator chat bypasses).
+            if cmd not in ("start", "help") and update.message is not None:
+                try:
+                    bound = await self._commands.get_bound_tenant(
+                        update.message.chat_id
+                    )
+                except Exception:
+                    self._log.exception("binding_check_failed", cmd=cmd)
+                    bound = None
+                if bound is None:
+                    await update.message.reply_text(
+                        "🔒 This chat isn't linked to a Quad account. "
+                        "Send `/start YOURCODE` first (get a code from your dashboard).",
+                    )
+                    return
             return await handler(update, context)
 
         return wrapped
@@ -350,7 +369,7 @@ class QuadBot:
             "ai_strategy",
             "ai_status",
             "ai_decision",
-            "mcp_status",
+            "exchange",
         ]
         for name in _command_names:
             handler = getattr(self._commands, f"cmd_{name}", None)

@@ -27,7 +27,7 @@ logger = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT_TEMPLATE = """You are an OKX USDT perpetual trading AI (instType=SWAP). Analyze the market data and recommend exactly one trade.
+_SYSTEM_PROMPT_TEMPLATE = """You are a Bybit USDT perpetual trading AI (category=linear). Analyze the market data and recommend exactly one trade.
 
 ## Rules
 1. Capital preservation first — never risk more than the setup justifies.
@@ -397,7 +397,7 @@ def build_trading_prompt(
 # Compact final-judgement prompt (local analysis → AI decides)
 # ============================================================================
 
-_FINAL_JUDGEMENT_SYSTEM = """You are an OKX USDT perpetual trading AI acting as the FINAL DECISION MAKER.
+_FINAL_JUDGEMENT_SYSTEM = """You are a Bybit USDT perpetual trading AI acting as the FINAL DECISION MAKER.
 
 The bot has already computed all technical analysis locally.  You receive a
 pre-computed LOCAL SIGNAL (indicators, direction, strength, volatility,
@@ -474,29 +474,49 @@ def build_final_judgement_prompt(
     sections.append("## Local Signal (bot-computed)")
     sections.append(f"  Trend: {local_signal.get('trend', 'unknown')}")
     sections.append(f"  ADX: {local_signal.get('adx', 'N/A')}")
-    sections.append(f"  RSI(14): {local_signal.get('rsi', 'N/A')} ({local_signal.get('rsi_regime', 'neutral')})")
+    sections.append(
+        f"  RSI(14): {local_signal.get('rsi', 'N/A')} ({local_signal.get('rsi_regime', 'neutral')})"
+    )
     sections.append(f"  MACD cross: {local_signal.get('macd_cross', 'neutral')}")
     sections.append(f"  MACD hist: {local_signal.get('macd_hist', 'N/A')}")
-    sections.append(f"  Stoch: %K={local_signal.get('stoch_k', 'N/A')} %D={local_signal.get('stoch_d', 'N/A')}")
+    sections.append(
+        f"  Stoch: %K={local_signal.get('stoch_k', 'N/A')} %D={local_signal.get('stoch_d', 'N/A')}"
+    )
     sections.append(f"  BB position: {local_signal.get('bb_position', 'N/A')}")
-    sections.append(f"  Volatility: {local_signal.get('volatility', 'normal')} (ATR%={local_signal.get('atr_pct', 'N/A')})")
-    sections.append(f"  Volume ratio: {local_signal.get('volume_ratio', 'N/A')} (spike={local_signal.get('volume_spike', False)})")
-    sections.append(f"  Price: {local_signal.get('price', 'N/A')} ({local_signal.get('price_change_pct', 'N/A'):+}%)")
+    sections.append(
+        f"  Volatility: {local_signal.get('volatility', 'normal')} (ATR%={local_signal.get('atr_pct', 'N/A')})"
+    )
+    sections.append(
+        f"  Volume ratio: {local_signal.get('volume_ratio', 'N/A')} (spike={local_signal.get('volume_spike', False)})"
+    )
+    pc = local_signal.get("price_change_pct")
+    pc_str = (
+        f"{pc:+.2f}%"
+        if isinstance(pc, (int, float))
+        else str(pc if pc is not None else "N/A")
+    )
+    sections.append(f"  Price: {local_signal.get('price', 'N/A')} ({pc_str})")
     sections.append(f"  Price vs EMA20: {local_signal.get('price_vs_ema20', 'N/A')}")
-    sections.append(f"  Funding: rate={local_signal.get('funding_rate', 'N/A')} annual={local_signal.get('funding_annual_pct', 'N/A')}% sentiment={local_signal.get('funding_sentiment', 'neutral')}")
-    sections.append(f"  ➜ LOCAL DIRECTION: {local_signal.get('local_direction', 'NEUTRAL')} (strength: {local_signal.get('local_strength', 0.0)})")
+    sections.append(
+        f"  Funding: rate={local_signal.get('funding_rate', 'N/A')} annual={local_signal.get('funding_annual_pct', 'N/A')}% sentiment={local_signal.get('funding_sentiment', 'neutral')}"
+    )
+    sections.append(
+        f"  ➜ LOCAL DIRECTION: {local_signal.get('local_direction', 'NEUTRAL')} (strength: {local_signal.get('local_strength', 0.0)})"
+    )
     sections.append("")
 
     # Position
     open_positions = [
-        p for p in positions
+        p
+        for p in positions
         if getattr(p, "status", None).__class__.__name__ == "OPEN"
         or str(getattr(p, "status", "")).lower() in ("open", "positionstatus.open")
     ]
     # Fallback: just show everything the caller passes
     if not open_positions:
         open_positions = [
-            p for p in positions
+            p
+            for p in positions
             if str(getattr(p, "status", "")).lower().endswith("open")
         ]
 
@@ -515,7 +535,9 @@ def build_final_judgement_prompt(
         sections.append("Note: You hold an open position. EXIT to close it.")
     else:
         sections.append("## Position: flat")
-        sections.append("Note: No open position. ENTER to open one (requires strong local_direction).")
+        sections.append(
+            "Note: No open position. ENTER to open one (requires strong local_direction)."
+        )
     sections.append("")
 
     # Account
@@ -530,7 +552,9 @@ def build_final_judgement_prompt(
         trading = config.get("trading", {}) or {}
         max_leverage = trading.get("max_leverage", "?")
         max_daily_loss = risk.get("max_daily_loss_usd", "?")
-        sections.append(f"## Risk: max_leverage={max_leverage}x, max_daily_loss=${max_daily_loss}")
+        sections.append(
+            f"## Risk: max_leverage={max_leverage}x, max_daily_loss=${max_daily_loss}"
+        )
         sections.append("")
 
     sections.append("## Decision")
@@ -659,4 +683,42 @@ def build_optimization_prompt(
         f"- AI model: {current_config.ai.model}\n"
     )
 
+    return {"system": system, "user": user}
+
+
+_BATCH_SYSTEM_PROMPT = """You are a Bybit USDT-perp scalping judge (category=linear). For EACH symbol below, emit one verdict. Numbers only in, JSON only out. Rules: scalp = minutes, not hours; TP {tp}% / SL {sl}% brackets are attached automatically — never chase; if no edge, HOLD. Prefer HOLD over a weak ENTER."""
+
+_BATCH_SCHEMA = """Return exactly this JSON (one entry per symbol, same order):
+{{"decisions": [{{"symbol": "BTCUSDT", "action": "ENTER|EXIT|HOLD", "direction": "LONG|SHORT|NEUTRAL", "confidence": 0.0-1.0, "quantity": <number|null>, "reason": "<8 words max"}}]}}"""
+
+
+def build_batch_judgement_prompt(
+    signals: list[dict[str, Any]],
+    has_position: dict[str, bool] | None = None,
+    tp_pct: float = 15.0,
+    sl_pct: float = 8.0,
+) -> dict[str, str]:
+    """Build ONE numbers-only prompt covering every scalp candidate.
+
+    This is the cost answer for AI-judged scalping: one judge call per
+    scalp cycle no matter how many symbols are scanned. Each line carries
+    the local signal, price action, and whether a scalp position is
+    already open on that symbol.
+    """
+    has_position = has_position or {}
+    lines = []
+    for sig in signals:
+        sym = sig.get("symbol", "?")
+        pos = "OPEN" if has_position.get(sym) else "flat"
+        chg = sig.get("price_change_pct")
+        chg_txt = f"{chg:+.2f}%" if isinstance(chg, (int, float)) else "n/a"
+        lines.append(
+            f"{sym} px={sig.get('price', '?')} ({chg_txt}) "
+            f"local={sig.get('local_direction', '?')}/{sig.get('local_strength', '?')} "
+            f"rsi={sig.get('rsi', '?')} stoch={sig.get('stoch_k', '?')}/{sig.get('stoch_d', '?')} "
+            f"bb={sig.get('bb_position', '?')} volx={sig.get('volume_spike', False)} "
+            f"pos={pos}"
+        )
+    system = _BATCH_SYSTEM_PROMPT.format(tp=tp_pct, sl=sl_pct)
+    user = "Symbols:\n" + "\n".join(lines) + "\n\n" + _BATCH_SCHEMA
     return {"system": system, "user": user}

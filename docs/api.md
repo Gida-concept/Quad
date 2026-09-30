@@ -241,78 +241,167 @@ class RiskManager:
 
 A lightweight HTTP server for Docker health checks and monitoring. Located at `src/quad/monitoring/health.py`.
 
-**Base URL:** `http://127.0.0.1:9090` (configurable)
+**Base URL:** `http://127.0.0.1:9090` (configurable via `monitoring.health_server.port` or `QUAD_HEALTH_PORT`)
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/health` | Service health, uptime, memory, connections |
-| GET | `/ready` | Readiness check (is bot configured and running?) |
-| GET | `/live` | Liveness check (is process alive?) |
+| GET | `/health` (and `/`) | Overall health: status, uptime, version, per-component readiness |
+| GET | `/readiness` (alias `/ready`) | Component readiness map |
+| GET | `/liveness` (alias `/live`) | Liveness check (is process alive?) |
 | GET | `/metrics` | Prometheus-formatted operational metrics |
+| POST | `/webhook/tradingview` | TradingView alert receiver (only when `tradingview_webhook.enabled`) |
+
+> **This is the bot's own health server** (started by the orchestrator inside
+> the trading process, default port 9090). It is *not* the `quad-api` FastAPI
+> service, which exposes a separate pair of endpoints -- see
+> [API Service Health Endpoints](#api-service-health-endpoints) below.
+
+> **Authentication.** With no API key configured the server binds to
+> `127.0.0.1` regardless of `bind_address` and only accepts direct loopback
+> requests. The loopback bypass is additionally **refused when
+> reverse-proxy forwarding headers are present** (`X-Forwarded-For`,
+> `X-Real-IP`, `X-Forwarded-Host`, `Forwarded`), because behind a proxy
+> `request.remote` is the proxy itself. If you expose this server through a
+> reverse proxy you must set `QUAD_HEALTH_API_KEY` and send `X-API-Key`,
+> or every request (including your own healthcheck) returns 403.
+> Unauthenticated requests return 403, not 401.
 
 ### GET /health
 
 ```json
 {
   "status": "ok",
-  "uptime": 86400,
-  "version": "2.0.0",
-  "python": "3.12.4",
-  "memory": { "rss": 145000000, "percent": 56.6 },
-  "connections": {
-    "exchange": "connected",
-    "database": "connected",
-    "websocket": 3
+  "uptime": 86400.5,
+  "version": "0.1.0",
+  "timestamp": 1759000000000,
+  "components": {
+    "config": true,
+    "database": true,
+    "exchange": true,
+    "market_data": true,
+    "risk_manager": true,
+    "execution_engine": true
   },
-  "mode": "testnet",
-  "state": "ACTIVE",
-  "positions": 2,
-  "last_error": null
+  "degraded": []
+}
+```
+
+`status` is `"degraded"` (and exit code 1 from `quad health`) when any
+component reports false. Each component check is fail-closed: an exception
+in a check counts as unhealthy, not healthy.
+
+### GET /readiness (or `/ready`)
+
+```json
+{
+  "ready": true,
+  "components": {
+    "config": true,
+    "database": true,
+    "exchange": true
+  }
 }
 ```
 
 ### GET /metrics
 
-Exposes Prometheus-style metrics:
+Prometheus text exposition format. Note that the metrics collector does
+**not** add a `quad_` prefix — names are exactly as registered by each
+subsystem.
 
 ```
 # HELP quad_uptime_seconds Bot uptime in seconds
 # TYPE quad_uptime_seconds gauge
-quad_uptime_seconds 86400
-
-# HELP quad_positions_open Currently open positions
-# TYPE quad_positions_open gauge
-quad_positions_open 2
-
-# HELP quad_portfolio_value_usdt Current portfolio value
-# TYPE quad_portfolio_value_usdt gauge
-quad_portfolio_value_usdt 10045.20
-
-# HELP quad_drawdown_percent Current drawdown percentage
-# TYPE quad_drawdown_percent gauge
-quad_drawdown_percent 1.2
-
-# HELP quad_trades_total Total trades executed
-# TYPE quad_trades_total counter
-quad_trades_total 12
-
-# HELP quad_decisions_total Total decisions made
-# TYPE quad_decisions_total counter
-quad_decisions_total 2840
-
-# HELP quad_errors_total Total errors
-# TYPE quad_errors_total counter
-quad_errors_total 3
-
-# HELP quad_cycle_time_ms Trading cycle execution time
-# TYPE quad_cycle_time_ms histogram
-quad_cycle_time_ms_bucket{le="500"} 120
-quad_cycle_time_ms_bucket{le="1000"} 890
-quad_cycle_time_ms_bucket{le="5000"} 2840
-quad_cycle_time_ms_bucket{le="+Inf"} 2840
-quad_cycle_time_ms_sum 2850000
-quad_cycle_time_ms_count 2840
+quad_uptime_seconds 86400.00
 ```
+
+When the metrics collector is attached (it is, once the orchestrator has
+finished starting), the trading loop adds these gauges and counters:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `orchestrator_started` | gauge | `1` once startup completes |
+| `active_positions` | gauge | Open positions at the last cycle |
+| `active_strategies` | gauge | Number of active strategy instances |
+| `dry_run` | gauge | `1` while `_dry_run` is set |
+| `dry_run_guard_active` | gauge | `1` while dry-run is blocking orders against a **live** exchange |
+| `portfolio_value` | gauge | Account total USDT equity |
+| `ai_decisions` | counter | AI decisions produced |
+| `trading_cycles` | counter | Completed trading cycles |
+| `ai_cycle_time_ms` | gauge | Duration of the last AI cycle |
+
+Gauges are only present after the first cycle that sets them, so a scrape
+taken during startup legitimately returns fewer lines.
+
+---
+
+## API Service Health Endpoints
+
+`quad-api` (the FastAPI service, `src/quad/api/app.py`) exposes its own health
+endpoints. These are **unrelated to the bot's health server above** — different
+process, different port, different contract. Do not point a bot healthcheck at
+them.
+
+| Method | Path | Checks dependencies | Returns 503 when unhealthy |
+|---|---|---|---|
+| GET | `/health` | Yes — the database (`SELECT 1`) | Yes |
+| GET | `/live` | No — process liveness only | No |
+
+**Use them like this:**
+
+- `readinessProbe` → `/health`. An API that cannot reach its database cannot
+  serve anything useful, so it should be taken out of rotation.
+- `livenessProbe` → `/live`. Liveness answers "should this process be
+  restarted?", and a transient database blip is **not** a reason to restart
+  the API — doing so turns a small problem into an outage. `/live` therefore
+  asserts nothing beyond the process serving requests.
+
+Both require no authentication (they are probed before any token exists).
+
+**`GET /health` response when healthy** — `200`:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "ok",
+    "uptime": 812.44,
+    "version": "1.0.0",
+    "timestamp": 1759257600000,
+    "components": { "database": true },
+    "degraded": []
+  }
+}
+```
+
+**`GET /health` response when the database is unreachable** — `503`:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "unhealthy",
+    "message": "unhealthy components: database"
+  },
+  "data": {
+    "status": "degraded",
+    "uptime": 812.44,
+    "version": "1.0.0",
+    "timestamp": 1759257600000,
+    "components": { "database": false },
+    "degraded": ["database"]
+  }
+}
+```
+
+The check is **fail-closed**: if `is_healthy()` raises (pool exhausted,
+credentials rejected, driver error) the component is reported `false` and the
+endpoint returns 503. An exception is never treated as healthy.
+
+> **History.** `/health` previously returned an unconditional
+> `{"status": "ok"}` without contacting any dependency, so a load balancer
+> kept routing traffic to an API whose every real endpoint would fail. See
+> `docs/changelog.md`.
 
 ---
 

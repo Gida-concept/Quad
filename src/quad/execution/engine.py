@@ -8,6 +8,7 @@ between strategy decisions and the exchange adapter.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import replace
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
@@ -48,10 +49,9 @@ def _floor_to_compliant(
         if needed > target:
             target = needed
             if step_size > Decimal(0):
-                target = (
-                    (needed / step_size).to_integral_value(rounding=ROUND_CEILING)
-                    * step_size
-                )
+                target = (needed / step_size).to_integral_value(
+                    rounding=ROUND_CEILING
+                ) * step_size
     return target
 
 
@@ -276,6 +276,26 @@ class ExecutionEngine:
         # 4. Build the order request from the final (sized + normalized) action
         order_request = self._build_request(action)
 
+        # 4b. Mandatory protection: an entry must never go out naked. When
+        # brackets are enabled and the entry carries no TP/SL, refuse it
+        # fail-closed. This is the last-mile guarantee for every path
+        # (AI decisions, manual strategy runs, TradingView) and every user.
+        if action.type in ("open_long", "open_short", "ENTER"):
+            risk_cfg = self._config.get("risk", {})
+            sl_on = bool(risk_cfg.get("per_position_sl", {}).get("enabled", True))
+            tp_on = bool(risk_cfg.get("per_position_tp", {}).get("enabled", True))
+            if (sl_on and order_request.stop_loss_price is None) or (
+                tp_on and order_request.take_profit_price is None
+            ):
+                self._log.warning(
+                    "naked_entry_refused",
+                    action_type=action.type,
+                    contract=action.contract or action.symbol,
+                    side=action.side,
+                )
+                self._stats["total_rejected"] += 1
+                return self._rejected_result(action, reason="missing TP/SL brackets")
+
         # 5. Submit
         try:
             result = await self._gateway.submit(order_request)
@@ -298,15 +318,67 @@ class ExecutionEngine:
                 fills=[],
             )
 
-        # 6. Submit bracket orders (TP/SL) after opening a position
-        if action.type in ("open_long", "open_short", "ENTER") and (
-            action.stop_loss_price is not None or action.take_profit_price is not None
+        # 6. Submit bracket orders (TP/SL) after opening a position.
+        # Skipped when TP/SL rode on the entry create call itself
+        # (single-request path in _build_request + adapter) — the
+        # position-level brackets already cover the full filled qty.
+        # Separate submits remain for non-entry paths that set TP/SL
+        # after the fact (e.g. TradingView exits, manual adjustments).
+        if (
+            action.type in ("open_long", "open_short", "ENTER")
+            and (
+                action.stop_loss_price is not None
+                or action.take_profit_price is not None
+            )
+            and (
+                order_request.take_profit_price is None
+                and order_request.stop_loss_price is None
+            )
         ):
-            bracket_ids: dict[str, int] = {}
+            # Exchange order IDs are ``int | str`` (Bybit returns UUIDs), and
+            # this mapping is diagnostic-only -- it is logged, not persisted.
+            bracket_ids: dict[str, int | str] = {}
             # Closing side mirrors the entry: LONG -> SELL, SHORT -> BUY.
             close_side = (
                 "SELL" if str(action.side or "").upper() in ("BUY", "LONG") else "BUY"
             )
+            # Brackets are submitted with risk_checked=True (they are
+            # reduce-only protection for a position that already passed the
+            # 9 gates), so the engine must still bound their size itself:
+            #  - never protect more than the entry's approved size, and
+            #  - never exceed the configured absolute notional cap.
+            # filled_qty is exchange-reported and can be a partial fill, so
+            # it is an upper bound on protection, not a sizing decision.
+            bracket_qty = self._bracket_qty(result.filled_qty, original_qty)
+            bracket_notional_ok, cap_note = await self._notional_within_cap(
+                bracket_qty, action.contract or action.symbol
+            )
+            if not bracket_notional_ok:
+                self._log.error(
+                    "bracket_notional_cap_exceeded",
+                    symbol=action.contract or action.symbol,
+                    qty=str(bracket_qty),
+                    detail=cap_note,
+                    msg=(
+                        "Protective bracket size exceeds risk.max_position_size_usd; "
+                        "the position is left UNPROTECTED.  Close it manually."
+                    ),
+                )
+                self._stats["active_order_count"] = (
+                    self._gateway.get_active_order_count()
+                )
+                return OrderResult(
+                    order_id=result.order_id,
+                    client_order_id=result.client_order_id,
+                    symbol=result.symbol,
+                    side=result.side,
+                    order_type=result.order_type,
+                    quantity=result.quantity,
+                    price=result.price,
+                    status="FILLED",
+                    fills=result.fills,
+                )
+
             if action.stop_loss_price is not None:
                 try:
                     sl_action = Action(
@@ -314,7 +386,7 @@ class ExecutionEngine:
                         strategy=action.strategy,
                         symbol=action.contract or action.symbol,
                         side=close_side,
-                        quantity=action.quantity,
+                        quantity=bracket_qty,
                         stop_loss_price=action.stop_loss_price,
                         risk_checked=True,
                     )
@@ -334,7 +406,7 @@ class ExecutionEngine:
                         strategy=action.strategy,
                         symbol=action.contract or action.symbol,
                         side=close_side,
-                        quantity=action.quantity,
+                        quantity=bracket_qty,
                         take_profit_price=action.take_profit_price,
                         risk_checked=True,
                     )
@@ -352,13 +424,16 @@ class ExecutionEngine:
                     "bracket_orders_placed",
                     bracket_ids=bracket_ids,
                     parent_order_id=result.order_id,
+                    bracket_qty=str(bracket_qty),
                 )
 
         # 7. Update stats
         self._stats["total_submitted"] += 1
         if result.status == "FILLED":
             self._stats["total_filled"] += 1
-            await self._persist_trade(action, result)
+            await self._persist_trade(
+                action, result, fee=self._fill_fee(result, action)
+            )
         self._stats["active_order_count"] = self._gateway.get_active_order_count()
 
         self._log.info(
@@ -372,7 +447,77 @@ class ExecutionEngine:
         )
         return result
 
-    async def _persist_trade(self, action: Action, result: OrderResult) -> None:
+    @staticmethod
+    def _bracket_qty(filled_qty: Decimal | None, pre_cap: Decimal | None) -> Decimal:
+        """Return the protective-bracket quantity for a filled entry.
+
+        Brackets are submitted with ``risk_checked=True`` so they bypass the
+        9-gate pipeline.  Their size is therefore bounded here instead:
+
+        * never more than what actually filled, and
+        * never more than the pre-sizing quantity the risk pipeline approved.
+
+        A zero/negative result is returned as ``Decimal(0)``; the caller
+        treats that as "cannot protect" rather than submitting a bad order.
+        """
+        try:
+            filled = Decimal(str(filled_qty or 0))
+        except (TypeError, ValueError, InvalidOperation):
+            filled = Decimal(0)
+        cap = filled
+        try:
+            requested = Decimal(str(pre_cap or 0))
+            if requested > 0:
+                cap = min(filled, requested)
+        except (TypeError, ValueError, InvalidOperation):
+            pass
+        return cap if cap > 0 else Decimal(0)
+
+    async def _notional_within_cap(self, qty: Decimal, symbol: str) -> tuple[bool, str]:
+        """Check *qty* against ``risk.max_position_size_usd``.
+
+        Returns ``(ok, detail)``.  This is the last-mile guard for orders
+        that skip the risk pipeline (brackets) and for quantities floored up
+        to the exchange minimum *after* sizing — both of which could
+        otherwise exceed a cap the gates had already approved.
+        """
+        if qty is None or qty <= 0:
+            return False, "non-positive quantity"
+
+        risk_cfg = self._config.get("risk", {}) or {}
+        raw_cap = risk_cfg.get("max_position_size_usd")
+        if raw_cap is None:
+            return True, "no absolute cap configured"
+        try:
+            max_usd = Decimal(str(raw_cap))
+        except (TypeError, ValueError, InvalidOperation):
+            return True, f"unparseable cap {raw_cap!r}; not enforced"
+        if max_usd <= 0:
+            return True, "cap disabled"
+
+        price = None
+        try:
+            price = await self._exchange_adapter.get_mark_price(symbol)
+        except Exception:
+            price = None
+        if price is None or price <= 0:
+            # Without a price the notional cannot be computed.  Do not block
+            # a protective bracket on a missing mark price — the exchange
+            # rejects orders that violate its own cap anyway.
+            return True, "no mark price available; cap not enforced locally"
+
+        notional = qty * price
+        if notional > max_usd:
+            return (
+                False,
+                f"notional {notional:.2f} USD > risk.max_position_size_usd "
+                f"{max_usd:.2f} USD",
+            )
+        return True, f"notional {notional:.2f} USD <= {max_usd:.2f} USD"
+
+    async def _persist_trade(
+        self, action: Action, result: OrderResult, fee: Decimal = Decimal(0)
+    ) -> None:
         """Persist an executed fill to the ``trades`` table (best effort).
 
         ENTER fills are recorded with ``pnl='0'``; EXIT fills carry the
@@ -386,7 +531,7 @@ class ExecutionEngine:
             return
         try:
             from quad.persistence.models import TradeModel
-            from quad.persistence.repositories import TradeRepository
+            from quad.persistence.repositories import TradeRepository, make_repo
 
             fill_price = Decimal(0)
             fills = getattr(result, "fills", None) or []
@@ -398,6 +543,10 @@ class ExecutionEngine:
             if not fill_price and result.price:
                 fill_price = result.price
 
+            try:
+                fee = Decimal(str(fee or 0))
+            except (TypeError, ValueError, InvalidOperation):
+                fee = Decimal(0)
             realized_pnl = Decimal(0)
             entry_str = (action.metadata or {}).get("entry_price")
             pos_side = (action.metadata or {}).get("position_side")
@@ -411,27 +560,56 @@ class ExecutionEngine:
                     diff = fill_price - entry
                     if not is_long:
                         diff = -diff
-                    realized_pnl = diff * action.quantity
+                    realized_pnl = diff * action.quantity - fee
                 except Exception:
                     realized_pnl = Decimal(0)
 
-            repo = TradeRepository(self._db_manager)
+            repo = make_repo(TradeRepository, self._db_manager, self._config)
+            # ``trades.order_id`` is a local FK to ``orders.id``, but the only
+            # identifier available here is the exchange's, which Bybit returns
+            # as a UUID string.  Writing that verbatim put a UUID into an
+            # INTEGER FK column, so the fill could never join back to its
+            # order row.  Record 0 (the same "unknown" sentinel already used
+            # for ``id``/``position_id``) instead of a value that silently
+            # never matches.
+            local_order_id = result.order_id if isinstance(result.order_id, int) else 0
             await repo.create(
                 TradeModel(
                     id=0,
                     position_id=0,
-                    order_id=result.order_id,
+                    order_id=local_order_id,
                     symbol=result.symbol or action.contract or "",
                     side=str(action.side or result.side or ""),
                     quantity=str(result.quantity or action.quantity),
                     price=str(fill_price),
-                    fee="0",
+                    fee=str(fee),
                     pnl=str(realized_pnl),
                     timestamp=int(time.time() * 1000),
                 )
             )
         except Exception as exc:
             self._log.warning("trade_persist_failed", error=str(exc))
+
+    @staticmethod
+    def _fill_fee(result: OrderResult, action: Action) -> Decimal:
+        """Sum per-fill commissions plus any funding cost in action metadata."""
+        total = Decimal(0)
+        for fill in getattr(result, "fills", None) or []:
+            if not isinstance(fill, dict):
+                continue
+            for key in ("commission", "fee", "commission_amount"):
+                if key in fill:
+                    try:
+                        total += Decimal(str(fill.get(key) or 0))
+                    except (TypeError, ValueError, InvalidOperation):
+                        continue
+                    break
+        for key in ("funding_paid", "funding", "funding_fee"):
+            try:
+                total += Decimal(str((action.metadata or {}).get(key, 0) or 0))
+            except (TypeError, ValueError, InvalidOperation):
+                continue
+        return total
 
     async def execute_twap(
         self,
@@ -516,7 +694,34 @@ class ExecutionEngine:
 
         order_request = self._build_request(action)
 
-        # 4. Execute TWAP
+        # Mandatory protection (TWAP path): refuse naked entries fail-closed,
+        # mirroring the guard in execute(). Final-slice attach in TwapSlicer
+        # covers entries that carry TP/SL; entries without are rejected here.
+        if action.type in ("open_long", "open_short", "ENTER"):
+            risk_cfg = self._config.get("risk", {})
+            sl_on = bool(risk_cfg.get("per_position_sl", {}).get("enabled", True))
+            tp_on = bool(risk_cfg.get("per_position_tp", {}).get("enabled", True))
+            if (sl_on and order_request.stop_loss_price is None) or (
+                tp_on and order_request.take_profit_price is None
+            ):
+                self._log.warning(
+                    "naked_twap_entry_refused",
+                    action_type=action.type,
+                    contract=action.contract or action.symbol,
+                    side=action.side,
+                )
+                self._stats["total_rejected"] += 1
+                return [self._rejected_result(action, reason="missing TP/SL brackets")]
+
+        # 4. Execute TWAP with fill persistence callback
+        async def _twap_fill_callback(result: OrderResult) -> None:
+            """Persist a TWAP slice fill via the engine's trade journal."""
+            await self._persist_trade(
+                action, result, fee=self._fill_fee(result, action)
+            )
+
+        prev_on_fill = self._twap._on_fill
+        self._twap._on_fill = _twap_fill_callback
         try:
             results = await self._twap.execute(order_request, self._gateway)
         except Exception as exc:
@@ -537,6 +742,8 @@ class ExecutionEngine:
                     fills=[],
                 )
             ]
+        finally:
+            self._twap._on_fill = prev_on_fill
 
         # 5. Update stats
         self._stats["twap_executions"] += 1
@@ -636,7 +843,7 @@ class ExecutionEngine:
             return 0
         try:
             from quad.persistence.models import TradeModel
-            from quad.persistence.repositories import TradeRepository
+            from quad.persistence.repositories import TradeRepository, make_repo
 
             try:
                 fills = await self._exchange_adapter.get_user_trades()
@@ -646,7 +853,7 @@ class ExecutionEngine:
             if not fills:
                 return 0
 
-            repo = TradeRepository(self._db_manager)
+            repo = make_repo(TradeRepository, self._db_manager, self._config)
             # Group by symbol, keep insertion order (oldest first).
             by_symbol: dict[str, list] = {}
             for f in fills:
@@ -661,26 +868,43 @@ class ExecutionEngine:
                 open_short_entries: list[Decimal] = []  # from SELL opens
                 for leg in legs:
                     side = str(getattr(leg, "side", "") or "").upper()
-                    order_id = int(getattr(leg, "order_id", 0) or 0)
+                    # Bybit orderIds are UUID strings; the trades table stores
+                    # INTEGER order_id, so collapse to a stable 64-bit int
+                    # (deterministic → exists_for_order dedup still works).
+                    raw_order_id = str(getattr(leg, "order_id", 0) or 0)
+                    try:
+                        order_id = int(raw_order_id)
+                    except ValueError:
+                        digest = hashlib.sha256(raw_order_id.encode("utf-8")).digest()
+                        order_id = int.from_bytes(digest[:8], "big", signed=True)
                     if await repo.exists_for_order(order_id, side):
                         # Already persisted (e.g. the opening fill the engine
                         # wrote directly).  Still advance the pairing queue so
                         # a later close leg balances it on re-ingest.
                         if side == "BUY":
-                            open_long_entries.append(_as_dec(getattr(leg, "price", 0)))
+                            if open_short_entries:
+                                open_short_entries.pop(0)
+                            else:
+                                open_long_entries.append(
+                                    _as_dec(getattr(leg, "price", 0))
+                                )
                         elif side == "SELL":
-                            open_short_entries.append(
-                                _as_dec(getattr(leg, "price", 0))
-                            )
+                            if open_long_entries:
+                                open_long_entries.pop(0)
+                            else:
+                                open_short_entries.append(
+                                    _as_dec(getattr(leg, "price", 0))
+                                )
                         continue
 
                     price = _as_dec(getattr(leg, "price", 0))
                     qty = _as_dec(getattr(leg, "quantity", 0))
                     # Prefer the exchange-reported realized PnL when available
-                    # (OKX fills include realizedPnl).  The
+                    # (Bybit fills include realizedPnl).  The
                     # FIFO computation below is only a fallback for when the
                     # exchange does not provide per-fill realized PnL.
                     exchange_pnl = _as_dec(getattr(leg, "pnl", 0))
+                    has_exchange_pnl = getattr(leg, "pnl", None) is not None
                     pnl = Decimal(0)
                     if side == "BUY":
                         # Either an opening LONG (queue it) or the close of a
@@ -689,8 +913,9 @@ class ExecutionEngine:
                             entry = open_short_entries.pop(0)
                             # SHORT close: profit when bought back below entry.
                             fifo_pnl = (entry - price) * qty
-                            pnl = exchange_pnl if exchange_pnl else fifo_pnl
-                        open_long_entries.append(price)
+                            pnl = exchange_pnl if has_exchange_pnl else fifo_pnl
+                        else:
+                            open_long_entries.append(price)
                     elif side == "SELL":
                         # Either an opening SHORT (queue it) or the close of a
                         # prior LONG (compute PnL).
@@ -698,8 +923,9 @@ class ExecutionEngine:
                             entry = open_long_entries.pop(0)
                             # LONG close: profit when sold above entry.
                             fifo_pnl = (price - entry) * qty
-                            pnl = exchange_pnl if exchange_pnl else fifo_pnl
-                        open_short_entries.append(price)
+                            pnl = exchange_pnl if has_exchange_pnl else fifo_pnl
+                        else:
+                            open_short_entries.append(price)
 
                     await repo.create(
                         TradeModel(
@@ -791,10 +1017,14 @@ class ExecutionEngine:
         * If the (sized) quantity fell below ``minQty`` but a valid pre-cap
           exists (the pre-sizing quantity) that is at or above ``minQty``,
           floors the quantity UP to ``minQty`` so the trade isn't lost —
-          while never exceeding the pre-cap.
+          while never exceeding the pre-cap **nor**
+          ``risk.max_position_size_usd``.  If the floor-up would breach the
+          absolute notional cap, the original rejection is re-raised so the
+          caller returns a clean REJECTED result rather than silently
+          upsizing past what risk approved.
         * Otherwise raises ``RuntimeError`` (below minQty / minNotional) so
           the caller can return a clean REJECTED result instead of sending an
-          order the exchange would reject (-1113 / -1111 / -4164).
+          order the exchange would reject.
         """
         qty = action.quantity
         if qty is None or qty <= Decimal(0):
@@ -820,10 +1050,11 @@ class ExecutionEngine:
             # Floor a sub-minQty / sub-minNotional sized quantity UP to the
             # smallest size that clears BOTH the minQty and minNotional
             # filters.  (The previous code only floored to minQty, which could
-            # make a sub-minNotional order even smaller and still get bounced
-            # with -4164.)  Never exceed the pre-cap (the original requested
-            # quantity); otherwise re-raise the original, already-clear
-            # rejection so the caller returns a clean REJECTED result.
+            # make a sub-minNotional order even smaller and still get bounced.)
+            # Never exceed the pre-cap (the original requested
+            # quantity) nor the absolute notional cap; otherwise re-raise the
+            # original, already-clear rejection so the caller returns a clean
+            # REJECTED result.
             if pre_cap is not None and pre_cap > Decimal(0):
                 try:
                     filters = await self._exchange_adapter.get_symbol_filters(symbol)
@@ -846,6 +1077,29 @@ class ExecutionEngine:
                     mark_price,
                 )
                 if target <= pre_cap:
+                    # The floor-up must not breach the absolute notional cap
+                    # the risk pipeline enforces.  Sizing approved a smaller
+                    # number; rounding up to the exchange minimum could push
+                    # the order past risk.max_position_size_usd.
+                    cap_ok, cap_detail = await self._notional_within_cap(target, symbol)
+                    if not cap_ok:
+                        self._log.warning(
+                            "order_quantity_floored_up_over_risk_cap",
+                            symbol=symbol,
+                            original=str(qty),
+                            floored=str(target),
+                            pre_cap=str(pre_cap),
+                            detail=cap_detail,
+                            msg=(
+                                "Flooring the order up to the exchange minimum "
+                                "would exceed risk.max_position_size_usd; "
+                                "rejecting instead of upsizing."
+                            ),
+                        )
+                        raise RuntimeError(
+                            "order below exchange minimum, and flooring up to the "
+                            f"minimum would breach the risk notional cap ({cap_detail})"
+                        )
                     self._log.info(
                         "order_quantity_floored_to_min_qty",
                         symbol=symbol,
@@ -944,5 +1198,14 @@ class ExecutionEngine:
         # error -1114 (TIF_NOT_REQUIRED), so clear the GTC default.
         if order_request.order_type in ("MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
             order_request.time_in_force = ""
+
+        # Attach TP/SL to the entry order itself (single REST call on
+        # POST /v5/order/create) instead of separate bracket submits.
+        # The adapter translates these to takeProfit/stopLoss params.
+        if action.type in ("open_long", "open_short", "ENTER"):
+            if action.take_profit_price is not None:
+                order_request.take_profit_price = action.take_profit_price
+            if action.stop_loss_price is not None:
+                order_request.stop_loss_price = action.stop_loss_price
 
         return order_request

@@ -43,14 +43,20 @@ logger = structlog.get_logger(__name__)
 
 # Mapping from our timeframe strings to exchange interval strings
 _TIMEFRAME_MAP: dict[str, str] = {
-    "1m": "1m",
-    "5m": "5m",
-    "15m": "15m",
-    "30m": "30m",
-    "1h": "1H",
-    "4h": "4H",
-    "1d": "1D",
-    "1w": "1W",
+    # Bybit V5 kline intervals (minutes as plain numbers, daily/weekly/monthly).
+    "1m": "1",
+    "3m": "3",
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",
+    "1h": "60",
+    "2h": "120",
+    "4h": "240",
+    "6h": "360",
+    "12h": "720",
+    "1d": "D",
+    "1w": "W",
+    "1M": "M",
 }
 
 
@@ -142,11 +148,11 @@ async def _fetch_klines(
         Each tuple: (open_time, open, high, low, close, volume, ...).
         Timestamps are in seconds.
     """
-    # Convert lowercase intervals to OKX format (e.g. "1h" -> "1H")
-    okx_interval = _TIMEFRAME_MAP.get(interval.lower(), interval)
+    # Convert friendly intervals to Bybit format (e.g. "1h" -> "60")
+    bybit_interval = _TIMEFRAME_MAP.get(interval.lower(), interval)
 
     try:
-        return await exchange_adapter.get_klines(pair, okx_interval, limit)
+        return await exchange_adapter.get_klines(pair, bybit_interval, limit)
     except Exception as exc:
         logger.warning(
             "kline_request_error",
@@ -168,7 +174,8 @@ def _klines_to_candles(
     pair:
         Trading pair symbol.
     klines:
-        List of (open_time_s, open, high, low, close, volume) tuples.
+        List of (open_time, open, high, low, close, volume) tuples where
+        open_time is epoch seconds or milliseconds (normalized to ms).
 
     Returns
     -------
@@ -176,6 +183,11 @@ def _klines_to_candles(
     """
     candles: list[Candle] = []
     for k in klines:
+        # Normalize to epoch MILLISECONDS: the Bybit adapter returns epoch
+        # seconds (Bybit V5 ms converted at the boundary), while other
+        # adapters may return ms. Values below 1e12 are seconds → ×1000.
+        ts_raw = int(k[0])
+        ts_ms = ts_raw * 1000 if ts_raw < 1_000_000_000_000 else ts_raw
         candles.append(
             Candle(
                 symbol=pair,
@@ -184,7 +196,7 @@ def _klines_to_candles(
                 low=Decimal(str(k[3])),
                 close=Decimal(str(k[4])),
                 volume=Decimal(str(k[5])),
-                timestamp=int(k[0]),  # OKX timestamps are already in ms
+                timestamp=ts_ms,  # epoch milliseconds
             )
         )
     return candles
@@ -232,7 +244,9 @@ async def collect_market_context(
     # ------------------------------------------------------------------
     # Exchange adapter path (default)
     # ------------------------------------------------------------------
-    await _collect_context_via_adapter(context, exchange_adapter, market_data_engine, pairs, timeframes, candle_count)
+    await _collect_context_via_adapter(
+        context, exchange_adapter, market_data_engine, pairs, timeframes, candle_count
+    )
 
     return context
 
@@ -256,9 +270,12 @@ async def _collect_context_via_adapter(
     books for all configured pairs.
     """
     # 1. Fetch candles for all pairs × timeframes (parallelized)
+    sem = asyncio.Semaphore(10)
+
     async def _fetch_candles(pair: str, tf: str) -> tuple[str, list] | None:
         try:
-            raw = await _fetch_klines(exchange_adapter, pair, tf, candle_count)
+            async with sem:
+                raw = await _fetch_klines(exchange_adapter, pair, tf, candle_count)
             if raw:
                 return (f"{pair}_{tf}", raw)
             return None
@@ -270,7 +287,9 @@ async def _collect_context_via_adapter(
     candle_results = await asyncio.gather(*candle_tasks, return_exceptions=True)
 
     for result in candle_results:
-        if isinstance(result, Exception) or result is None:
+        # ``return_exceptions=True`` widens the result to include BaseException
+        # (CancelledError, KeyboardInterrupt), not just Exception.
+        if isinstance(result, BaseException) or result is None:
             continue
         key, raw_klines = result
         pair = key.split("_")[0]
@@ -292,8 +311,9 @@ async def _collect_context_via_adapter(
         context.errors["account"] = str(exc)
 
     # 4. Fetch funding rates, tickers, order books for each pair
+    # (Bybit symbols are used as-is, e.g. "BTCUSDT".)
     for pair in pairs:
-        inst_id = pair.replace("USDT", "-USDT-SWAP") if "USDT" in pair and "-" not in pair else pair
+        inst_id = pair
 
         # Funding rate
         try:
@@ -325,14 +345,10 @@ async def _collect_context_via_adapter(
     # 5. Fetch smart money data via exchange adapter (if available)
     if hasattr(exchange_adapter, "get_smart_money_summary"):
         for pair in pairs:
-            coin = pair.replace("-USDT-SWAP", "").replace("USDT", "")
+            coin = pair.replace("USDT", "")
             try:
                 sm = await exchange_adapter.get_smart_money_summary(coin)
                 if sm:
                     context.smart_money[pair] = sm
             except Exception as exc:
                 context.errors[f"smart_money_{pair}"] = str(exc)
-
-
-
-

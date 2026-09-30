@@ -24,13 +24,13 @@
 **Check 1: Python version**
 ```bash
 python --version
-# Must be 3.12 or later
+# Must be 3.10 or later (3.10/3.12/3.13 are tested in CI)
 ```
 
 **Check 2: Dependencies installed**
 ```bash
-pip list | grep quad
-# Should show quad with version
+pip show quad
+# Should report a version
 ```
 
 **Check 3: Config directory**
@@ -69,27 +69,57 @@ quad risk
 ```
 Look for any gate showing `FAIL`. Common rejections:
 
+Quad runs the 9 futures pre-trade gates (see `src/quad/risk/gates.py`).
+They are evaluated in order and **short-circuit on the first failure**, so
+only the first blocking gate is reported. Common rejections:
+
 | Gate | Rejection Example | Fix |
 |---|---|---|
-| Margin | "Insufficient margin" | Deposit more USDT or reduce position size |
-| Position Size | "Exceeds max of 5 contracts" | Increase `risk.max_position_size` |
-| Delta Exposure | "Portfolio delta would exceed 5.0" | Close offsetting positions |
-| Theta Decay | "Theta would exceed -100 USDT/day" | Adjust strategy or reduce negative theta |
-| Volatility | "IV too low for iron condor" | Switch strategy or wait for volatility |
-| Concentration | "ETH expiry exposure exceeds 40%" | Diversify across expiries |
+| Max Positions | "max positions 1 exceeded" | Raise `risk.max_positions` (serial-trade mode allows only 1) |
+| Portfolio Risk | "portfolio risk would exceed ...%" | Reduce size, or raise `risk.max_portfolio_risk_pct` |
+| Daily Loss | "daily loss limit ..." | Stop for the day; do not widen the limit mid-session |
+| Drawdown | "drawdown ...% exceeds ..." | Same — the breaker is there for a reason |
+| Liquidation Risk | "too close to liquidation" | Add margin (lower leverage) — the threshold is leverage-aware |
+| Funding Cost | "funding cost ... exceeds budget" | Pick a symbol/timeframe with cheaper carry |
+| Leverage Limit | "leverage ...x exceeds limit" | Lower `trading.leverage` (clamped to `risk.max_leverage` at startup) |
+| Concentration | "concentration ...% exceeds ..." | Reduce size or spread across symbols |
+| Correlation | "quote-asset group ...% of portfolio" | Reduce correlated exposure |
+
+To see which gate is actually blocking, run `/risk` in Telegram (it reports
+per-gate status) or inspect the `gate=` field on the `order_rejected_by_risk`
+log event — it names the failing gate directly.
 
 **Step 2: Check circuit breakers**
 ```bash
 quad risk
+# and, for live component state:
+quad health
 ```
-If any breaker is `ACTIVE`, it must be resolved before trading resumes.
+If any breaker is `ACTIVE`, it must be resolved before trading resumes. The
+kill switch is reset with a one-shot token of the form `KILL_RESET_<uuid>`
+(see `src/quad/risk/circuit_breakers.py`).
 
 **Step 3: Check strategy**
 ```bash
 quad strategies
-quad config strategy
+quad config
 ```
-Verify the strategy is enabled and parameters are within valid ranges.
+Verify the strategy is enabled (`strategy.<name>.enabled: true`) and its
+parameters are in range. `quad config` prints the *resolved* configuration
+with secrets redacted.
+
+### Symptom: Startup aborts with "futures account setup incomplete"
+
+Startup deliberately **fails** in live mode when the exchange does not
+confirm the leverage and margin mode that was requested. Otherwise the bot
+would size brackets and liquidation distances from a number the exchange
+never accepted.
+
+Common causes: an open position on the symbol (Bybit refuses a leverage
+change while a position is open), or the symbol's risk-limit tier. Close
+the position or lower the leverage. The error names the failing symbols and
+the requested-vs-actual leverage. In dry-run the same condition is logged as
+`account_setup_leverage_mismatch` and startup continues.
 
 ### Symptom: Orders Not Executing
 
@@ -103,10 +133,10 @@ quad orders --open
 ```
 
 **Possible causes:**
-- **Rate limited**: OKX has strict rate limits. Check logs for `429` errors.
-- **Invalid price**: Option prices change quickly. Your limit price may be too far from market.
+- **Rate limited**: Bybit has strict rate limits. Check logs for `429` errors.
+- **Invalid price**: Futures prices move fast. Your limit price may be too far from market.
 - **Insufficient margin**: The exchange rejected the order. Check account balance.
-- **Expired contract**: The symbol may have been delisted or renamed. Verify contract symbol.
+- **Delisted symbol**: The symbol may have been delisted or renamed. Verify the symbol (e.g. `BTCUSDT`).
 - **Post-only rejected**: If using post-only, the order may have been immediately fillable.
 
 ### Symptom: Orders Partially Filled
@@ -120,12 +150,16 @@ Futures orders can be partially filled due to low liquidity on smaller symbols. 
 
 **Manual intervention:**
 ```bash
-# Check order status
-quad orders --open
-
-# Cancel remaining and reassess
-quad cancel <order-id>
+# Check order status as last persisted by the trading cycle
+quad orders
 ```
+
+Order cancellation is **Telegram-only** — the CLI has no cancel command:
+
+| Telegram command | Who | Effect |
+|---|---|---|
+| `/cancel <order_id>` | any bound chat | Cancel one order by id |
+| `/kill` | operator only | Halt new entries and cancel **all** open orders, reporting cancelled/failed counts |
 
 ---
 
@@ -135,27 +169,34 @@ quad cancel <order-id>
 
 **Check 1: Network stability**
 ```bash
-# Ping OKX
-ping www.okx.com
+# Ping Bybit testnet
+ping api-testnet.bybit.com
 # Look for packet loss or high latency
 ```
 
 **Check 2: Connection count**
 ```bash
 quad health
-# Check ws streams count -- OKX limits concurrent connections
 ```
+Look for a `market_data` / `websocket` component. Bybit also limits
+concurrent connections, so a growing symbol list increases reconnection
+pressure.
 
 **Check 3: Logs for disconnection reasons**
 ```bash
-quad logs --level WARN | grep -i websocket
+quad logs --lines 200
+# or, if logs go to stdout (the default outside a file log), filter directly:
+docker compose logs quad | grep -i websocket
 ```
+Logs are JSON by default (`QUAD_LOG_FORMAT=json`), so each line is one
+event — useful fields: `event`, `level`, `correlation_id`, `reconnect_count`.
 
 **Troubleshooting:**
 - Reduce number of subscribed symbols
 - Check firewall/proxy settings
 - Verify your IP is allowed (if using IP-restricted API keys)
-- The bot auto-reconnects with exponential backoff (1s, 2s, 4s, ... up to 60s)
+- The bot auto-reconnects with exponential backoff + jitter, capped by
+  `market_data.backoff.max_seconds` (default 30s)
 
 ---
 
@@ -192,8 +233,9 @@ ls -la data/
 # Increase the busy_timeout in config
 # persistence.dsn: "data/quad.db"
 
-# Restart the bot
-quad stop && quad start
+# Restart the bot (it runs in the foreground; Ctrl+C, then start again)
+quad start
+# In Docker: docker compose restart quad
 ```
 
 ### Symptom: Disk Full
@@ -274,8 +316,10 @@ The bot may hang during startup if:
 - Previous database is being migrated
 
 ```bash
-# Start with verbose logging
-quad start --log-level DEBUG
+# Start with verbose logging (log level is an env var, not a CLI flag)
+QUAD_LOG_LEVEL=DEBUG quad start
+# Human-readable instead of JSON:
+QUAD_LOG_FORMAT=console quad start
 ```
 
 ---
@@ -285,9 +329,9 @@ quad start --log-level DEBUG
 ### Symptom: Exchange Connection Errors
 
 ```bash
-# Check API key validity
-curl -H "X-OKX-APIKEY: $OKX_API_KEY" \
-  "https://api.okx.com/v5/account/info"
+# Check API key validity (Bybit V5; testnet host by default)
+curl -H "X-BAPI-API-KEY: ***" \
+  "https://api-testnet.bybit.com/v5/account/wallet-balance?accountType=UNIFIED"
 
 # Expected: 200 with account data
 # 401: Invalid API key
@@ -303,7 +347,7 @@ curl -H "X-OKX-APIKEY: $OKX_API_KEY" \
 
 ### Symptom: Rate Limited (HTTP 429)
 
-OKX has strict rate limits (V5 API). The bot monitors its weight usage:
+Bybit has strict rate limits (V5 API). The bot monitors its weight usage:
 
 ```bash
 # The bot will automatically back off when approaching limits
@@ -363,8 +407,7 @@ If you regenerated the token via @BotFather, update `.env` and restart:
 ```bash
 # Generate a new token from @BotFather
 # Update .env with the new token
-# Restart Quad
-quad stop
+# Restart Quad (foreground process: Ctrl+C, then start again)
 quad start
 ```
 
@@ -372,10 +415,14 @@ If the bot was blocked or reported, create a new bot via @BotFather and update t
 
 ### Symptom: Bot Messages Not Sent
 
-The bot silently logs errors if it cannot send a message:
+The bot logs and continues if it cannot send a message:
 ```bash
-quad logs --level ERROR | grep -i telegram
+docker compose logs quad | grep -i "telegram\|send_message"
+# or, with a file log:
+quad logs --lines 200
 ```
+Because send failures are non-fatal by design, they do not stop the trading
+cycle — check `/ai_status` or the log stream rather than expecting an alert.
 
 Common causes:
 - User blocked the bot
@@ -389,7 +436,7 @@ Common causes:
 
 | Error | Meaning | Action |
 |---|---|---|
-| `ExchangeConnectionError` | Can.*reach OKX API | Check network, API status |
+| `ExchangeConnectionError` | Can't reach Bybit API | Check network, API status |
 | `InvalidApiKeyError` | API key rejected | Verify key in `.env` |
 | `RateLimitError` | Hit API rate limits | Reduce request frequency |
 | `OrderRejectedError` | Exchange rejected order | Check order parameters |
@@ -408,11 +455,21 @@ Common causes:
 
 ```bash
 # Per-session debug
-quad start --log-level DEBUG
+QUAD_LOG_LEVEL=DEBUG quad start
 
-# Persistent debug
-# Set in .env:
+# Persistent debug — set in .env / .env.local:
 # QUAD_LOG_LEVEL=DEBUG
+# QUAD_LOG_FORMAT=console   # human-readable instead of JSON
+```
+
+### Correlating a Single Cycle or Webhook Request
+
+Every trading cycle binds a correlation id and every TradingView alert gets
+its own, so concurrent activity stays separable:
+
+```bash
+docker compose logs quad | grep 'correlation_id":"cycle-'
+docker compose logs quad | grep 'correlation_id":"tv-'
 ```
 
 ### Structured Log Queries

@@ -1,3 +1,9 @@
+> **SUPERSEDED (2026-09-11):** The Bybit USDT-perpetual switch described below
+> is **implemented and complete** — `BybitFuturesAdapter` (`pybit`,
+> `category="linear"`) is the only exchange backend, mock mode is removed,
+> testnet is the default, and all user-facing docs are Bybit-only (see
+> `docs/changelog.md` `[Unreleased]`). Kept for history; do not execute as a plan.
+
 # Task: Switch Trading Bot from Binance to Bybit (USDT Perpetual)
 
 **Spec:** `docs/superpowers/specs/2025-08-25-bybit-perpetual-switch-design.md`

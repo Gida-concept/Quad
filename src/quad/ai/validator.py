@@ -21,6 +21,7 @@ Public API
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -162,18 +163,21 @@ def canonical_direction(raw: Any) -> Direction:
     if token in _NEUTRAL_TOKENS:
         return "NEUTRAL"
 
-    # Lenient substring fallback for compound phrases the model may emit
-    # (e.g. "long-biased", "short-term pullback").  Match on the leading
-    # keyword only so we never guess from an arbitrary substring.
-    leading = token.split()[0] if token.split() else token
-    if leading in ("long", "buy", "bull", "up"):
+    # Lenient leading-word fallback for compound phrases the model may emit
+    # (e.g. "long-biased", "short-term pullback").  Split on non-letters so
+    # hyphenated forms ("short-term" -> "short") match; match on the leading
+    # word only so we never guess from an arbitrary substring ("not short"
+    # stays unrecognized -> NEUTRAL, fail-safe).
+    fragments = [f for f in re.split(r"[^a-z]+", token) if f]
+    leading = fragments[0] if fragments else token
+    if leading in ("long", "buy", "bull", "bullish", "up"):
         return "LONG"
-    if leading in ("short", "sell", "bear", "down"):
+    if leading in ("short", "sell", "bear", "bearish", "down"):
         return "SHORT"
 
-    logger.debug(
-        "ai_direction_unknown_defaulting_neutral",
-        raw=str(raw)[:40],
+    logger.warning(
+        "ai_direction_unrecognized",
+        raw=str(raw)[:80],
     )
     return "NEUTRAL"
 
@@ -306,7 +310,7 @@ def normalize_decision(
     *,
     position_side: Any = None,
     indicators: dict[str, Any] | None = None,
-    gate_mode: str = "warn",
+    gate_mode: str = "veto",
     min_confidence_to_trade: float = 0.0,
 ) -> ValidationResult:
     """Validate and normalize an AI trading decision in place of a copy.
@@ -347,8 +351,8 @@ def normalize_decision(
     indicators:
         Optional indicator dict for the plausibility gate.
     gate_mode:
-        ``"warn"`` (default) logs a veto condition without rejecting;
-        ``"veto"`` rejects the decision.
+        ``"veto"`` (default) rejects the decision on a plausibility veto;
+        ``"warn"`` only logs when explicitly configured.
     min_confidence_to_trade:
         Minimum confidence (0-1) for ENTER/EXIT.  ``0.0`` (default) disables
         the gate.  Uses the clamped confidence value.

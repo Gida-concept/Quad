@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quad"
 version = "0.1.0"
-description = "Production-grade open-source USD-M futures trading bot for OKX"
+description = "Production-grade open-source USDT perpetual futures trading bot for Bybit (category=linear)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-keywords = ["trading", "futures", "usdm", "okx", "crypto"]
+keywords = ["trading", "futures", "usdt", "perpetual", "bybit", "crypto"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -30,35 +30,96 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "pydantic>=2.0",
     "python-telegram-bot[job-queue]>=20.0",
-    "groq>=0.4.0",
-    "python-okx>=0.4.0",
-    "mcp>=2.0.0",
+    "cryptography>=44.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "PyJWT>=2.9",
+    # Floors are the oldest minor that the code is written against.  The
+    # pinned set in requirements.txt is what CI/Docker install and what the
+    # adapter tests were verified on; keep these in sync (see docs/deployment.md).
+    "pybit>=5.17",
+    "asyncpg>=0.29",
+    "groq>=1.5",
+]
+
+[project.optional-dependencies]
+# `quad-api` (multi-tenant control plane) extras, kept separate so a
+# bot-only install can slim out the web framework.
+api = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "PyJWT>=2.9",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
 
 [project.scripts]
 quad = "quad.cli:app"
+quad-run = "quad.__main__:run"
 
-[project.gui-scripts]
-quad-bot = "quad.__main__:main"
-
+# Strategy plugins register here (pip-installable third-party strategies):
+# [project.entry-points."quad.strategies"]
+# my_pkg = "my_pkg.strategy:MyStrategy"
 [project.entry-points."quad.strategies"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# strict keeps @pytest.mark.asyncio explicit (matches the existing suite);
+# auto would silently change how every async test is collected.
+asyncio_mode = "strict"
+# Set explicitly: pytest-asyncio deprecates the unset value and will change
+# the default in a future release.
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+markers = [
+    "network: test performs real network I/O (opt-in only)",
+]
+addopts = "-q --strict-markers"
+
 [tool.ruff]
 target-version = "py310"
 
 [tool.ruff.lint]
+# Pin the rule set explicitly.  Ruff's implicit default has changed across
+# releases (0.16 enables ~800 rules vs the classic E4/E7/E9/F set), so
+# leaving `select` unset made `ruff check` results depend on the installed
+# ruff version rather than on this project's intent.  Widen deliberately.
+select = ["E4", "E7", "E9", "F"]
 # BLE001 (blind `except Exception`) is a deliberate boundary-resilience
-# pattern across this codebase: 140/151 sites log and continue, and the
-# remaining 11 are annotated shutdown/best-effort paths. See ADR-094.
+# pattern across this codebase: the majority log and continue, and the
+# remainder are annotated shutdown/best-effort paths. See ADR-094.
 extend-ignore = ["BLE001"]
+
+[tool.ruff.lint.per-file-ignores]
+# Public API re-export module: `quad.types` intentionally star-imports each
+# submodule and composes an explicit `__all__` from their `__all__` lists.
+# F403 ("unable to detect undefined names") is inherent to that pattern and
+# is safe here because `__all__` is explicit.
+"src/quad/types/__init__.py" = ["F403"]
+# Test modules bootstrap `sys.path` (repo-root `src/` layout, no editable
+# install in every CI environment) before importing `quad.*`, so the
+# imports are intentionally below module-level code.
+"tests/*" = ["E402"]
 
 [tool.mypy]
 python_version = "3.10"
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["yaml", "numpy"]
+# Third-party packages that ship no type information.  Listed explicitly so
+# mypy checks the Quad code rather than every third-party stub gap.
+module = [
+    "yaml",
+    "numpy",
+    "pybit.*",
+    "asyncpg.*",
+]
 ignore_missing_imports = true

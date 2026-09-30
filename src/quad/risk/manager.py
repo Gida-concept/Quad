@@ -204,11 +204,11 @@ class RiskManager:
         try:
             import time as _time
 
-            from quad.persistence.repositories import TradeRepository
+            from quad.persistence.repositories import TradeRepository, make_repo
 
             now_ms = int(_time.time() * 1000)
             day_start_ms = now_ms - (now_ms % 86_400_000)
-            repo = TradeRepository(self._db)
+            repo = make_repo(TradeRepository, self._db, self._config)
             trades = await repo.get_by_date_range(day_start_ms, now_ms)
             total = Decimal(0)
             for t in trades:

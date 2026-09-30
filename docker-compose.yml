@@ -1,7 +1,7 @@
 # =============================================================================
 # Docker Compose — Quad USD-M Futures Trading Bot
 #
-# Single-service deployment for OKX USDT perpetual futures trading.
+# Quad-api deployment: bot + Postgres for Bybit USDT perpetual trading.
 # =============================================================================
 
 services:
@@ -15,6 +15,9 @@ services:
     image: quad:latest
     container_name: quad-bot
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
 
     volumes:
       # Read-only config mount
@@ -26,7 +29,7 @@ services:
 
     environment:
       # --- Operation Mode ---
-      - QUAD_MODE=${QUAD_MODE:-okx}
+      - QUAD_MODE=${QUAD_MODE:-bybit}
       - QUAD_DRY_RUN=${QUAD_DRY_RUN:-true}
       - QUAD_LOG_LEVEL=${QUAD_LOG_LEVEL:-INFO}
       - QUAD_LOG_FORMAT=${QUAD_LOG_FORMAT:-json}
@@ -34,16 +37,10 @@ services:
       - QUAD_CONFIG_DIR=/app/config
       - QUAD_HEALTH_PORT=${QUAD_HEALTH_PORT:-9090}
 
-      # --- OKX API (REQUIRED) — USDT perpetual (instType=SWAP) ---
-      - OKX_API_KEY=${OKX_API_KEY:-}
-      - OKX_API_SECRET=${OKX_API_SECRET:-}
-      - OKX_PASSPHRASE=${OKX_PASSPHRASE:-}
-      - OKX_TESTNET=${OKX_TESTNET:-true}
-
-      # --- OKX MCP Server (optional — auto-installed in Docker image) ---
-      - QUAD_MCP_ENABLED=${QUAD_MCP_ENABLED:-true}
-      - QUAD_MCP_PROFILE=${QUAD_MCP_PROFILE:-default}
-      - QUAD_MCP_MODULES=${QUAD_MCP_MODULES:-all}
+      # --- Bybit API (REQUIRED) — USDT perpetual (category=linear) ---
+      - BYBIT_API_KEY=${BYBIT_API_KEY:-}
+      - BYBIT_API_SECRET=${BYBIT_API_SECRET:-}
+      - BYBIT_TESTNET=${BYBIT_TESTNET:-true}
 
       # --- Telegram Bot (REQUIRED) ---
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
@@ -51,6 +48,18 @@ services:
 
       # --- AI / Groq ---
       - GROQ_API_KEY=${GROQ_API_KEY:-}
+
+      # --- Multi-tenancy (quad-api, Phase 1) ---
+      # Fernet key for Bybit credential encryption (generate: python -c
+      # "from quad.security.secrets import generate_key; print(generate_key())")
+      - QUAD_CREDENTIAL_KEY=${QUAD_CREDENTIAL_KEY:?QUAD_CREDENTIAL_KEY is required}
+      # Postgres DSN (Hetzner); SQLite file path remains the dev default
+      - DATABASE_URL=${DATABASE_URL:-postgresql://quad:${POSTGRES_PASSWORD:-quad}@postgres:5432/quad}
+      # Phase-4 worker supervisor: per-tenant `python -m quad` processes
+      - QUAD_SUPERVISOR_ENABLED=${QUAD_SUPERVISOR_ENABLED:-true}
+      # Live trading kill-switch (operator): false = testnet only, even if a
+      # tenant sends testnet=false + confirm_live=true.
+      - QUAD_ALLOW_LIVE=${QUAD_ALLOW_LIVE:-false}
 
       # --- Timezone ---
       - TZ=UTC
@@ -70,7 +79,45 @@ services:
 
     stop_grace_period: 30s
     init: true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+
+  # ---------------------------------------------------------------------------
+  # Postgres (Hetzner) — tenant + trading store for quad-api.
+  # NOTE: DatabaseManager is still aiosqlite-only; the asyncpg port ships
+  # with Phase 2 (public API needs concurrent connections). This service
+  # reserves the topology + credentials now.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: quad-pg
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=quad
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - POSTGRES_DB=quad
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quad -d quad"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
 
 volumes:
   quad_data:
   quad_logs:
+  pg_data:

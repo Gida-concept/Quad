@@ -77,7 +77,7 @@ class Optimizer:
         recommendation_repo: OptimizationRecommendationRepository,
         config_change_repo: ConfigChangeRepository | None = None,
         config_dict: dict[str, Any] | None = None,
-        mcp_client: Any | None = None,
+        allow_prompt_updates: bool = False,
     ) -> None:
         self._config = config
         self._retrain_cfg = config.retrain
@@ -89,7 +89,9 @@ class Optimizer:
         self._rec_repo = recommendation_repo
         self._config_change_repo = config_change_repo
         self._config_dict = config_dict
-        self._mcp = mcp_client
+        # Prompt changes rewrite the operator-owned system prompt: they apply
+        # only with an explicit operator/manual flag, never from auto-apply.
+        self._allow_prompt_updates = allow_prompt_updates
         self._config_lock = asyncio.Lock()
         self._log = logger.bind()
         self._consecutive_failures = 0
@@ -170,6 +172,19 @@ class Optimizer:
             applied = 0
             if self._retrain_cfg.auto_apply:
                 for rec in recommendations:
+                    if (
+                        rec.recommendation_type == "prompt_update"
+                        and trigger != "manual"
+                    ):
+                        # Prompt changes need an explicit manual run, even
+                        # when the operator flag is set (defence in depth).
+                        self._log.warning(
+                            "prompt_update_held_for_manual",
+                            rec_id=rec.id,
+                            target=rec.target_area,
+                        )
+                        rec.status = "held"
+                        continue
                     if self._should_apply(rec):
                         try:
                             await self._apply_recommendation(rec)
@@ -369,6 +384,16 @@ class Optimizer:
             )
 
         elif rec_type == "prompt_update":
+            # Blocklist: ai.system_prompt_override is operator-owned.  Never
+            # apply silently — skip with a warning unless the operator flag
+            # was set at construction (and the run was manual, per above).
+            if target == "system_prompt" and not self._allow_prompt_updates:
+                self._log.warning(
+                    "prompt_update_blocked",
+                    rec_id=rec.id,
+                    key="ai.system_prompt_override",
+                )
+                return
             # Update the system prompt override
             if target == "system_prompt":
                 await self._safe_update_config(

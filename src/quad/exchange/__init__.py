@@ -1,22 +1,23 @@
 """Exchange adapter package for Quad futures trading bot.
 
-Provides a pluggable ExchangeAdapter ABC with the active implementation:
+Provides a pluggable ExchangeAdapter ABC with the single supported
+implementation:
 
-- ``OkxFuturesAdapter`` — Live / demo OKX USDT-perpetual (V5 API,
-  ``instType=SWAP``) via the official ``python-okx`` SDK.
+- ``BybitFuturesAdapter`` — Bybit USDT-perpetual (V5 API,
+  ``category="linear"``) via the official ``pybit`` SDK.
 
-Use ``create_exchange(config)`` to instantiate the correct adapter based on
-the configuration dictionary.
+Use ``create_exchange(config)`` to instantiate the adapter from the
+configuration dictionary.
 """
 
 from __future__ import annotations
 
 from quad.exchange.base import ExchangeAdapter
+from quad.exchange.bybit import BybitFuturesAdapter
 from quad.exchange.factory import create_exchange
-from quad.exchange.okx import OkxFuturesAdapter
 
 __all__ = [
+    "BybitFuturesAdapter",
     "ExchangeAdapter",
-    "OkxFuturesAdapter",
     "create_exchange",
 ]

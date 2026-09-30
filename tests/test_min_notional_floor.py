@@ -2,9 +2,9 @@ r"""Tests for the minNotional-aware quantity floor (execution engine).
 
 Regression: the previous floor logic only raised a sub-minimum quantity up to
 ``minQty``, which for ETHUSDT turned a 0.01 (notional 19.1 < 20) into an even
-smaller 0.001 order (notional 1.91) that Binance still rejected with -4164.
-The new helper raises the quantity so it clears minNotional too, or (when the
-pre-cap cannot reach it) cleanly rejects.
+smaller 0.001 order (notional 1.91) that the exchange still rejected as below
+the minimum notional.  The new helper raises the quantity so it clears
+minNotional too, or (when the pre-cap cannot reach it) cleanly rejects.
 """
 
 import asyncio
@@ -117,7 +117,7 @@ def test_prepare_quantity_raises_up_to_min_notional_within_pre_cap():
     adapter = _min_notional_adapter(
         normalize_error=RuntimeError(
             "notional 19.1 (qty 0.01 x mark 1912.93) below minNotional 20 "
-            "for ETHUSDT (exchange would reject; Binance -4164)"
+            "for ETHUSDT (exchange would reject; notional too small)"
         ),
         filters={
             "step_size": Decimal("0.001"),
@@ -138,7 +138,7 @@ def test_prepare_quantity_cleanly_rejects_when_pre_cap_too_small():
     adapter = _min_notional_adapter(
         normalize_error=RuntimeError(
             "notional 19.1 (qty 0.01 x mark 1912.93) below minNotional 20 "
-            "for ETHUSDT (exchange would reject; Binance -4164)"
+            "for ETHUSDT (exchange would reject; notional too small)"
         ),
         filters={
             "step_size": Decimal("0.001"),
@@ -157,7 +157,7 @@ def test_prepare_quantity_cleanly_rejects_when_pre_cap_too_small():
 def test_prepare_quantity_cleanly_rejects_when_no_pre_cap():
     # No pre-cap -> original rejection is re-raised unchanged.
     adapter = _min_notional_adapter(
-        normalize_error=RuntimeError("below minQty for ETHUSDT (-1113)"),
+        normalize_error=RuntimeError("below minQty for ETHUSDT"),
         filters={
             "step_size": Decimal("0.001"),
             "min_qty": Decimal("0.001"),

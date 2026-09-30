@@ -6,6 +6,414 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ---
 
+## [Unreleased] -- type-safety and duplication cleanup
+
+Follow-up to the full-codebase audit below. Drives `mypy src` to **zero
+errors** (from 69) and removes the duplicated retry / cache logic. Adds
+`src/quad/common/retry.py` and `tests/test_retry.py` (441 tests total).
+
+### Fixed
+- **`quad-api`'s `GET /health` never failed.** It returned an unconditional
+  `{"status": "ok"}` and contacted no dependency, so a load balancer or
+  orchestrator kept routing traffic to an API that could not reach Postgres --
+  every real endpoint would fail while the probe said "ok". It now runs
+  `DatabaseManager.is_healthy()` (`SELECT 1`), reports a per-component map
+  (`components` / `degraded`, matching the bot's `HealthServer` payload) and
+  returns **503** with `error.code = "unhealthy"` when a component is down.
+  The check is fail-closed: an exception inside the check counts as unhealthy.
+- **Added `GET /live` to `quad-api`** -- a liveness probe that checks *no*
+  dependency, so a transient database blip does not cause a restart loop.
+  Point `readinessProbe` at `/health` and `livenessProbe` at `/live`. Both are
+  unauthenticated. Previously the API had no liveness endpoint that could
+  safely be separated from readiness.
+- **`trades.order_id` could never join back to its order.** The column is an
+  `INTEGER` foreign key to `orders.id`, but the engine passed
+  `OrderResult.order_id` -- the *exchange* id, which Bybit returns as a UUID
+  string. SQLite stored the UUID as text in an INTEGER-affinity column, so the
+  fill was permanently unlinkable. Non-integer ids now record `0`, the same
+  "unknown" sentinel already used for `id` / `position_id`.
+- **`_last_trend_roll_ts` was annotated `dict[str, int]`** but stores
+  `time.monotonic()`, i.e. floats. Corrected to `dict[str, float]`.
+- **`/start <pairing-code>` could raise `AttributeError`.** The guard checked
+  `self._pairing is not None` and then dereferenced `self._bindings`, which is
+  separately optional. Both are now checked.
+- **`close_tasks` was annotated `list[asyncio.Task]`** while every element is a
+  `(position, action, task)` tuple, so the annotation described nothing real.
+- **`structlog_context_processor` did not satisfy structlog's `Processor`
+  protocol** (it took a `dict`, which is contravariantly too narrow), and would
+  have been rejected at the point the processor chain is assembled. Its
+  signature now uses `MutableMapping`.
+- **`asyncio.gather(..., return_exceptions=True)` results were filtered with
+  `isinstance(result, Exception)`**, which does not exclude `BaseException`
+  (`CancelledError`, `KeyboardInterrupt`) -- those would have fallen through
+  and been unpacked as a `(key, klines)` tuple.
+- **`aiosqlite` import guard carried a `# type: ignore[no-redef]`** for an
+  error that is actually reported as `assignment`, so the ignore was both
+  wrong and unused.
+
+### Changed
+- **God modules split by concern, behaviour preserved.** `orchestrator.py`
+  (4251 lines / 54 methods) and `commands.py` (2602 / 37) were split into
+  mixins. Every method was moved as *text at its original indentation* and then
+  proven unchanged by comparing its `ast.dump` before and after, so the
+  refactor is provably code movement with no logic edits. All method names and
+  signatures are unchanged, and `quad.orchestrator.orchestrator.QuadOrchestrator`
+  / `quad.bot.commands.QuadBotCommands` remain the public entry points.
+  - `orchestrator/`: `orchestrator.py` keeps lifecycle (`__init__`, `start`,
+    `stop`, `run_forever`, `_setup_signal_handlers`, `_shutdown_all`) and the
+    public API (`_build_strategy_context`, `execute_strategy`, `status`) --
+    706 lines / 9 methods. The rest moved to `_bootstrap_mixin` (subsystem
+    wiring, 18), `_rotation_mixin` (the cycle and the scalp/trend rotations,
+    11), `_positions_mixin` (close / bracket / AI actions under `_trade_lock`,
+    7), `_tv_mixin` (webhook receiver, 1), `_decisions_mixin` (decision
+    journal, 3) and `_notify_mixin` (Telegram sends, 5).
+  - `bot/`: `commands.py` keeps `__init__`, the reply/narrow helpers, the
+    operator gate, `/start`, `/help`, `/status`, `/strategies`, `/risk`,
+    `/cancel`, `/exchange`, the `/execute` conversation handler and
+    `error_handler` -- 1058 lines / 18 methods. The rest moved to
+    `_config_cmds_mixin` (`/leverage`, `/position_mode`, `/settings`, `/set`),
+    `_market_cmds_mixin` (the seven read-only views), `_ai_cmds_mixin` (the AI
+    commands) and `_safety_mixin` (`/kill` and its confirm callback).
+  - Each mixin declares the state it consumes as class-level annotations, so
+    the contract with its host class is explicit without the mixin owning (or
+    being able to clobber) the state.
+  - The `/set` allowlist constants and `_escape_md` moved to the modules that
+    are now their only callers, and are re-exported from `quad.bot.commands`
+    (including `__all__`) so the existing import path keeps working -- a test
+    imports `BLOCKED_SET_KEYS` from there.
+- `ALL_MODELS` is typed `list[type[ModelSurface]]` via a new structural
+  `ModelSurface` `Protocol`, so schema bootstrap and `BaseRepository` no
+  longer need `Any` / `getattr` escape hatches to reach `create_table_ddl()`.
+- `aiohttp.ClientWebSocketResponse` is now parameterised `[bool]` on the
+  WebSocket manager's helpers, matching what `ws_connect()` actually yields.
+- `ExchangeStatusResponse.worker_pid` is coerced to `int`; the supervisor can
+  report a pid as a string (it is read back from a file written by another
+  process) and a malformed value now degrades to "unknown" instead of failing
+  the whole status response.
+- The Bybit adapter annotates its client with the real `pybit` types via a
+  `TYPE_CHECKING` import, so `self._client` / `self._ws` keep full attribute
+  checking while the SDK stays an optional runtime dependency.
+- `cmd_start`'s pairing guard and the bybit `repositories.py` tenant stamping
+  now narrow `Optional` explicitly instead of relying on a correlation between
+  two attributes that a type checker cannot see.
+
+### Added
+- `quad.common.retry` -- `exponential_backoff()` (geometric growth with an
+  optional cap and jitter) and `retry_async()` (bounded retry loop with
+  injected retryable-predicate, delay policy, per-attempt hook and retry
+  callback). 16 tests pin the schedule, the cap, the jitter bound and every
+  exit path, including "re-raise immediately when not retryable" and "re-raise
+  the last error on exhaustion".
+- `quad.exchange.base._ttl_fresh` / `_ttl_store` -- the TTL freshness rule
+  (monotonic clock, half-open `[0, ttl)` window) that three filter caches had
+  each re-implemented.
+
+### Refactored (duplication removed)
+- **TTL caches: 3 copies -> 1.** `ExchangeAdapter._get_lot_filters`,
+  `ExchangeAdapter.get_tick_size` and the Bybit override each re-implemented
+  the same `(monotonic_ts, value)` lookup. They now share `_ttl_fresh` /
+  `_ttl_store`. These still operate on a plain `dict` on purpose: adapters and
+  tests seed `_exchange_info_cache` directly, so the mapping is the contract.
+- **Retry backoff: 4 copies -> 1.** `groq.py` (twice), `bybit._retry_delay` and
+  the order-submission gateway each hand-rolled
+  `base * 2 ** (attempt - 1)`; they now call `exponential_backoff()`.
+- **Bounded retry loop: 2 copies -> 1.** `bybit._request` and the gateway's
+  `submit()` shared the same attempt/sleep/log scaffolding and now use
+  `retry_async()`. Each keeps its own policy: Bybit normalises the error and
+  honours `Retry-After`; the gateway treats only `TimeoutError` /
+  `ConnectionError` as transient and wraps everything else in
+  `OrderRejectedError`.
+- `groq._chat`'s loop and the market-data WebSocket reconnect supervisor were
+  deliberately **not** folded in: the first is a three-exception-type state
+  machine with recursive model fallback and key rotation, the second an
+  unbounded reconnect loop. Neither is a duplicate of the bounded retry.
+
+### Known issues (reported, not changed)
+- **`gateway.backoff_base_seconds` is dead config.** The submit retry schedule
+  is hardcoded to 1s/2s/4s (capped at 30s) and never consults the configured
+  base (default 2.0). Behaviour is preserved deliberately -- changing live
+  order-retry timing is a decision, not a refactor -- and the property now
+  documents this. Wiring it through needs an explicit sign-off.
+- **The two HTTP servers are not duplication.** `quad.api.app` (FastAPI /
+  uvicorn) serves the multi-tenant API process; `quad.monitoring.health.HealthServer`
+  (aiohttp) runs inside the trading-bot process and additionally hosts the
+  TradingView webhook. They are different processes with different contracts
+  and auth, and must not be merged.
+- **The three "rate limiters" are three different algorithms,** not copies: a
+  sliding-window counter that raises HTTP 429 (`api.deps.RateLimiter`), a
+  minimum-interval async pacer (`BybitFuturesAdapter._throttle`), and a
+  per-user/per-command cooldown (`QuadBotCommands._check_rate_limit`). No
+  shared abstraction would fit all three.
+
+---
+
+## [Unreleased] -- full-codebase audit fixes
+
+Result of an end-to-end review of every module in `src/quad/`, the test
+suite, the configuration layer and the documentation. Adds
+`tests/test_scan_fixes.py`, `tests/test_cli.py` and
+`tests/test_docs_consistency.py` (419 tests total).
+
+### Fixed (safety-critical)
+- **TradingView webhook route was never mounted.** The orchestrator starts
+  the health server *before* initialising the webhook, and `add_route()` only
+  queued the route, so every alert returned 404 while the log reported
+  `tradingview_webhook_initialized`. aiohttp freezes its router at
+  application startup, so `HealthServer` now pre-registers a catch-all
+  dispatcher and `add_route()` mutates the backing dict. The orchestrator
+  additionally verifies the route is live and disables the webhook (with a
+  `critical` log) if it is not.
+- **`/kill` cancelled nothing.** It set the kill-switch flag and replied
+  "Open orders have been cancelled". It now cancels open orders on the
+  exchange (union of the exchange view and the gateway's in-memory view) and
+  reports the real `cancelled` / `failed` counts with per-order reasons.
+  Positions still remain open, and the message now says so accurately.
+- **`/execute` hardcoded `dry_run=False`,** so a dry-run bot still attempted
+  real submissions. It now forwards the bot's actual dry-run state, states
+  the execution environment (testnet / live / dry-run) in the confirmation
+  card, has a 60s cooldown, and is **operator-only** — as is `/kill`.
+- **Webhook secret env-var mismatch.** `tradingview/signals.py` read
+  `QUAD_TV_WEBHOOK_SECRET` while the config mapped
+  `QUAD_TRADINGVIEW_WEBHOOK_SECRET`, so the in-alert credential check never
+  ran. One env var now, passed explicitly by the orchestrator. The
+  `allow_without_secret` escape hatch is removed entirely — the schema
+  already required a >=16-char secret when the webhook is enabled.
+- **Protective brackets bypassed the risk pipeline.** Brackets are
+  submitted with `risk_checked=True` and used the exchange-reported
+  `filled_qty` unchecked. They are now bounded by the pre-sizing quantity
+  and validated against `risk.max_position_size_usd`; an over-cap bracket
+  leaves the position unprotected and says so loudly rather than silently
+  over-ordering.
+- **Min-quantity floor-up could exceed an approved notional cap.**
+  `_prepare_quantity` floors a sized-but-sub-minimum order up to the
+  exchange minimum, potentially past what risk had approved. The floor-up
+  is now re-validated against `risk.max_position_size_usd` and rejected
+  with a clear reason if it would breach the cap.
+- **`/leverage SYMBOL VALUE` and `/position_mode MODE` silently did
+  nothing** — they echoed the requested value back. Both now really call the
+  adapter, are operator-only, clamp to `risk.max_leverage`, and report
+  exchange rejections (e.g. an open position blocking a leverage change).
+- **Futures account setup swallowed per-symbol failures,** so the bot could
+  size brackets and liquidation distances from a leverage the exchange
+  never accepted. Leverage is now read back and verified, clamped to
+  `risk.max_leverage`, and a mismatch **aborts startup in live mode**.
+- **Unknown `QUAD_MODE` values fell through silently** (a leftover
+  `QUAD_MODE=okx` traded Bybit while `quad status` advertised otherwise).
+  Only `bybit` and `dry_run` are accepted; anything else is a hard error.
+- **`_mode` / `_dry_run` were not schema fields,** so the two safety
+  switches emitted `config_unknown_key_ignored` on every validation and
+  survived only via an ad-hoc copy loop. They are now declared,
+  validated `QuadConfig` fields.
+- **Health-server auth bypass behind a reverse proxy.** The no-key
+  loopback bypass trusted `request.remote`, which is the *proxy's* address
+  when proxied, so any forwarded internet request was accepted. The bypass
+  is now refused when forwarding headers are present.
+- **Windows console encoding.** Printing any status glyph raised
+  `UnicodeEncodeError` and aborted the CLI mid-command. The console is now
+  reconfigured to UTF-8 (shared helper used by both the entry point and the
+  CLI). `quad execute --no-dry-run` was also advertised but never generated
+  by Typer (exit code 2); the real flag is `--live`.
+- **Latent `NameError` in the trading cycle.** `_reconcile_decision_outcomes`
+  imported `DecisionRepository` but not `make_repo`, so every cycle raised
+  `NameError` on that line. Also fixed an undefined `logger` in
+  `api/deps.py` and an undefined `OrderResult` annotation in the
+  orchestrator.
+- **`error_logs` had a schema and readers but no writer,** so every recorded
+  error was lost when stdout rotated. `monitoring/error_sink.py` is a
+  structlog processor that persists `ERROR`+ events through a bounded queue
+  and a background flusher, flushed before the database disconnects.
+- Brittle `[]` config indexing that raised `KeyError` on partial configs
+  (`WebSocketManager.__init__` required `market_data` and
+  `market_data.websocket`; `GroqClient.__init__` required
+  `ai.groq.rate_limiter`). All fail soft with working defaults.
+- Unawaited WebSocket task cancellation: `stop()` and `resubscribe_all()`
+  left the connection task pending, logging "Task was destroyed but it is
+  pending" and allowing a second `_run_connection` to overlap the first.
+  Both now cancel *and await* via a shared `_cancel_connection_task()`.
+- `asyncio.get_event_loop()` (deprecated outside a coroutine) in Groq key
+  rotation, which also leaked the old client's HTTP pool via a
+  garbage-collectable fire-and-forget task. Now uses
+  `get_running_loop()` and a retained task set. The rate-limit stamp mixed
+  loop time with wall time; both are now `time.time()`.
+- `PriceBuffer._buffers` was read directly (bypassing the class's own
+  accessors) from `MarketDataEngine.status()`; a public `snapshot_counts()`
+  replaces it.
+- **API-key material in `Account.id`.** `bybit-{api_key[:8]}` embedded 8
+  characters of the live secret into every log line, status message and
+  persisted row. Replaced with a salted SHA-256 fingerprint.
+
+### Added
+- **Correlation IDs** (`monitoring/correlation.py`): each trading cycle binds
+  `cycle-<hex>` and each TradingView alert `tv-<hex>`, attached to every log
+  event, so concurrent pair scans, webhooks and Telegram jobs are separable.
+  The scan found zero correlation-id usage before this.
+- **Persistent error sink** (`monitoring/error_sink.py`), configurable via
+  the new `error_sink` config section.
+- **CLI commands that were documented but missing:** `start`, `stop`,
+  `strategies`, `health`, `trades`, `decisions`, `logs`. `start` is a real
+  foreground launcher (README's quickstart `quad start --dry-run` previously
+  did not exist). `balance`/`positions`/`orders` now read the local database
+  and state plainly that they are not live exchange queries. `db-info` shows
+  per-table row counts.
+- `[tool.pytest.ini_options]` in `pyproject.toml`. `pytest-asyncio` was only
+  installed in CI, so a local `pytest` run failed or skipped every async
+  test.
+- Health-server aliases `GET /ready` and `GET /live` (the documented probe
+  paths, which did not exist), plus `set_metrics_collector()` so `/metrics`
+  serves real gauges instead of an uptime-only fallback.
+- `quad-run` console script and a synchronous `run()` entry point. The old
+  `quad-bot` gui-script pointed at an `async def`, so the generated wrapper
+  returned an un-awaited coroutine and the bot never started.
+- `pyproject.toml`: `dev` / `api` optional-dependency extras, and explicit
+  `testpaths` / asyncio mode.
+- Tests: `tests/test_scan_fixes.py`, `tests/test_cli.py`,
+  `tests/test_docs_consistency.py` (docs-vs-code drift guards), plus new
+  coverage in `tests/test_authz_ops_fixes.py`.
+
+### Changed
+- `pyproject.toml` metadata no longer describes the project as an
+  "USD-M futures trading bot for OKX"; the project is Bybit-only.
+- Package dependencies raise floors to the tested versions
+  (`pybit>=5.17`, `groq>=1.5`) — the old floors (`pybit>=5.7`,
+  `groq>=0.4.0`) were unsatisfiable alongside the pinned httpx: a local
+  install resolved `groq 0.4.1`, which calls the removed
+  `AsyncClient(proxies=...)` argument and fails at import.
+- **The ruff rule set is now pinned** (`select = ["E4","E7","E9","F"]`).
+  It was previously implicit, so `ruff check` results depended on the
+  installed ruff version — ruff 0.16 enabled ~800 rules and reported 316
+  findings; the intended set reports none. `ruff check src tests` is clean.
+- `DATABASE_URL` is now mapped to `persistence.dsn` in
+  `ConfigManager.ENV_VAR_MAP`, so the documented override actually works
+  and there is one source of truth (the orchestrator no longer reads the
+  env var directly).
+- `tradingview_webhook.port` is documented as informational only — the
+  webhook is a route on the health server, so the port it binds is
+  `monitoring.health_server.port`.
+- Binance-specific error codes (`-1113` / `-1111` / `-4164`) removed from
+  comments in the ABC and execution engine; the bot is Bybit-only.
+
+### Documentation
+Corrected drift between the docs and the code, with
+`tests/test_docs_consistency.py` added to prevent it returning:
+- Schema count: "16 tables" -> **20 tables**, `SCHEMA_VERSION = 10`; the
+  documented `contracts` and `stats` tables never existed.
+- Telegram: removed the never-implemented `/pnl`, documented `/exchange`,
+  corrected the handler count, and documented the public / bound /
+  operator-only access tiers and precisely what `/kill` does.
+- CLI: removed every fabricated command and flag (`quad stop --emergency`,
+  `quad position <id>`, `quad cancel`, `quad strategy set`, `quad
+  config set/reload`, `quad backtest --report`, `quad logs --level`, ...)
+  and replaced invented sample output with real behaviour.
+- `docs/strategy-development.md` taught a nonexistent `Strategy` class and
+  `analyze()` method; rewritten against the real `StrategyBase.evaluate()`
+  API (the example is verified executable), and it now states honestly that
+  the `quad.strategies` entry-point group is declared but never read —
+  strategies register by subclassing.
+- `docs/configuration.md` described a 4-layer config with split
+  `risk.yaml`/`strategy.yaml` files and a `config.local.yaml` overlay;
+  reality is one `config.yaml` plus 3 layers. Its YAML sample was
+  regenerated from the real schema (it previously set keys silently dropped
+  by `extra="ignore"`, including a nonexistent `logging:` section).
+- `docs/risk-management.md` used config keys that do not exist
+  (`max_portfolio_risk`, `max_daily_loss`, `max_drawdown`,
+  `max_correlation`, `risk.stop_loss.fixed_loss_per_contract`); corrected to
+  the real names and validated against `RiskConfig`.
+- `docs/troubleshooting.md` listed options-era gates (delta, theta, IV,
+  expiry) that were removed in v2.0.0; replaced with the 9 real futures
+  gates. Also corrected the Python floor (3.10+, not 3.12+) and the
+  backoff cap.
+- `docs/api.md`: replaced a fabricated `/health` payload and a fabricated
+  metrics list (invented `quad_`-prefixed names) with the real response
+  shape and the 9 metrics actually emitted; documented the full probe path
+  set and the auth model.
+- `docs/deployment.md`: rewrote the Docker/compose sections against the real
+  `Dockerfile` and `docker-compose.yml`, documented foreground operation and
+  graceful shutdown, and documented the reverse-proxy auth requirement.
+- `README.md`: corrected the startup ordering, the TradingView flow
+  (auth is now mandatory, port clarified), the AI subsystem (added the
+  `ai/validator.py` direction/side inversion guard and its single point of
+  control caveat), and the project structure.
+
+### Fixed (dependencies)
+- Local development environment was out of sync with `requirements.txt`
+  (`fastapi 0.109.2` against a `starlette 1.6.0` that removed the
+  `on_startup` kwarg, breaking every `quad-api` import and failing 4 test
+  modules at collection). Aligned to the pinned set.
+
+---
+
+## [Unreleased] -- v8: server-owned symbols
+
+### Changed
+- Trade universe is server-owned: `symbols` removed from `PUT /v1/config`
+  (sent lists ignored; GET returns the bot universe for display).
+- `tenant_config.symbols_json` dropped (v8 migration); new tenants default
+  to Balanced (10x, 2%/trade, TP 50/SL 30, trend).
+- v8 backfills pre-canonical 5x rows to 10x. Tenants who deliberately chose
+  5x move too — re-tune with `PUT /v1/config`.
+
+## [Unreleased] -- AI-judged scalping + strategy modes
+
+### Added
+- `strategy_mode` per tenant (`trend`/`scalp`/`both`, `PUT /v1/config`):
+  users pick trend, scalp, or both; leverage is theirs (capped at 10x when
+  scalp is active — spread-noise liquidates higher).
+- AI-judged scalp loop: 5m candles -> deterministic reversion signals ->
+  gate -> ONE batch judge call for all symbols (`decide_batch`, strict
+  per-symbol schema, HOLD-filled omissions) on qwen/qwen3-32b.
+- Separate scalp budget (`scalp_max_calls_per_day`, default 120), tight
+  scalp brackets (TP 15%/SL 8% defaults), 15-min time-stop, shared
+  position slots with trend.
+- Trend roll-gate: hourly rolls survive 5-minute loops (`roll_min_seconds`).
+- Schema v7: `strategy_mode`, `scalp_tp_pct/sl_pct/max_calls_per_day`.
+- Groq free-tier capacity model documented in code (per-org RPD is the
+  binding constraint: 250/day compound-mini, 1,000/day qwen/gpt-oss).
+
+## [Unreleased] -- AI cost controls + trade policy
+
+### Added
+- Judge gate (`ai.judge_gate`): the Groq final-judgement call fires only on a
+  fresh closed candle AND (a local setup at `min_strength`, default 0.5, OR an
+  open position needing a decision). Dead markets return a local HOLD free.
+- Per-tenant daily judge budget (`ai.judge_max_calls_per_day`, default 24;
+  tenant field `ai_max_calls_per_day`, 1-500 via `PUT /v1/config`). Exhausted
+  budgets run local-only; exchange-native TP/SL brackets still protect.
+- Model tiers (`ai.tier`, tenant field `ai_tier`: `cheap`/`smart` via
+  `PUT /v1/config`). Cheap judges on the primary model; disagreement between
+  a strong local (default 0.7) and the cheap verdict triggers one smart-model
+  re-judge, higher confidence wins.
+- Groq key pool (`GROQ_API_KEYS`, comma-separated): rotates past daily-quota
+  429 walls before falling back to the fallback model.
+- Rotation hourly roll made explicit: workers default
+  `close_open_position_each_cycle=true` + `max_hold_seconds=3600` (one trade
+  per cycle; stale positions force-closed; TP/SL are real exchange brackets,
+  PnL read from `unrealisedPnl`/`realisedPnl`, never mocked).
+- Schema v6: `tenant_config.ai_tier`, `tenant_config.ai_max_calls_per_day`.
+
+## [Unreleased] -- Bybit-Only User Docs
+
+### Changed
+- All user-facing docs are now Bybit-only: `configuration.md`,
+  `deployment.md`, `architecture.md`, `interface-commands.md`,
+  `troubleshooting.md`, `go-live-plan.md`, `risk-management.md`,
+  `strategy-development.md`, and `README.md` describe the Bybit V5 USDT
+  perpetual backend (`pybit` SDK, `category="linear"`, symbols like
+  `BTCUSDT`, Bybit V5 kline intervals like `"60"`).
+- Env vars documented as `BYBIT_API_KEY` / `BYBIT_API_SECRET` /
+  `BYBIT_TESTNET` with `QUAD_MODE=bybit`; testnet
+  (`https://api-testnet.bybit.com`) documented as the default.
+- Docker notes: Python-only image (no Node.js), compose snippet carries the
+  `BYBIT_*` vars, Postgres-on-Hetzner vs SQLite-dev topology noted.
+
+### Removed
+- `OKX_*` env vars, passphrase, `instType=SWAP` / `BTC-USDT-SWAP` symbol
+  format, `python-okx` SDK, and the OKX MCP server (`mcp/` was deleted from
+  source) from all user docs. History below is preserved as-is.
+- `MockAdapter` / mock-mode references from user docs (only testnet and live
+  environments remain).
+
+---
+
 ## [2.2.0] - 2025-08-29 -- OKX MCP Server Integration
 
 ### Added

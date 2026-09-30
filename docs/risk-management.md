@@ -25,67 +25,67 @@ Futures trading introduces risk dimensions not present in spot trading:
 
 | Risk Dimension | Why It Matters | Quad's Approach |
 |---|---|---|
-| **Liquidation Risk** | Leveraged positions can be liquidated if maintenance margin is breached | Monitor liquidation proximity, maintain ≥20% distance, alert at thresholds |
-| **Funding Rate Cost** | Perpetual futures have recurring funding payments (every 8h) | Track cumulative funding costs, avoid trades with unfavorable rates, alert on spikes |
-| **Leverage Risk** | Higher leverage amplifies losses as well as gains | Cap max leverage (default 10x), enforce per-strategy limits, monitor margin utilization |
-| **Gap Risk** | Price can gap through stop-losses in low liquidity | Use STOP_MARKET orders, maintain liquidation distance buffer |
-| **Correlation Risk** | Multiple positions can move against you simultaneously | Cap portfolio correlation at 0.7, diversify across uncorrelated symbols |
-| **Concentration Risk** | Too much capital in one position or symbol | Cap single-position exposure at 40% of portfolio, limit max position count |
-| **Volatility Risk** | Sudden volatility spikes can trigger rapid P&L changes | Monitor volatility changes, adjust position sizes during turbulent periods |
+| **Liquidation Risk** | Leveraged positions can be liquidated if maintenance margin is breached | Monitor distance to the exchange-reported liquidation price against a **leverage-aware** threshold (see below) |
+| **Funding Rate Cost** | Perpetual futures have recurring funding payments (every 8h) | Project cost over `funding_rate_periods`; block when projected cost exceeds `max_funding_rate_cost` × position value |
+| **Leverage Risk** | Higher leverage amplifies losses as well as gains | Cap effective portfolio leverage at `max_leverage` (also bounded by the account's own limit) |
+| **Gap Risk** | Price can gap through stop-losses in low liquidity | Use `STOP_MARKET` orders (market-on-trigger, not limit-if-triggered) |
+| **Correlation Risk** | Multiple positions can move against you simultaneously | Cap each quote-asset group's notional at `correlation_threshold_pct` of portfolio value |
+| **Concentration Risk** | Too much capital in one position or symbol | Cap single-position exposure via `max_position_concentration` and `max_position_size_pct` |
+| **Volatility Risk** | Sudden volatility spikes can trigger rapid P&L changes | Volatility circuit breaker trips on 24h mark-price moves above the configured threshold |
 
 ---
 
 ## Pre-Execution Validation Pipeline
 
-Every trading decision flows through this pipeline before an order reaches OKX:
+Every trading decision flows through this pipeline before an order reaches Bybit. The order below is the evaluation order in `GatePipeline._gate_sequence()` (`src/quad/risk/gates.py`), which short-circuits on the first failure:
 
 ```
 Strategy Suggestion
         │
         ▼
-┌──────────────────────────────┐
-│  1. Max Positions            │  Total open positions ≤ configured limit?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  1. MAX_POSITIONS_GATE         Open positions ≤ limit?      │
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
-┌──────────────────────────────┐
-│  2. Portfolio Risk           │  Total risk within bounds (% of portfolio)?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  2. PORTFOLIO_RISK_GATE       Portfolio risk within bounds?│
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
-┌──────────────────────────────┐
-│  3. Daily Loss               │  Daily PnL breaching configured threshold?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  3. DAILY_LOSS_GATE           Daily loss within threshold? │
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
-┌──────────────────────────────┐
-│  4. Drawdown                 │  Portfolio drawdown within acceptable range?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  4. DRAWDOWN_GATE             Drawdown within range?       │
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
-┌──────────────────────────────┐
-│  5. Liquidation Risk         │  Position close to liquidation price?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  5. LIQUIDATION_RISK_GATE     No position near liquidation?│
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
-┌──────────────────────────────┐
-│  6. Funding Rate Cost        │  Funding cost within acceptable range?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  6. FUNDING_RATE_COST_GATE    Projected funding acceptable?│
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
-┌──────────────────────────────┐
-│  7. Leverage Limit           │  Leverage ≤ configured maximum?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  7. LEVERAGE_LIMIT_GATE       Effective leverage ≤ max?   │
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
-┌──────────────────────────────┐
-│  8. Position Concentration   │  Single position not too concentrated?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  8. POSITION_CONCENTRATION_GATE  Single position ≤ cap?   │
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
-┌──────────────────────────────┐
-│  9. Correlation              │  Positions not overly correlated?
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  9. CORRELATION_GATE          Quote-asset groups ≤ cap?   │
+└────────────────────────────────────────────────────────────┘
         │ Pass
         ▼
    Order Submitted
@@ -97,57 +97,91 @@ If any gate rejects the trade, a specific reason code is logged and the decision
 
 #### 1. Max Positions Check
 
-Verifies total open positions don't exceed configured limit. Checks both total count and per-symbol limit.
+Counts futures positions with non-zero size and adds 1 when the action is an entry (`ENTER`, `open_long`, `open_short`). Blocks when the total would exceed `risk.max_positions`.
 
-**Rejection Example:** "Would exceed max of 5 open positions"
+**Rejection Example:** "Position limit 1 reached (1 open, 1 adding)"
 
 #### 2. Portfolio Risk Check
 
-Ensures total position value (notional * leverage) doesn't exceed configured % of portfolio value.
+Ensures the proposed notional stays within `risk.max_portfolio_risk_pct` of portfolio value.
 
-**Rejection Example:** "Portfolio risk would be 35%, exceeding max 20%"
+**Rejection Example:** "Portfolio notional risk 35.00% exceeds limit of 20.00%"
 
 #### 3. Daily Loss Check
 
-Monitors daily realized + unrealized PnL. If daily loss exceeds configured threshold (default 5%), blocks new entries.
+Monitors realised daily P&L. If daily loss exceeds `risk.max_daily_loss_usd`, new entries are blocked.
 
-**Rejection Example:** "Daily loss of -6.2% exceeds max of -5%"
+**Rejection Example:** "Daily loss -520.00 exceeds limit -500.00"
 
 #### 4. Drawdown Check
 
-Tracks portfolio peak-to-trough. Blocks new entries if drawdown exceeds threshold.
+Tracks portfolio peak-to-trough. Blocks new entries if drawdown exceeds `risk.max_drawdown_pct`.
 
-**Rejection Example:** "Current drawdown of 18% exceeds max 15%"
+**Rejection Example:** "Drawdown 31.40% exceeds limit of 25.00%"
 
 #### 5. Liquidation Risk Check
 
-Each open position must maintain minimum distance from liquidation price. Calculates liquidation price from position size, leverage, entry price, and margin type.
+Uses the exchange-reported `liquidation_price` and the current mark price to compute distance, then compares it against the **leverage-aware** threshold from `effective_min_liquidation_distance()`:
 
-**Rejection Example:** "Position would have 12% distance to liquidation, below 20% minimum"
+```
+distance (LONG)  = (mark_price - liquidation_price) / mark_price
+distance (SHORT) = (liquidation_price - mark_price) / mark_price
+
+effective_min = min(min_distance_to_liquidation_pct,
+                    liquidation_distance_fraction / leverage)
+```
+
+A flat percentage is wrong for leveraged isolated positions: at N× leverage the liquidation price sits roughly `1/N` from entry, so a 20% threshold would trip *permanently* at 50x where the real distance is only ~2%. With the default `liquidation_distance_fraction: 0.5`, a 50x position is judged against `0.5 / 50 = 1%`; a 10x position against `0.5 / 10 = 5%`. When a position's leverage is unknown, the configured cap is used unchanged.
+
+**Rejection Example:** "Position(s) ['BTCUSDT'] too close to liquidation: [{'symbol': 'BTCUSDT', 'side': 'long', 'distance_pct': 0.8, 'min_distance_pct': 1.0}]"
 
 #### 6. Funding Rate Cost Check
 
-Evaluates funding rate cost for the proposed position. Blocks entry if 8h funding cost exceeds threshold. Prefers positions with favorable (receiving) funding.
+Entry actions only. Projects the funding cost over `risk.funding_rate_periods` (default 3 × 8h = 24h) and rejects when it exceeds `risk.max_funding_rate_cost` × position value.
 
-**Rejection Example:** "Funding cost of 0.15% per 8h exceeds max of 0.1%"
+**Rejection Example:** "Projected funding cost 1.20 exceeds limit 0.80 for BTCUSDT (rate=0.000500)"
 
 #### 7. Leverage Limit Check
 
-Ensures requested leverage doesn't exceed configured maximum (default 10x).
+Computes **effective** leverage as total notional ÷ wallet balance (including the proposed entry), and compares it against `min(risk.max_leverage, account.max_leverage)`. This is a portfolio-level check, not a per-order one.
 
-**Rejection Example:** "Requested leverage of 20x exceeds max of 10x"
+**Rejection Example:** "Effective leverage 12.40x exceeds max 10x"
 
 #### 8. Position Concentration Check
 
-Ensures no single position exceeds configured % of portfolio.
+Ensures no single position exceeds `risk.max_position_concentration` of portfolio value.
 
-**Rejection Example:** "Adding this position would concentrate 55% in BTCUSDT, exceeding max 40%"
+**Rejection Example:** "Concentration violation(s): [{'symbol': 'BTCUSDT', 'notional': '5500.00', 'concentration_pct': '55.00', 'limit_pct': '40.00'}]"
 
 #### 9. Correlation Check
 
-Monitors portfolio correlation. Blocks entry if new position would push portfolio correlation above threshold. Uses rolling 24h price correlation.
+Groups open positions by **quote asset** (the last 4 characters of the symbol, e.g. `USDT`), adds the proposed entry to its group, and rejects when any group's total notional exceeds `risk.correlation_threshold_pct` of portfolio value. This is a group-exposure check, not a price-correlation calculation.
 
-**Rejection Example:** "New position would increase portfolio correlation to 0.82, exceeding max 0.7"
+**Rejection Example:** "Correlated exposure violation(s): [{'quote_asset': 'USDT', 'total_notional': '8210.00', 'portfolio_pct': '82.10'}]"
+
+### Runtime Gate Toggling
+
+Gates can be enabled and disabled at runtime:
+
+```python
+from quad.risk.gates import GatePipeline
+
+pipeline = GatePipeline(config)
+pipeline.get_gate_status()                       # {gate_name: bool, ...}
+pipeline.set_gate_enabled("CORRELATION_GATE", False)
+```
+
+`set_gate_enabled()` validates the name against `ALL_GATES` (raising `ValueError`
+on an unknown one), flips the flag, logs `risk_gate_toggled` at `warning` with the
+old and new state, and appends a JSONL audit line to
+`data/risk_gate_changes.jsonl`. Disabled gates are skipped by `_gate_sequence()`,
+so the pipeline silently stops enforcing that check.
+
+This is an operator-level escape hatch, not a user setting: a disabled gate is a
+hole in the safety envelope that nothing re-checks. If it is ever exposed over
+Telegram, the CLI, or the HTTP API, it must stay **operator-only** and behind
+explicit confirmation — never something a bound chat or an unauthenticated
+endpoint can toggle.
 
 ---
 
@@ -186,139 +220,98 @@ For ISOLATED SHORT positions:
 liquidation_price = entry_price × (1 + 1/leverage - maintenance_margin_ratio)
 ```
 
+The gates do **not** recompute this — they read the `liquidation_price` the
+exchange reports for the position, and only derive the distance to it.
+
 ### Margin Alerts
+
+`risk/exposure.py` computes `margin_utilization_pct` (total margin ÷ wallet
+balance) and a per-position `distance_to_liquidation_pct`, both surfaced in the
+exposure report (`quad risk`, Telegram `/risk`). There is no threshold-based
+alert ladder in the code today; the table below is the operational guidance,
+not an implemented escalation.
 
 | Condition | Action |
 |---|---|
 | Margin used > 70% | Warning log, recommend reducing position sizes |
 | Margin used > 85% | Block new entries, liquidate least profitable positions |
 | Margin used > 95% | Emergency: force-close positions with highest liquidation risk |
-| Liquidation distance < 15% | Immediate alert, consider adding margin or reducing position |
+| Liquidation distance below the effective threshold | Immediate alert, consider adding margin or reducing position |
 
 ---
 
 ## Circuit Breakers
 
-Quad implements seven circuit breaker types, each with graduated responses.
+`CircuitBreakerManager` (`src/quad/risk/circuit_breakers.py`) implements **seven**
+breakers, listed in `ALL_BREAKERS`. A single active breaker blocks all new
+trading (`is_trading_allowed()`).
 
-### Breaker 1: P&L Drawdown
+| Constant | Tier | Trigger | Auto-reset |
+|---|---|---|---|
+| `DAILY_LOSS_BREAKER` | 1 | `daily_pnl < -risk.max_daily_loss_usd` | Yes — at the next UTC day |
+| `DRAWDOWN_BREAKER` | 2 | `drawdown_pct > risk.max_drawdown_pct` | Yes — with hysteresis below the limit |
+| `CONSECUTIVE_LOSS_BREAKER` | 3 | Streak ≥ `risk.circuit_breakers.consecutive_losses.max_consecutive` (default 5) | Yes — when the streak breaks |
+| `KILL_SWITCH` | 4 | Manual (`trigger_kill_switch()`) | No — manual reset with a `KILL_RESET_<uuid>` token |
+| `LIQUIDATION_CASCADE_BREAKER` | 1 | A symbol previously within `min_cascade_distance_pct` (default 0.05) of liquidation has vanished | Yes — when no position is near liquidation |
+| `FUNDING_RATE_SPIKE_BREAKER` | 1 | `max_consecutive_spikes` (default 3) consecutive cycles with `abs(rate) > funding_rate_spike_threshold` (default 0.001) on one symbol | Yes — when no symbol spikes |
+| `VOLATILITY_BREAKER` | 2 | 24h mark-price move exceeds `volatility_breaker_atr_pct` (default 0.05) | Yes — when volatility normalises |
 
-Monitors portfolio equity peak-to-trough drawdown.
+Note: there is **no** position-growth breaker. Breaker state (active flags, peak
+value, consecutive-loss streak, funding-spike counts, near-liquidation symbols)
+is persisted and restored across restarts on a best-effort basis.
 
-| Tier | Drawdown | Automated Response |
-|---|---|---|
-| 0 | < 5% | Normal operation |
-| 1 | 5% - 10% | Reduce position sizes by 50%, increase min confidence |
-| 2 | 10% - 15% | Pause new entries, maintain existing positions |
-| 3 | > 15% | Emergency shutdown, close all positions at market |
-
-### Breaker 2: Daily Loss
-
-Triggers when single-day loss exceeds configured threshold.
-
-| Tier | Daily Loss | Response |
-|---|---|---|
-| 1 | 5% - 10% | Block new entries until next trading day |
-| 2 | > 10% | Emergency: force-close all positions, investigate |
-
-### Breaker 3: Consecutive Losses
-
-Triggers after N consecutive losing trades.
-
-| Threshold | Response |
-|---|---|
-| 3 losses | Block new entries, cooldown required |
-| 5 losses | Emergency: close all positions, manual restart |
-
-### Breaker 4: Position Growth
-
-Detects unusual position growth that could concentrate risk.
-
-| Condition | Response |
-|---|---|
-| 50% position growth in 24h | Alert, cap position increases |
-| 100% growth in 24h | Block new entries to this symbol |
-
-### Breaker 5: Liquidation Cascade
-
-Monitors for cascade risk when positions approach liquidation simultaneously.
-
-| Condition | Response |
-|---|---|
-| Any position within 10% of liquidation | Warn, suggest corrective action |
-| Multiple positions within 10% of liquidation | Pause all trading, evaluate forced closes |
-| Any position within 5% of liquidation | Emergency: close position at market |
-
-### Breaker 6: Funding Rate Spike
-
-Monitors funding rate changes that could indicate market stress.
-
-| Condition | Response |
-|---|---|
-| Funding rate change > 0.2% in any 8h period | Warn, avoid new positions with unfavorable rates |
-| Sustained > 0.5% for 24h | Pause entries, evaluate closing funded positions |
-
-### Breaker 7: Volatility
-
-Detects sudden volatility changes via mark price movements.
-
-| Condition | Response |
-|---|---|
-| 50% volatility increase in 24h | Warn, reduce position sizes |
-| 100%+ volatility increase | Trip: pause new entries, tighten stops |
-
-### Circuit Breaker Recovery
-
-| Breaker | Auto-Recoverable? | Recovery |
-|---|---|---|
-| P&L Drawdown (Tier 1-2) | Yes | Cooldown period + condition clear |
-| P&L Drawdown (Tier 3) | No | Manual restart required |
-| Daily Loss | No | Manual reset or next UTC day |
-| Consecutive Losses | No | Manual reset required |
-| Position Growth | Yes | Resets after growth stabilizes |
-| Liquidation Cascade | No | Manual intervention required |
-| Funding Rate Spike | Yes | Normalizes on rate decline |
-| Volatility | Yes | Normalizes on volatility decline |
+`risk.circuit_breakers.drawdown_tiers` (default `[5.0, 10.0, 15.0]`) is validated
+to be strictly increasing and describes the escalating drawdown tiers.
 
 ---
 
 ## Stop-Loss and Take-Profit
 
+The per-position bracket config lives under `risk.per_position_sl` and
+`risk.per_position_tp`. There are no `risk.stop_loss.*` or `risk.take_profit.*`
+keys.
+
 ### Stop-Loss Strategies
 
 | Type | Description | Best For |
 |---|---|---|
-| **Fixed Loss** | Close position if loss exceeds fixed USDT amount | Simple, all strategies |
-| **Trailing Stop** | Adjust stop upward as position becomes profitable | Let winners run |
-| **Volatility-Adjusted** | Widen stops during high volatility, tighten during low | Adaptive sizing |
+| **Fixed** | Stop at a % of trade capital | Simple, all strategies (the only supported `type`) |
+| **Trailing Stop** | Adjust stop upward as position becomes profitable | Not implemented; would require repeated `set_stop_loss` actions |
+| **Volatility-Adjusted** | Widen stops during high volatility | Not implemented |
 
 ### Configuration
 
 ```yaml
 risk:
-  stop_loss:
+  per_position_sl:
     enabled: true
-    type: fixed
-    fixed_loss_per_contract: 100
+    type: "fixed"
+    capital_pct: 30.0     # stop-loss as % of trade capital (default 30)
 ```
 
 ### Take-Profit Strategies
 
 | Type | Description |
 |---|---|
-| **Fixed PnL** | Close when profit reaches target USDT amount |
-| **Percentage** | Close at N% of position value in profit |
-| **Mark Price Target** | Close when mark price reaches target level |
+| **Fixed** | Target at a % of trade capital (the only supported `type`) |
+| **Fixed PnL** | Close at a target USDT amount — express it as `capital_pct` of the configured trade capital |
+| **Mark Price Target** | The bracket triggers on `MARK_PRICE` with `priceProtect` on |
 
 ### Configuration
 
 ```yaml
 risk:
-  take_profit:
+  per_position_tp:
     enabled: true
-    target_pnl_percent: 50
-    target_pnl_fixed: 200
+    type: "fixed"
+    capital_pct: 50.0     # take-profit as % of trade capital (default 50)
 ```
+
+Both are enforced at the last mile by the execution engine: with either bracket
+enabled, an entry that carries no matching bracket price is **refused**
+(`naked_entry_refused`, reason `"missing TP/SL brackets"`). Bracket orders are
+submitted with `risk_checked=True` and are bounded by `risk.max_position_size_usd`;
+see [Execution Safety Semantics](./strategy-development.md#execution-safety-semantics).
 
 ---
 
@@ -330,34 +323,15 @@ The kill switch provides an emergency mechanism to immediately halt all trading.
 
 | # | Condition | Description |
 |---|---|---|
-| 1 | Circuit Breaker Tier 3 (P&L Drawdown) | Portfolio drawdown exceeds 15% |
-| 2 | Manual Command | User runs `quad stop --emergency` or Telegram /kill |
-| 3 | Critical API Errors | Repeated auth failures or invalid responses |
-| 4 | System Error | Unhandled exception, database corruption |
+| 1 | Circuit Breaker Tier 3 (Consecutive Losses) | Losing streak reaches `max_consecutive` |
+| 2 | Manual Command | Telegram `/kill` (requires inline confirmation) or an API/operator call |
+| 3 | Liquidation cascade | A near-liquidation position disappears (liquidated) |
+| 4 | Funding rate spike | Sustained spike escalation on any tracked symbol |
 
-### Shutdown Procedure
+### Reset
 
-When the kill switch is triggered:
-
-```
-Step 1: STOP new decision cycle immediately
-Step 2: Log EMERGENCY state with reason and timestamp
-Step 3: For each open position:
-  3a. Cancel all open orders
-  3b. Submit market order to close position
-  3c. Wait for fill confirmation
-  3d. Log closure with final PnL
-Step 4: Close all WebSocket connections
-Step 5: Set state to EMERGENCY
-Step 6: Log emergency shutdown complete
-```
-
-### Recovery
-
-After emergency shutdown:
-1. Investigate and resolve the root cause
-2. Manually clear the EMERGENCY state
-3. Run `quad start` to resume
+The kill switch never auto-resets. `reset_kill_switch(reset_token)` requires a
+token of the form `KILL_RESET_<uuid hex>`; anything else is rejected and logged.
 
 ---
 
@@ -365,53 +339,70 @@ After emergency shutdown:
 
 ### Leverage-Adjusted Position Sizing
 
-Position sizing in futures considers leverage as a force multiplier for both gains and losses.
-
-### Base Position Size
+Position sizing in futures considers leverage as a force multiplier for both gains
+and losses. `PositionSizer.compute_size()` (`src/quad/risk/sizing.py`) derives
+the full Kelly fraction from the trade history (win rate and average win/loss),
+then walks a fixed cap chain:
 
 ```
-base_size = (portfolio_value × risk_per_trade) / (entry_price × leverage)
+size = kelly_fraction × risk.kelly.fraction × portfolio_value
+size = size / risk.max_leverage                      # leverage multiplies exposure
+size = min(size, risk.max_position_size_pct × portfolio_value)
+size = min(size, risk.max_position_size_usd)
+size = min(size, portfolio_value)
+if size < risk.min_position_size_usd:
+    size = risk.kelly.default_fraction × portfolio_value   # no-history fallback
 ```
 
-Where:
-- `risk_per_trade`: Configurable % of portfolio to risk (default 2%)
-- `entry_price`: Current mark price
-- `leverage`: Configured leverage for this position
-
-### Position Sizing Adjustments
-
-| Factor | Adjustment | Rationale |
-|---|---|---|
-| **Liquidation Distance** | Tight (<20%): -50% size | Higher risk of forced close |
-| **Funding Rate** | Unfavorable (>0.01%): -30% size | Additional holding cost |
-| **Liquidity** | Low volume: -30% size | Slippage and exit difficulty |
-| **Correlation** | High with existing: -20% size | Concentration risk |
-| **Volatility** | High (>50% change): -30% size | Gap risk and stop-loss slippage |
-| **Win Streak** | After N wins: -10% per win (min 50%) | Mean reversion protection |
-| **Loss Streak** | After N losses: -15% per loss (min 25%) | Capital preservation |
+With no trade history yet, Kelly returns 0 and the `default_fraction` fallback
+applies (default 2% of portfolio). `kelly.default_fraction` is a percentage, not
+a fraction.
 
 ### Minimum Position Size Check
 
-All orders are validated against the exchange's minimum notional and quantity requirements for the specific symbol. Orders below min notional are rejected before submission.
+All orders are validated against the exchange's minimum notional and quantity
+requirements for the specific symbol (`LOT_SIZE` / `MIN_NOTIONAL`). A quantity
+below the exchange minimum is floored **up** to satisfy both filters — but if
+that floor-up would push the notional past `risk.max_position_size_usd`, the
+engine rejects the order instead of rounding it over the risk cap.
 
 ---
 
 ## Risk Parameter Configuration
 
-All risk parameters are configured in `config.local.yaml` or via `quad config set`:
+All risk parameters live under the `risk` section of the config. The names below
+match `RiskConfig` in `src/quad/config/schema.py` exactly, so the sample
+validates as-is:
 
 ```yaml
 risk:
-  max_positions: 5
-  max_portfolio_risk: 0.02
-  max_daily_loss: 0.05
-  max_drawdown: 0.15
-  min_distance_to_liquidation_pct: 0.20
+  max_positions: 1
+  max_leverage: 50
+  max_portfolio_risk_pct: 20.0        # max % of portfolio at risk per trade
+  max_daily_loss_usd: 500.0           # absolute daily loss limit in USD
+  max_drawdown_pct: 25.0              # max drawdown from peak, in percent
+  min_distance_to_liquidation_pct: 0.20   # absolute cap on liquidation distance
+  liquidation_distance_fraction: 0.5      # fraction of the 1/leverage distance
   max_funding_rate_cost: 0.001
-  max_leverage: 10
+  funding_rate_periods: 3             # 3 × 8h = 24h projection window
   max_position_concentration: 0.4
-  max_correlation: 0.7
+  correlation_threshold_pct: 60.0     # max % of portfolio per quote-asset group
+  max_position_size_pct: 0.10         # max position as fraction of portfolio
+  max_position_size_usd: 10000.0      # absolute notional cap
+  min_position_size_usd: 10.0
+  per_position_sl:
+    enabled: true
+    type: "fixed"
+    capital_pct: 30.0
+  per_position_tp:
+    enabled: true
+    type: "fixed"
+    capital_pct: 50.0
 ```
+
+Edit `config/config.local.yaml` (or set the matching `QUAD_*` env vars) and
+restart. There is no `quad config set` command; `quad config` is a read-only
+overview of the resolved config.
 
 ---
 

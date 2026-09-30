@@ -2,8 +2,8 @@
 
 Enters LONG when fast EMA crosses above slow EMA with strong trend
 (ADX > threshold). Enters SHORT on the reverse cross (fast EMA below
-slow EMA with ADX > threshold). Uses ATR-based trailing stop for
-exits and sets TP/SL bracket orders on entry.
+slow EMA with ADX > threshold). Exits are owned by fixed attached
+SL/TP brackets set on entry.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ class TrendFollowingStrategy(StrategyBase):
         SHORT: fast EMA < slow EMA AND ADX > threshold
 
     Exit management:
-        ATR-based trailing stop + TP/SL bracket orders on entry.
+        Fixed attached SL/TP brackets on entry.
     """
 
     @staticmethod
@@ -63,12 +63,6 @@ class TrendFollowingStrategy(StrategyBase):
                 type="int",
                 default=14,
                 description="ATR calculation period",
-            ),
-            ParamSpec(
-                name="atr_multiplier_stop",
-                type="float",
-                default=3.0,
-                description="ATR multiplier for trailing stop",
             ),
             ParamSpec(
                 name="atr_default_pct",
@@ -112,9 +106,9 @@ class TrendFollowingStrategy(StrategyBase):
             List of Action objects representing trading decisions.
         """
         symbol = (
-            context.strategy_params.get("symbol", "BTC-USDT-SWAP")
+            context.strategy_params.get("symbol", "BTCUSDT")
             if context.strategy_params
-            else "BTC-USDT-SWAP"
+            else "BTCUSDT"
         )
 
         existing_positions = [
@@ -224,7 +218,14 @@ class TrendFollowingStrategy(StrategyBase):
                 leverage=float(leverage),
                 strategy_name=self.get_name(),
             )
-            actions.extend(tp_sl)
+            # Mandatory protection: fold TP/SL onto the entry action itself
+            # so the execution engine attaches them to the create call.
+            # Never emit a bare entry.
+            for _bracket in tp_sl:
+                if _bracket.type == "set_stop_loss":
+                    actions[0].stop_loss_price = _bracket.stop_loss_price
+                elif _bracket.type == "set_take_profit":
+                    actions[0].take_profit_price = _bracket.take_profit_price
             return actions
 
         # SHORT: fast EMA < slow EMA + strong trend
@@ -259,7 +260,14 @@ class TrendFollowingStrategy(StrategyBase):
                 leverage=float(leverage),
                 strategy_name=self.get_name(),
             )
-            actions.extend(tp_sl)
+            # Mandatory protection: fold TP/SL onto the entry action itself
+            # so the execution engine attaches them to the create call.
+            # Never emit a bare entry.
+            for _bracket in tp_sl:
+                if _bracket.type == "set_stop_loss":
+                    actions[0].stop_loss_price = _bracket.stop_loss_price
+                elif _bracket.type == "set_take_profit":
+                    actions[0].take_profit_price = _bracket.take_profit_price
             return actions
 
         return self.hold_action(
@@ -270,44 +278,13 @@ class TrendFollowingStrategy(StrategyBase):
     async def _manage_position(
         self, position: Any, context: StrategyContext
     ) -> list[Action]:
-        """Manage an existing position with ATR-based trailing stop."""
-        price = self._get_current_price(position.symbol, context)
-        if price is None:
-            return self.hold_action("No price data for position management")
+        """Manage an existing position.
 
-        atr = self._get_atr(position.symbol, context)
-        if atr:
-            stop_distance = atr * float(self.get_param("atr_multiplier_stop", 3.0))
-            side = position.position_side
-            if isinstance(side, str):
-                side = side.lower()
-
-            entry = float(getattr(position, "entry_price", price))
-            if side == "long" and price < entry - stop_distance:
-                return [
-                    Action(
-                        type="close_long",
-                        strategy=self.get_name(),
-                        symbol=position.symbol,
-                        quantity=Decimal(str(position.size)),
-                        reason=f"Trailing stop hit for {position.symbol}",
-                        confidence=float(self.get_param("confidence_default", 0.9)),
-                    )
-                ]
-            elif side == "short" and price > entry + stop_distance:
-                return [
-                    Action(
-                        type="close_short",
-                        strategy=self.get_name(),
-                        symbol=position.symbol,
-                        quantity=Decimal(str(position.size)),
-                        reason=f"Trailing stop hit for {position.symbol}",
-                        confidence=float(self.get_param("confidence_default", 0.9)),
-                    )
-                ]
-
+        Exits are owned by exchange-side attached SL/TP brackets set on
+        entry; the strategy layer never emits exit actions here.
+        """
         return self.hold_action(
-            f"Position {position.symbol} within trailing stop range"
+            f"Position {position.symbol} managed by attached SL/TP brackets"
         )
 
     # ------------------------------------------------------------------
@@ -398,17 +375,18 @@ class TrendFollowingStrategy(StrategyBase):
 
     @staticmethod
     def _compute_adx(candles: list[dict[str, Any]], period: int) -> float | None:
-        """Compute ADX (Average Directional Index) from candles.
+        """Compute ADX (Average Directional Index) using Wilder's RMA.
 
-        Uses a simplified approximation: average of +DI and -DI
-        difference over the period.
+        Uses Wilder's smoothing (Recursive Moving Average) for TR, DM+,
+        DM-, and DX — the standard algorithm from Welles Wilder's
+        "New Concepts in Technical Trading Systems" (1978).
 
         Args:
             candles: List of candle dicts with 'high', 'low', 'close'.
             period: ADX period (default 14).
 
         Returns:
-            ADX value, or None if insufficient data.
+            ADX value rounded to 2 decimal places, or None if insufficient data.
         """
         highs = [float(c.get("high", 0)) for c in candles if c.get("high")]
         lows = [float(c.get("low", 0)) for c in candles if c.get("low")]
@@ -425,16 +403,7 @@ class TrendFollowingStrategy(StrategyBase):
             lc = abs(lows[i] - closes[i - 1])
             tr_values.append(max(hl, hc, lc))
 
-        if len(tr_values) < period:
-            return None
-
-        # Simplified ADX: scaled average directional movement
-        # Use ATR as a proxy for trend strength
-        atr = statistics.mean(tr_values[-period:])
-        if atr <= 0:
-            return None
-
-        # Calculate directional movement
+        # Directional Movement
         dm_plus: list[float] = []
         dm_minus: list[float] = []
         for i in range(1, len(highs)):
@@ -450,20 +419,47 @@ class TrendFollowingStrategy(StrategyBase):
                 dm_plus.append(0)
                 dm_minus.append(0)
 
-        if len(dm_plus) < period:
+        n = len(tr_values)
+        if n < period:
             return None
 
-        avg_dm_plus = statistics.mean(dm_plus[-period:])
-        avg_dm_minus = statistics.mean(dm_minus[-period:])
+        # Wilder's RMA: smooth = (prev_smooth * (period-1) + current) / period
+        # Step 1: Seed with simple mean of first `period` values
+        smoothed_tr = sum(tr_values[:period]) / period
+        smoothed_dm_plus = sum(dm_plus[:period]) / period
+        smoothed_dm_minus = sum(dm_minus[:period]) / period
 
-        di_plus = 100.0 * avg_dm_plus / atr if atr > 0 else 0
-        di_minus = 100.0 * avg_dm_minus / atr if atr > 0 else 0
+        # Step 2: Compute DX series for ADX smoothing
+        dx_values: list[float] = []
+        for i in range(period, n):
+            if i == period:
+                pass  # seeds already set
+            else:
+                smoothed_tr = (smoothed_tr * (period - 1) + tr_values[i]) / period
+                smoothed_dm_plus = (
+                    smoothed_dm_plus * (period - 1) + dm_plus[i]
+                ) / period
+                smoothed_dm_minus = (
+                    smoothed_dm_minus * (period - 1) + dm_minus[i]
+                ) / period
 
-        dx = (
-            100.0 * abs(di_plus - di_minus) / (di_plus + di_minus)
-            if (di_plus + di_minus) > 0
-            else 0
-        )
-        adx = statistics.mean([dx] * 1)  # Simplified: single-period ADX
+            if smoothed_tr <= 0:
+                dx_values.append(0.0)
+                continue
+
+            di_plus = 100.0 * smoothed_dm_plus / smoothed_tr
+            di_minus = 100.0 * smoothed_dm_minus / smoothed_tr
+            di_sum = di_plus + di_minus
+
+            dx = 100.0 * abs(di_plus - di_minus) / di_sum if di_sum > 0 else 0.0
+            dx_values.append(dx)
+
+        if not dx_values:
+            return None
+
+        # Step 3: Smooth DX with Wilder's RMA to produce ADX
+        adx = sum(dx_values[:period]) / period
+        for dx_val in dx_values[period:]:
+            adx = (adx * (period - 1) + dx_val) / period
 
         return round(adx, 2)

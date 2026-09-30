@@ -1,19 +1,26 @@
-"""Centralized WebSocket connection manager for OKX V5 futures market data streams.
+"""Centralized WebSocket connection manager for Bybit V5 market data streams.
 
-Provides ``WebSocketManager`` that manages subscriptions to OKX V5 channels,
-handles automatic reconnection with exponential backoff, and routes incoming
-messages to registered callbacks.
+Provides ``WebSocketManager`` that manages subscriptions to Bybit V5 public
+topics, handles automatic reconnection with exponential backoff, and routes
+incoming messages to registered callbacks.
 
-Supports OKX V5 public/private WebSocket streams including:
-  - ``tickers`` — 24h ticker data for all symbols
-  - ``mark-price`` — mark price + funding rate updates
-  - ``books5`` — top 5 order book levels (best bid/ask)
-  - ``candle{interval}`` — kline/candlestick updates
-  - ``liquidation-orders`` — forced/liquidation order events
-  - ``trades`` — public trade feed
+Logical channel names (stable interface for :class:`MarketDataEngine`) map
+to Bybit V5 topics as follows::
 
-Uses ``aiohttp`` for WebSocket connections. Supports multiplexed subscriptions
-(multiple channels per connection) as recommended by OKX V5 API.
+    tickers            -> tickers.{symbol}        (last/mark/funding)
+    mark-price         -> tickers.{symbol}        (same feed: markPrice + fundingRate)
+    books5             -> orderbook.25.{symbol}   (top-25 bids/asks snapshot+delta)
+    candle{interval}   -> kline.{bybit}.{symbol}  (1m->1, 5m->5, 15m->15, 1H->60, 4H->240, 1D->D)
+    liquidation-orders -> liquidation.{symbol}
+    trades             -> publicTrade.{symbol}
+
+Bybit V5 messages have the format::
+
+    {"topic": "tickers.BTCUSDT", "type": "snapshot", "data": {...}, "ts": ...}
+
+Uses ``aiohttp`` for the connection (single multiplexed connection, up to
+10 topics per subscribe message).  Application-level ``{"op": "ping"}``
+keepalives are sent every ``heartbeat_interval`` seconds (default 20).
 """
 
 from __future__ import annotations
@@ -37,10 +44,9 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# OKX V5 channel constants
+# Logical channel constants (stable interface — Bybit topics derived below)
 # ---------------------------------------------------------------------------
 
-# Channel names used by OKX V5 WebSocket API
 CHANNEL_TICKERS = "tickers"
 CHANNEL_MARK_PRICE = "mark-price"
 CHANNEL_BOOKS5 = "books5"
@@ -49,8 +55,69 @@ CHANNEL_CANDLE = "candle"
 CHANNEL_LIQUIDATION_ORDERS = "liquidation-orders"
 CHANNEL_TRADES = "trades"
 
-# Default heartbeat interval (OKX requires ping every 30 seconds)
-DEFAULT_HEARTBEAT_INTERVAL = 30.0
+# Bybit caps public subscribe messages at 10 topics each.
+_MAX_TOPICS_PER_MESSAGE = 10
+
+# Default application-level ping interval (Bybit drops idle connections).
+DEFAULT_HEARTBEAT_INTERVAL = 20.0
+
+# Default public-stream endpoint (Bybit V5 linear).
+DEFAULT_WS_URL = "wss://stream.bybit.com/v5/public"
+
+# Friendly candle suffix -> Bybit kline interval.
+_CANDLE_INTERVAL_MAP = {
+    "1m": "1",
+    "3m": "3",
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",
+    "1H": "60",
+    "2H": "120",
+    "4H": "240",
+    "6H": "360",
+    "12H": "720",
+    "1D": "D",
+    "1W": "W",
+    "1M": "M",
+}
+
+
+def channel_to_topic(channel: str, symbol: str) -> str:
+    """Translate a logical (channel, symbol) pair to a Bybit V5 topic."""
+    if channel in (CHANNEL_TICKERS, CHANNEL_MARK_PRICE):
+        return f"tickers.{symbol}"
+    if channel in (CHANNEL_BOOKS5, CHANNEL_BOOKS):
+        return f"orderbook.25.{symbol}"
+    if channel.startswith(CHANNEL_CANDLE):
+        suffix = channel[len(CHANNEL_CANDLE) :] or "1m"
+        interval = _CANDLE_INTERVAL_MAP.get(
+            suffix, _CANDLE_INTERVAL_MAP.get(suffix.upper(), "1")
+        )
+        return f"kline.{interval}.{symbol}"
+    if channel == CHANNEL_LIQUIDATION_ORDERS:
+        return f"liquidation.{symbol}"
+    if channel == CHANNEL_TRADES:
+        return f"publicTrade.{symbol}"
+    # Unknown channel: pass through as a raw topic prefix.
+    return f"{channel}.{symbol}"
+
+
+def topic_to_channel_symbol(topic: str) -> tuple[str, str]:
+    """Best-effort inverse of :func:`channel_to_topic` for dispatch."""
+    parts = topic.split(".")
+    symbol = parts[-1] if parts else ""
+    prefix = ".".join(parts[:-1])
+    if prefix == "tickers":
+        return CHANNEL_TICKERS, symbol
+    if prefix.startswith("orderbook"):
+        return CHANNEL_BOOKS5, symbol
+    if prefix.startswith("kline"):
+        return CHANNEL_CANDLE, symbol
+    if prefix == "liquidation":
+        return CHANNEL_LIQUIDATION_ORDERS, symbol
+    if prefix == "publicTrade":
+        return CHANNEL_TRADES, symbol
+    return prefix, symbol
 
 
 # ---------------------------------------------------------------------------
@@ -66,13 +133,13 @@ class _Subscription:
     """Unique subscription identifier (uuid4)."""
 
     channel: str
-    """OKX V5 channel name (e.g. ``"tickers"``)."""
+    """Logical channel name (e.g. ``"tickers"``)."""
 
     inst_id: str
-    """OKX V5 instrument ID (e.g. ``"BTC-USDT-SWAP"`` or ``"*"``)."""
+    """Bybit symbol (e.g. ``"BTCUSDT"``)."""
 
     handler: Callable[[dict], Awaitable[None]]
-    """Async callback invoked with each parsed JSON message."""
+    """Async callback invoked with each normalized message."""
 
     status: Literal["active", "paused", "error"] = "active"
     """Current subscription status."""
@@ -93,18 +160,19 @@ class _Subscription:
 
 
 class WebSocketManager:
-    """Manages WebSocket subscriptions to OKX V5 market data channels.
+    """Manages WebSocket subscriptions to Bybit V5 market data topics.
 
-    * Accepts channel subscriptions with instrument IDs.
+    * Accepts logical channel subscriptions with Bybit symbols.
     * Handles reconnection with exponential backoff + jitter.
-    * Routes received messages to registered handlers by channel.
-    * Supports multiplexed subscriptions (multiple channels per connection).
+    * Routes received messages to registered handlers by topic.
+    * Single multiplexed public connection (private account streams live
+      in the exchange adapter, not here).
 
     Usage::
 
         mgr = WebSocketManager(exchange_adapter)
         await mgr.start()
-        sub_id = await mgr.subscribe("tickers", "BTC-USDT-SWAP", my_handler)
+        sub_id = await mgr.subscribe("tickers", "BTCUSDT", my_handler)
         ...
         await mgr.unsubscribe(sub_id)
         await mgr.stop()
@@ -125,16 +193,25 @@ class WebSocketManager:
             Optional configuration dict.  Recognised keys:
 
             * ``ws_url`` — Override the WebSocket URL.
-              Defaults to ``wss://ws.okx.com:8443/ws/v5/public``.
+              Defaults to ``wss://stream.bybit.com/v5/public``.
             * ``ws_heartbeat_interval`` — Seconds between keepalive pings.
         """
         self._exchange = exchange_adapter
         self._config = config or {}
-        self._market_data_config = self._config["market_data"]
-        self._ws_config = self._market_data_config["websocket"]
+        # Fail-soft config access: a partial config (or a test double) must
+        # not raise KeyError at construction time.  Every lookup below has a
+        # working default.
+        self._market_data_config = self._config.get("market_data") or {}
+        self._ws_config = self._market_data_config.get("websocket") or {}
 
         # WebSocket endpoint
-        self._ws_url = self._ws_config["url"]
+        self._ws_url = self._ws_config.get("url") or DEFAULT_WS_URL
+        self._heartbeat_interval = float(
+            self._config.get("ws_heartbeat_interval")
+            or self._ws_config.get(
+                "heartbeat_interval_seconds", DEFAULT_HEARTBEAT_INTERVAL
+            )
+        )
 
         self._log = logger.bind(ws_url=self._ws_url)
 
@@ -142,7 +219,7 @@ class WebSocketManager:
         self._subscriptions: dict[str, _Subscription] = {}
         # subscription_id -> subscription
 
-        # Connection management (multiplexed: one connection for all channels)
+        # Connection management (multiplexed: one connection for all topics)
         self._connection: aiohttp.ClientWebSocketResponse[bool] | None = None
         self._connection_task: asyncio.Task[None] | None = None
 
@@ -151,8 +228,15 @@ class WebSocketManager:
 
         self._running = False
         self._lock = asyncio.Lock()
+        self._last_pong: float = 0
 
-        # Pending subscribe/unsubscribe operations
+        # Reconnect limit
+        self._reconnect_count = 0
+        self._max_reconnects = int(
+            self._config.get("market_data", {}).get("ws_max_reconnects", 100)
+        )
+
+        # Pending subscribe/unsubscribe operations (Bybit topic strings)
         self._pending_ops: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     # ------------------------------------------------------------------
@@ -163,7 +247,7 @@ class WebSocketManager:
         """Begin processing all active subscriptions.
 
         Creates the shared HTTP session and starts a single multiplexed
-        connection task for all channels.
+        connection task for all topics.
         """
         if self._running:
             self._log.warning("already_running")
@@ -177,6 +261,38 @@ class WebSocketManager:
         self._connection_task = asyncio.create_task(
             self._run_connection(),
         )
+
+    async def _cancel_connection_task(self, timeout: float = 5.0) -> None:
+        """Cancel and **await** the connection task.
+
+        A bare ``task.cancel()`` leaves the task pending: shutdown logs
+        "Task was destroyed but it is pending", the shared ``ClientSession``
+        can be closed underneath an in-flight ``ws_connect``, and
+        :meth:`resubscribe_all` can start a second ``_run_connection`` while
+        the first is still unwinding (duplicate subscriptions, double
+        dispatch).  Awaiting the cancellation makes termination explicit.
+        """
+        task = self._connection_task
+        self._connection_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.CancelledError:
+            # The task itself was cancelled — this is the expected outcome.
+            if not task.cancelled() and task.exception() is not None:
+                self._log.debug(
+                    "ws_connection_task_cancelled_with_error",
+                    error=str(task.exception()),
+                )
+        except (TimeoutError, asyncio.TimeoutError):
+            self._log.warning(
+                "ws_connection_task_cancel_timeout",
+                timeout=timeout,
+            )
+        except Exception as exc:
+            self._log.debug("ws_connection_task_cancel_error", error=str(exc))
 
     async def stop(self) -> None:
         """Gracefully stop all connections and cancel background tasks.
@@ -198,10 +314,8 @@ class WebSocketManager:
                 self._log.exception("ws_close_error")
             self._connection = None
 
-        # Cancel the connection task
-        if self._connection_task is not None:
-            self._connection_task.cancel()
-            self._connection_task = None
+        # Cancel the connection task (and wait for it to actually finish)
+        await self._cancel_connection_task()
 
         # Close shared HTTP session
         if self._session is not None:
@@ -220,16 +334,19 @@ class WebSocketManager:
         inst_id: str,
         handler: Callable[[dict], Awaitable[None]],
     ) -> str:
-        """Subscribe to an OKX V5 channel and register a callback.
+        """Subscribe to a logical channel and register a callback.
 
         Parameters
         ----------
         channel:
-            OKX V5 channel name (e.g. ``"tickers"``).
+            Logical channel name (``"tickers"``, ``"mark-price"``,
+            ``"books5"``, ``"candle1m"``, ...).
         inst_id:
-            OKX V5 instrument ID (e.g. ``"BTC-USDT-SWAP"`` or ``"*"``).
+            Bybit symbol (e.g. ``"BTCUSDT"``).
         handler:
-            Async callback invoked with each decoded JSON message.
+            Async callback invoked with each normalized message
+            (``{"arg", "action", "data", "ts"}`` with Bybit field names
+            inside ``data`` items).
 
         Returns
         -------
@@ -248,11 +365,13 @@ class WebSocketManager:
         async with self._lock:
             self._subscriptions[sub_id] = sub
 
-        # Queue a subscribe operation
-        await self._pending_ops.put({
-            "op": "subscribe",
-            "args": [{"channel": channel, "instId": inst_id}],
-        })
+        # Queue a subscribe operation (Bybit topic string)
+        await self._pending_ops.put(
+            {
+                "op": "subscribe",
+                "args": [channel_to_topic(channel, inst_id)],
+            }
+        )
 
         self._log.debug(
             "subscribed",
@@ -282,10 +401,12 @@ class WebSocketManager:
                 return False
 
         # Queue an unsubscribe operation
-        await self._pending_ops.put({
-            "op": "unsubscribe",
-            "args": [{"channel": sub.channel, "instId": sub.inst_id}],
-        })
+        await self._pending_ops.put(
+            {
+                "op": "unsubscribe",
+                "args": [channel_to_topic(sub.channel, sub.inst_id)],
+            }
+        )
 
         self._log.debug(
             "unsubscribed",
@@ -310,19 +431,18 @@ class WebSocketManager:
                     pass
                 self._connection = None
 
-            # Cancel existing task
-            if self._connection_task is not None:
-                self._connection_task.cancel()
-                self._connection_task = None
+            # Cancel existing task and WAIT for it to finish, so the old
+            # _run_connection cannot overlap with the new one.
+            await self._cancel_connection_task()
 
             # Reset reconnect counts
             for sub in self._subscriptions.values():
                 sub.reconnect_count = 0
 
-        # Restart connection task
-        self._connection_task = asyncio.create_task(
-            self._run_connection(),
-        )
+            # Restart connection task
+            self._connection_task = asyncio.create_task(
+                self._run_connection(),
+            )
 
         self._log.info("resubscribed_all")
 
@@ -380,11 +500,15 @@ class WebSocketManager:
         backoff = ws_base_backoff
 
         while self._running:
-            # Check whether there are any subscriptions
+            # With no subscriptions yet there is nothing to read, but the
+            # task must stay alive: future subscribe() calls queue pending
+            # ops that only this loop drains.  Never return early here.
             async with self._lock:
-                if not self._subscriptions:
-                    self._log.debug("no_subscriptions")
-                    return
+                has_subs = bool(self._subscriptions)
+            if not has_subs:
+                self._log.debug("no_subscriptions_waiting")
+                await asyncio.sleep(1.0)
+                continue
 
             try:
                 await self._connect_and_read()
@@ -403,6 +527,14 @@ class WebSocketManager:
                 break
 
             # Update reconnect counts
+            self._reconnect_count += 1
+            if self._reconnect_count > self._max_reconnects:
+                self._log.critical(
+                    "ws_max_reconnects_exceeded", count=self._reconnect_count
+                )
+                self._running = False
+                break
+
             async with self._lock:
                 for sub in self._subscriptions.values():
                     sub.reconnect_count += 1
@@ -416,9 +548,9 @@ class WebSocketManager:
             )
 
     async def _connect_and_read(self) -> None:
-        """Connect to OKX V5 WebSocket and read messages.
+        """Connect to Bybit V5 WebSocket and read messages.
 
-        Opens a WebSocket connection, subscribes to all active channels,
+        Opens a WebSocket connection, subscribes to all active topics,
         and forwards incoming messages to registered handlers until
         the connection is closed or cancelled.
         """
@@ -426,19 +558,29 @@ class WebSocketManager:
         if session is None:
             raise RuntimeError("WebSocketManager not started")
 
-        async with session.ws_connect(
-            self._ws_url,
-            heartbeat=DEFAULT_HEARTBEAT_INTERVAL,
-        ) as ws:
+        async with session.ws_connect(self._ws_url) as ws:
             self._connection = ws
             self._log.info("ws_connected", url=self._ws_url)
 
-            # Subscribe to all active channels
-            await self._subscribe_all_channels(ws)
+            # Subscribe to all active topics
+            await self._subscribe_all_topics(ws)
+
+            last_ping = time.monotonic()
+            last_pong = time.monotonic()
 
             # Process pending operations and read messages
             try:
                 while self._running:
+                    # Application-level ping (Bybit drops idle connections)
+                    now = time.monotonic()
+                    if now - last_ping >= self._heartbeat_interval:
+                        try:
+                            await ws.send_str(json.dumps({"op": "ping"}))
+                        except Exception:
+                            self._log.exception("ws_ping_failed")
+                            break
+                        last_ping = now
+
                     # Process pending subscribe/unsubscribe operations
                     await self._process_pending_ops(ws)
 
@@ -453,48 +595,74 @@ class WebSocketManager:
                     elif msg.type == 0x8:  # Close
                         self._log.info("ws_closed", code=ws.close_code)
                         break
-                    elif msg.type == 0x9:  # Ping
-                        # OKX sends "ping" text, respond with "pong"
-                        if msg.data == "ping":
-                            await ws.send_str("pong")
                     elif msg.type == 0xA:  # Pong
-                        pass
+                        last_pong = time.monotonic()
+                        self._reconnect_count = 0
                     elif msg.type == 0x2:  # Binary (unexpected)
                         self._log.warning("ws_unexpected_binary")
+
+                    # Dead connection check: no pong received after 3x heartbeat interval
+                    if now - last_pong > self._heartbeat_interval * 3:
+                        self._log.warning(
+                            "ws_dead_connection",
+                            since_last_pong=round(now - last_pong, 2),
+                        )
+                        break
 
             finally:
                 self._connection = None
 
-    async def _subscribe_all_channels(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        """Subscribe to all active channels on the given connection."""
-        async with self._lock:
-            # Group subscriptions by channel+instId to avoid duplicates
-            args = []
-            seen = set()
-            for sub in self._subscriptions.values():
-                key = (sub.channel, sub.inst_id)
-                if key not in seen:
-                    seen.add(key)
-                    args.append({"channel": sub.channel, "instId": sub.inst_id})
-
-        if not args:
-            return
-
-        # OKX allows up to 300 args per subscribe message
-        for i in range(0, len(args), 300):
-            batch = args[i:i + 300]
-            payload = json.dumps({
-                "op": "subscribe",
-                "args": batch,
-                "id": str(uuid.uuid4()),
-            })
+    async def _send_topic_ops(
+        self, ws: aiohttp.ClientWebSocketResponse[bool], op: str, topics: list[str]
+    ) -> None:
+        """Send (un)subscribe ops, batched to Bybit's per-message topic cap."""
+        for i in range(0, len(topics), _MAX_TOPICS_PER_MESSAGE):
+            batch = topics[i : i + _MAX_TOPICS_PER_MESSAGE]
+            payload = json.dumps({"op": op, "args": batch})
             try:
                 await ws.send_str(payload)
-                self._log.debug("subscribe_batch_sent", count=len(batch))
+                self._log.debug("topic_op_sent", op=op, count=len(batch))
             except Exception:
-                self._log.exception("subscribe_batch_failed")
+                self._log.exception("topic_op_failed", op=op)
 
-    async def _process_pending_ops(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+    async def _subscribe_all_topics(
+        self, ws: aiohttp.ClientWebSocketResponse[bool]
+    ) -> None:
+        """Subscribe to all active topics on the given connection."""
+        async with self._lock:
+            # Deduplicate topics (mark-price shares the tickers feed)
+            topics = sorted(
+                {
+                    channel_to_topic(sub.channel, sub.inst_id)
+                    for sub in self._subscriptions.values()
+                }
+            )
+
+        if not topics:
+            return
+        await self._send_topic_ops(ws, "subscribe", topics)
+        # The full snapshot above already covers every active topic, so
+        # queued subscribe ops for those topics are redundant — drop them
+        # (keeping unsubscribes and topics not in the snapshot).
+        sent = set(topics)
+        kept: list[dict[str, Any]] = []
+        while not self._pending_ops.empty():
+            try:
+                op = self._pending_ops.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if op.get("op") == "subscribe":
+                remaining = [t for t in op.get("args", []) if t not in sent]
+                if remaining:
+                    kept.append({"op": "subscribe", "args": remaining})
+            else:
+                kept.append(op)
+        for op in kept:
+            self._pending_ops.put_nowait(op)
+
+    async def _process_pending_ops(
+        self, ws: aiohttp.ClientWebSocketResponse[bool]
+    ) -> None:
         """Process pending subscribe/unsubscribe operations."""
         ops = []
         while not self._pending_ops.empty():
@@ -515,47 +683,23 @@ class WebSocketManager:
             elif op["op"] == "unsubscribe":
                 unsubscribes.extend(op["args"])
 
-        # Send subscribe batch
         if subscribes:
-            # OKX allows up to 300 args per message
-            for i in range(0, len(subscribes), 300):
-                batch = subscribes[i:i + 300]
-                payload = json.dumps({
-                    "op": "subscribe",
-                    "args": batch,
-                    "id": str(uuid.uuid4()),
-                })
-                try:
-                    await ws.send_str(payload)
-                    self._log.debug("subscribe_sent", count=len(batch))
-                except Exception:
-                    self._log.exception("subscribe_send_failed")
-
-        # Send unsubscribe batch
+            await self._send_topic_ops(ws, "subscribe", subscribes)
         if unsubscribes:
-            for i in range(0, len(unsubscribes), 300):
-                batch = unsubscribes[i:i + 300]
-                payload = json.dumps({
-                    "op": "unsubscribe",
-                    "args": batch,
-                    "id": str(uuid.uuid4()),
-                })
-                try:
-                    await ws.send_str(payload)
-                    self._log.debug("unsubscribe_sent", count=len(batch))
-                except Exception:
-                    self._log.exception("unsubscribe_send_failed")
+            await self._send_topic_ops(ws, "unsubscribe", unsubscribes)
 
     async def _handle_message(self, raw: str) -> None:
-        """Parse a JSON message and dispatch to registered handlers.
+        """Parse a Bybit V5 message and dispatch to registered handlers.
 
-        OKX V5 messages have the format:
-        {
-            "arg": {"channel": "...", "instId": "..."},
-            "action": "subscribe"|"unsubscribe"|"update",
-            "data": [...],
-            "ts": "..."
-        }
+        Bybit V5 data messages have the format::
+
+            {"topic": "tickers.BTCUSDT", "type": "snapshot",
+             "data": {...} | [...], "ts": ...}
+
+        Control messages (``{"success": ..., "op": "subscribe"}``,
+        ``{"op": "pong"}``) are logged and dropped.  Data payloads are
+        normalized to ``{"arg", "action", "data", "ts"}`` with ``data``
+        always a list of Bybit-field dicts.
         """
         try:
             parsed: dict[str, Any] = json.loads(raw)
@@ -566,57 +710,54 @@ class WebSocketManager:
             )
             return
 
-        # Handle pong response
-        if raw == "pong":
+        # Control messages
+        if parsed.get("op") in ("pong", "ping"):
+            return
+        if "success" in parsed:
+            if not parsed.get("success"):
+                self._log.error(
+                    "ws_op_failed",
+                    op=parsed.get("op"),
+                    ret_msg=parsed.get("ret_msg", ""),
+                )
+            else:
+                self._log.debug("ws_op_confirmed", op=parsed.get("op"))
             return
 
-        # Handle subscribe/unsubscribe confirmation
-        action = parsed.get("action")
-        if action in ("subscribe", "unsubscribe"):
-            arg = parsed.get("arg", {})
-            self._log.debug(
-                "ws_action_confirmed",
-                action=action,
-                channel=arg.get("channel"),
-                inst_id=arg.get("instId"),
-            )
+        topic = parsed.get("topic", "")
+        if not topic:
+            self._log.debug("ws_no_topic", raw_preview=raw[:200])
             return
 
-        # Handle error responses
-        if "errorCode" in parsed:
-            self._log.error(
-                "ws_error",
-                error_code=parsed["errorCode"],
-                error_msg=parsed.get("errorMsg", ""),
-            )
-            return
-
-        # Handle data messages
-        arg = parsed.get("arg", {})
-        channel = arg.get("channel", "")
-        inst_id = arg.get("instId", "")
+        channel, symbol = topic_to_channel_symbol(topic)
         data = parsed.get("data", [])
-
-        if not channel:
-            self._log.debug("ws_no_channel", raw_preview=raw[:200])
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
             return
 
         # Find matching subscriptions
         async with self._lock:
             matching_subs = [
-                sub for sub in self._subscriptions.values()
-                if sub.channel == channel
-                and (sub.inst_id == "*" or sub.inst_id == inst_id)
+                sub
+                for sub in self._subscriptions.values()
+                if sub.inst_id == symbol
+                and (
+                    sub.channel == channel
+                    # mark-price shares the tickers feed
+                    or (
+                        sub.channel == CHANNEL_MARK_PRICE and channel == CHANNEL_TICKERS
+                    )
+                )
                 and sub.status == "active"
             ]
 
         now = time.time()
         for sub in matching_subs:
             try:
-                # Create a message dict with the standard OKX V5 format
                 message = {
-                    "arg": arg,
-                    "action": action or "update",
+                    "arg": {"channel": sub.channel, "symbol": symbol, "topic": topic},
+                    "action": parsed.get("type", "snapshot"),
                     "data": data,
                     "ts": parsed.get("ts", ""),
                 }
@@ -625,7 +766,7 @@ class WebSocketManager:
             except Exception:
                 self._log.exception(
                     "handler_error",
-                    channel=channel,
-                    inst_id=inst_id,
+                    channel=sub.channel,
+                    inst_id=symbol,
                     sub_id=sub.id,
                 )
